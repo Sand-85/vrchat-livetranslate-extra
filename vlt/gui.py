@@ -322,13 +322,19 @@ class TranslationGUI:
             want = max(940, need)
             screen = int(self._root.winfo_screenwidth() or 0)
             if screen:
-                want = min(want, max(760, screen - 80))
+                # 只留窗口边框的余量：小屏（CI/1024px）也该尽量把内容装下，
+                # 别为了「留白」把右侧控件裁掉 —— 裁掉的正是按钮和下拉框。
+                want = min(want, max(760, screen - 16))
             height = max(600, self._root.winfo_reqheight())
             self._root.geometry(f"{want}x{height}")
             self._root.minsize(min(want, need), 460)
             if want > 940:
                 print(f"[ui] 界面语言 {i18n.current_language()}：文案较宽，窗口按需求开到 "
                       f"{want}px（基准 940 / 需求 {need}）", flush=True)
+            if need > want:
+                print(f"[ui] ⚠️ 屏幕只有 {screen}px，内容需要 {need}px 装不下，"
+                      f"窗口开到 {want}px（右侧可能被裁，可自行拉宽或换更短的语言）",
+                      flush=True)
         except Exception as exc:  # noqa: BLE001 — 尺寸算错不该拦住启动
             print(f"[ui] ⚠️ 窗口宽度自适应失败，保持默认：{type(exc).__name__}: {exc}",
                   flush=True)
