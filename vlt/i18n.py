@@ -58,18 +58,18 @@ def detect_system_language() -> str:
     """读 Windows 用户默认 UI 语言（`GetUserDefaultUILanguage`）。
 
     返回 LANGID（如 0x0804=zh-CN、0x0409=en-US），低 10 位是主语言 ID。
-    三条分界（都写死在 `_PRIMARY_LANG` 与下面的注释里，别改口径）：
+    两条分界（都写死在 `_PRIMARY_LANG` 与下面的注释里，别改口径）：
 
     - **支持的语言**：0x04→zh、0x09→en、0x11→ja、0x12→ko、0x19→ru；
-    - **已知但不在支持列表里的语言**（0x07 德语、0x0c 法语、0x0a 西班牙语…）→ **"en"**：
-      这些用户按英文接待远比按中文合理，也不至于看到方块或空白；
-    - **取不到值 / 非 Windows / 任何异常** → **"zh"**：保持老用户（中文环境）行为不变。
+    - **其它一切情况**（0x07 德语、0x0c 法语、0x0a 西班牙语… 以及**取不到值/异常/非 Windows**）
+      → **"en"**：用户口径「不是支持的语言就显示英文」—— 外国用户按英文接待远比按中文合理；
+      中文环境的 LANGID 恒为 0x04，检测正常时绝不会掉进这条兜底。
     """
     try:
         langid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
         primary = int(langid) & 0x3FF
-    except Exception:  # noqa: BLE001 — 非 Windows / 任何意外都按 zh
-        return "zh"
+    except Exception:  # noqa: BLE001 — 非 Windows / 任何意外：不认识 → 英文
+        return "en"
     return _PRIMARY_LANG.get(primary, "en")
 
 

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import ast
+import collections
 import contextlib
 import io
 import os
@@ -136,6 +137,20 @@ def test_catalog_completeness() -> None:
     # 各词表条数一致（多的那些说明词表里留了没人用的 key，也是漂移）
     sizes = {code: len(cat) for code, cat in catalogs.items()}
     assert len(set(sizes.values())) == 1, f"各语言词表条数不一致：{sizes}"
+    # ★ 重复 key 守卫：同一个 key 写两遍会**静默覆盖**（本次踩过：「自动检测」本来就在
+    #   词表里，我新加的一行把老翻译挡掉了 —— Python 不报错、条数还对得上，肉眼也难看出）
+    for code in catalogs:
+        src = (ROOT / "vlt" / "locales" / f"{code}.py").read_text(encoding="utf-8")
+        keys: list[str] = []
+        for node in ast.parse(src).body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
+            if not any(getattr(x, "id", "") == "STRINGS" for x in targets):
+                continue
+            keys += [k.value for k in node.value.keys]
+        dup = [k for k, c in collections.Counter(keys).items() if c > 1]
+        assert not dup, f"{code}.py 词表里有重复 key（后者会静默覆盖前者）：{dup}"
     print(f"  ✓ 词表完整性：{used} 处 t() 字面量在 {len(catalogs)} 套词表里全有词条"
           f"（各 {sizes['en']} 条）")
 
@@ -183,7 +198,8 @@ def test_normalize_language() -> None:
 
 def test_detect_system_language_stubbed() -> None:
     """detect_system_language 打桩：支持的五种语言各归各的；
-    **已知但未支持**的语言（德语/法语）→ en；异常 → zh。"""
+    **其它一律 en**（德语/法语等已知但未支持的语言，以及检测失败/异常）——
+    用户口径「不是支持的语言就显示英文」。"""
     from vlt import i18n
 
     class _K:
@@ -214,13 +230,13 @@ def test_detect_system_language_stubbed() -> None:
             got = i18n.detect_system_language()
             assert got == want, f"langid={langid:#06x} → {got!r}，期望 {want!r}"
         _K.boom = OSError("no such api")
-        assert i18n.detect_system_language() == "zh", "异常时必须回落 zh"
+        assert i18n.detect_system_language() == "en", "异常时必须回落 en（不认识 → 英文）"
         _K.boom = None
     finally:
         if orig is not None:
             i18n.ctypes.windll = orig
     print("  ✓ detect_system_language：zh/en/ja/ko/ru 各归各的；"
-          "de/fr→en；异常→zh（已打桩）")
+          "de/fr 与异常一律 → en（已打桩）")
 
 
 def test_available_languages_order() -> None:
@@ -281,7 +297,12 @@ def test_all_ui_languages_window_guard() -> None:
     - `ja`：不做汉字断言（日语本来就用汉字），但**假名比例必须 ≥ 50%** ——
       整片中文没翻译时这个比例会掉到 0，一样能抓住。
 
-    下拉框的「值」不在 text 属性里（界面语言母语名/语言对名），不在扫描面内。
+    下拉框的「值」单独扫一遍：方向下拉的语言名以前整片是中文（机器守卫只看 text 属性，
+    扫不到），现在会翻译，所以必须一起守。界面语言下拉的母语名（简体中文/한국어…）按设计
+    永远用母语写法，不参与判断。
+
+    另加一条**固定字符宽**规则：Label/Button 写了 `width=N` 时文案超过 N 字就会被裁 ——
+    微调面板曾固定 width=6，英文 "Curvature"→"Curvatu"、俄语 "Позиция X/Y/Z" 全变 "Позиц."。
     """
     from vlt import i18n
 
@@ -315,6 +336,56 @@ def test_all_ui_languages_window_guard() -> None:
                 reports.append(f"{lang}:{len(texts)}条(假名{ratio:.0%})")
             else:
                 reports.append(f"{lang}:{len(texts)}条")
+
+            # ② 方向下拉的候选项 + 当前选中项（不在 text 属性里，单独扫）
+            combo_vals: list[str] = []
+            for combo in (gui._source_combo, gui._target_combo, gui._anchor_combo):
+                combo_vals += [str(v) for v in combo.cget("values")] + [str(combo.get())]
+            bad_vals: list[str] = []
+            for x in combo_vals:
+                if x not in texts:      # 界面语言下拉的母语名不在其中，这里的都是待翻译项
+                    if lang in ("en", "ko", "ru") and CJK_RE.search(x):
+                        bad_vals.append(f"[汉字] {x!r}")
+                    if lang in ("en", "ja", "ru") and HANGUL_RE.search(x):
+                        bad_vals.append(f"[谚文] {x!r}")
+                    if lang in ("en", "ko", "ru") and KANA_RE.search(x):
+                        bad_vals.append(f"[假名] {x!r}")
+            assert not bad_vals, (f"{lang} 下拉选项出现不该有的书写系统（{len(bad_vals)} 条）：\n"
+                                  + "\n".join(f"  {b}" for b in bad_vals[:15]))
+
+            # ③ 固定字符宽的控件：文案比 width 长就会被裁
+            narrow: list[str] = []
+
+            def _walk_fixed(win) -> None:
+                for w in win.winfo_children():
+                    try:
+                        keys = w.keys()
+                    except Exception:
+                        continue
+                    if ("text" in keys and "width" in keys
+                            and w.winfo_class() in ("TLabel", "TButton", "Label", "Button")):
+                        txt = str(w.cget("text"))
+                        try:
+                            cw = int(w.cget("width") or 0)
+                        except Exception:  # noqa: BLE001
+                            cw = 0
+                        if txt.strip() and cw:
+                            longest = max(len(ln) for ln in txt.split("\n"))
+                            if longest > cw:
+                                narrow.append(f"{txt!r} 最长 {longest} 字，width={cw}")
+                    _walk_fixed(w)
+
+            _walk_fixed(gui._root)
+            _walk_fixed(gui._settings_win)
+            assert not narrow, (f"{lang} 有 {len(narrow)} 个固定宽度控件会裁字：\n"
+                                + "\n".join(f"  {n}" for n in narrow[:15]))
+
+            # ④ 窗口得装得下内容：Tk 在容器不够宽时**从最后打包的控件开始裁**，
+            #    俄语第一行要 1251px，写死 940 会把右边两个按钮直接裁掉（实测）。
+            gui._root.update_idletasks()
+            need_w, have_w = gui._root.winfo_reqwidth(), gui._root.winfo_width()
+            assert need_w <= have_w + 1, \
+                f"{lang}：内容需要 {need_w}px，窗口只有 {have_w}px —— 右侧会被裁掉"
         finally:
             _destroy(gui)
             _restore_env(saved_env)
@@ -323,6 +394,58 @@ def test_all_ui_languages_window_guard() -> None:
 
 
 # ---------------------------------------------------------------- ④ 语言下拉写 ui.lang
+
+
+def test_direction_language_names_translated() -> None:
+    """★ 方向下拉（源/目标语言）的语言名必须随界面语言翻译，且选中后能正确还原成语言码。
+
+    历史坑：`SOURCE_LANGS`/`TARGET_LANGS` 是「中文名 → 语言码」的表，下拉直接拿中文 key
+    当候选项 —— 英文/日文/俄文界面里方向下拉仍是「中文 → 英语」，外国用户看不懂自己选的是啥。
+    而机器守卫原来只看控件的 text 属性，扫不到下拉的「值」，两边都得补上。现在：
+    显示走 `_lang_label()`（中文名 → 译名），选中值走 `_lang_key()`（译名 → 中文 key）。
+    """
+    from vlt import i18n
+
+    # lang: (源下拉当前值=中文, 目标下拉当前值=英语, 源候选里的自动检测, 目标候选里的日语)
+    cases = {
+        "en": ("Chinese", "English", "Auto-Detect", "Japanese"),
+        "ja": ("中国語", "英語", "自動検出", "日本語"),
+        "ko": ("중국어", "영어", "자동 감지", "일본어"),
+        "ru": ("Китайский", "Английский", "Автоопределение", "Японский"),
+    }
+    reports: list[str] = []
+    for lang, (want_src, want_tgt, want_auto, want_ja) in cases.items():
+        saved_env = _isolate_env(Path(tempfile.mkdtemp(prefix="vlt-i18n-env-")))
+        gui = None
+        try:
+            gui = _make_gui(_temp_config(lang))
+            assert i18n.current_language() == lang
+            got_src, got_tgt = gui._source_combo.get(), gui._target_combo.get()
+            assert got_src == want_src, f"{lang}：源语言下拉显示 {got_src!r}，期望 {want_src!r}"
+            assert got_tgt == want_tgt, f"{lang}：目标语言下拉显示 {got_tgt!r}，期望 {want_tgt!r}"
+            vals = [str(v) for v in gui._source_combo.cget("values")]
+            assert want_auto in vals and want_ja in vals, \
+                f"{lang}：源语言候选项不对（应含自动检测与日语译名）：{vals!r}"
+            assert want_ja in [str(v) for v in gui._target_combo.cget("values")], \
+                f"{lang}：目标语言候选项里没有 {want_ja!r}"
+
+            # 反查：选「日语」（译名）→ 语言码必须落回 ja
+            gui._target_combo.set(want_ja)
+            gui._on_lang_change()
+            assert gui._lang_pair["target"] == "ja", \
+                f"{lang}：选了 {want_ja!r} 之后语言码应为 ja，实际 {gui._lang_pair['target']!r}"
+            # 再选回英语（译名）→ 落回 en，且下拉回填的仍是译名
+            gui._target_combo.set(cases[lang][1])
+            gui._on_lang_change()
+            assert gui._lang_pair["target"] == "en", \
+                f"{lang}：选回 {cases[lang][1]!r} 后语言码应为 en，实际 {gui._lang_pair['target']!r}"
+            assert gui._target_combo.get() == cases[lang][1], "选完下拉回填的不是译名"
+            reports.append(f"{lang}:{got_src}→{got_tgt}")
+        finally:
+            _destroy(gui)
+            _restore_env(saved_env)
+            i18n.set_language("zh")
+    print("  ✓ 方向下拉语言名已翻译且可反查：" + "，".join(reports))
 
 
 def test_language_combo_writes_config() -> None:
@@ -419,6 +542,7 @@ def main() -> int:
         test_available_languages_order,
         test_english_ui_has_no_cjk,
         test_all_ui_languages_window_guard,
+        test_direction_language_names_translated,
         test_language_combo_writes_config,
         test_open_log_folder_button,
     ]

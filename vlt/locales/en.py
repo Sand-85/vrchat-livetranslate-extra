@@ -6,6 +6,15 @@
 from __future__ import annotations
 
 STRINGS: dict[str, str] = {
+    # ---- 语言名（源/目标语言下拉里显示；表本身仍以中文名为 key）----
+    "中文": "Chinese",
+    "英语": "English",
+    "日语": "Japanese",
+    "韩语": "Korean",
+    "法语": "French",
+    "德语": "German",
+    "西班牙语": "Spanish",
+    "俄语": "Russian",
     # ---- 主窗口 ----
     "VRChat 实时同传": "VRChat Live Translate",
     "⚙ 设置": "⚙ Settings",

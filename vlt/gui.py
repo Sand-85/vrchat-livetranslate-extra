@@ -120,6 +120,32 @@ def _target_name(code: str) -> str:
     return next((k for k, v in TARGET_LANGS.items() if v == code), "英语")
 
 
+def _lang_label(name: str) -> str:
+    """界面显示用的语言名：表里的中文名 → 当前界面语言的写法。
+
+    语言表本身（SOURCE_LANGS/TARGET_LANGS）永远用中文名做 key —— 它是配置/引擎的
+    契约（config.yaml 存的是语言码，表只是码↔名的对照），界面才做翻译。
+    词表里没有该条目时 t() 原样返回中文，不会炸。
+    """
+    return t(name)
+
+
+def _lang_key(shown: str, table: dict[str, str | None]) -> str | None:
+    """反查：下拉框里显示的那一项（可能是译名）→ 语言表里的中文 key。"""
+    if shown in table:
+        return shown
+    for key in table:
+        if t(key) == shown:
+            return key
+    return None
+
+
+def _combo_width(names, minimum: int = 9) -> int:
+    """下拉框宽度（字符）：按当前语言里最长的名字算，避免「Автоопределение」被截断。"""
+    longest = max((len(str(n)) for n in names), default=0)
+    return max(minimum, longest + 1)
+
+
 def round_rect(cv: tk.Canvas, x1, y1, x2, y2, r, **kw):
     """圆角矩形：polygon + smooth=True 才有圆角。"""
     pts = [x1+r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y2-r, x2, y2,
@@ -267,6 +293,7 @@ class TranslationGUI:
 
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._update_direction_langs()
+        self._fit_window_width()     # 文案长度随语言变，窗口宽度得实测一次（俄语比中文宽 300px）
         self._check_api_key()
         self._poll()
         self._start_device_scan()
@@ -278,6 +305,33 @@ class TranslationGUI:
         self._schedule_version_changed_hint()
 
     # ================================================================ 主题
+
+    def _fit_window_width(self) -> None:
+        """按**当前界面语言**的实际需求定窗口宽度与最小宽度。
+
+        各语言文案长度差得远：第一行（开/停 + 方向 + 语言对 + 赞助/设置）
+        中文 959px、俄语 1251px（「Автоопределение」「Направление:」这些词很长）。
+        写死 940 时 Tk 会从**最后打包的控件**开始裁 —— 实测中文下目标语言下拉
+        已被裁掉 19px，俄语下裁得更多。这里实测一次需求宽度，取「基准 940」
+        与「需求 + 余量」的较大者，再夹进屏幕可用宽度（小屏也开不出装不下的窗口）。
+        窗口仍然可缩放；这只影响初始尺寸与下限。失败只留痕，不影响启动。
+        """
+        try:
+            self._root.update_idletasks()
+            need = self._root.winfo_reqwidth() + 8
+            want = max(940, need)
+            screen = int(self._root.winfo_screenwidth() or 0)
+            if screen:
+                want = min(want, max(760, screen - 80))
+            height = max(600, self._root.winfo_reqheight())
+            self._root.geometry(f"{want}x{height}")
+            self._root.minsize(min(want, need), 460)
+            if want > 940:
+                print(f"[ui] 界面语言 {i18n.current_language()}：文案较宽，窗口按需求开到 "
+                      f"{want}px（基准 940 / 需求 {need}）", flush=True)
+        except Exception as exc:  # noqa: BLE001 — 尺寸算错不该拦住启动
+            print(f"[ui] ⚠️ 窗口宽度自适应失败，保持默认：{type(exc).__name__}: {exc}",
+                  flush=True)
 
     def _apply_theme(self) -> None:
         """统一深色主题：深灰 + 蓝。
@@ -464,13 +518,15 @@ class TranslationGUI:
 
         self._vsep(ctrl)
         # 语言对写成「A → B」：翻译方向一目了然，比「源:/目标:」两个标签省地方
-        self._source_combo = ttk.Combobox(ctrl, values=list(SOURCE_LANGS.keys()),
-                                           state="readonly", width=9)
+        self._source_combo = ttk.Combobox(ctrl, values=[_lang_label(k) for k in SOURCE_LANGS],
+                                           state="readonly",
+                                           width=_combo_width([_lang_label(k) for k in SOURCE_LANGS]))
         self._source_combo.pack(side=tk.LEFT)
         self._source_combo.bind("<<ComboboxSelected>>", self._on_lang_change)
         ttk.Label(ctrl, text="→", style="Dim.TLabel").pack(side=tk.LEFT, padx=6)
-        self._target_combo = ttk.Combobox(ctrl, values=list(TARGET_LANGS.keys()),
-                                           state="readonly", width=9)
+        self._target_combo = ttk.Combobox(ctrl, values=[_lang_label(k) for k in TARGET_LANGS],
+                                           state="readonly",
+                                           width=_combo_width([_lang_label(k) for k in TARGET_LANGS]))
         self._target_combo.pack(side=tk.LEFT)
         self._target_combo.bind("<<ComboboxSelected>>", self._on_lang_change)
 
@@ -509,7 +565,8 @@ class TranslationGUI:
                        command=self._save_ui_state,
                        **self._indicator_kw()).pack(side=tk.LEFT, padx=(10, 0))
         # 微调按钮紧跟「手腕屏」勾选：它是手腕屏的从属工具，放远了看不出归属
-        self._tune_btn = ttk.Button(out_frame, text=t("微调 ▸"), width=7,
+        self._tune_btn = ttk.Button(out_frame, text=t("微调 ▸"),
+                                    width=max(7, len(t("微调 ▸")) + 1),
                                     command=self._toggle_tune_panel)
         self._tune_btn.pack(side=tk.LEFT, padx=(4, 0))
         tk.Checkbutton(out_frame, text=t("译音输出"), variable=self._vmic_var,
@@ -588,7 +645,8 @@ class TranslationGUI:
         row.pack(fill=tk.X, pady=(2, 2))
         ttk.Label(row, text=t("锚点:"), font=FONT_UI).pack(side=tk.LEFT)
         self._anchor_combo = ttk.Combobox(row, values=list(self._anchor_label_to_key),
-                                          state="readonly", width=12, font=FONT_UI)
+                                          state="readonly", font=FONT_UI,
+                                          width=_combo_width(self._anchor_label_to_key, 12))
         self._anchor_combo.set(_key_to_label.get(str(ov.get("anchor", "right_hand")), t("右手")))
         self._anchor_combo.pack(side=tk.LEFT, padx=(4, 14))
         self._anchor_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_anchor_change())
@@ -616,11 +674,17 @@ class TranslationGUI:
             ("source_font_size", t("原文字号"), 14, 48, 1, ""),
             ("panel_h", t("面板高"), 240, 560, 10, "px"),
         ]
+        # 标签宽度按**当前语言**最长的那条算：中文是 3-4 字（width=6 够），
+        # 但英语 "Curvature"、俄语 "Размер оригинала" 会被 6 字宽截断 ——
+        # 俄语下「Позиция X/Y/Z」全挤成「Позиц.」，三个位置参数根本分不出来（实测）。
+        # 标签长到放不下三列时自动降成两列，宁可面板高一点，也不裁字。
+        label_w = max(6, max(len(spec[1]) for spec in specs) + 1)
+        cols = 3 if label_w <= 9 else 2
         for i, (key, label, lo, hi, res, unit) in enumerate(specs):
-            row_i, col_i = divmod(i, 3)
+            row_i, col_i = divmod(i, cols)
             cell = ttk.Frame(grid)
             cell.grid(row=row_i, column=col_i, sticky="w", padx=(0, 18), pady=1)
-            ttk.Label(cell, text=label, font=FONT_UI, width=6).pack(side=tk.LEFT)
+            ttk.Label(cell, text=label, font=FONT_UI, width=label_w).pack(side=tk.LEFT)
             var = tk.DoubleVar(value=self._tune_values[key])
             val_lbl = ttk.Label(cell, text=f"{self._tune_values[key]:g}{unit}",
                                 font=FONT_STATUS, foreground=TEXT_DIM, width=7)
@@ -1032,7 +1096,7 @@ class TranslationGUI:
 
         ttk.Label(body, text=t("扫码支持 · 你给的钱会变成 API token，然后被我烧掉"),
                   style="Dim.TLabel").pack(anchor=tk.CENTER, pady=(14, 4))
-        ttk.Button(body, text=t("关闭"), width=8,
+        ttk.Button(body, text=t("关闭"), width=max(8, len(t("关闭")) + 1),
                    command=self._close_sponsor).pack(anchor=tk.CENTER, pady=(8, 0))
 
         # 定位到主窗口附近 + 深色标题栏（与设置弹窗同一套做法）
@@ -1834,7 +1898,8 @@ class TranslationGUI:
         self._text_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
         self._text_entry.bind("<Return>", self._on_text_enter)
         self._text_entry.bind("<Escape>", lambda _e: self._text_var.set(""))
-        self._send_btn = ttk.Button(row, text=t("发送"), width=8, command=self._send_typed)
+        self._send_btn = ttk.Button(row, text=t("发送"), width=max(8, len(t("发送")) + 1),
+                                    command=self._send_typed)
         self._send_btn.pack(side=tk.LEFT)
         ttk.Label(row, text=t("回车发送 · Esc 清空"), style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
         self._set_text_input_enabled(False)
@@ -1923,30 +1988,32 @@ class TranslationGUI:
         if d == "theirs":
             # 别人说：源=对方语言（=我的目标），目标=我的语言（=我的源）
             src_code, tgt_code = b, a or "zh"
-            self._source_combo.configure(values=list(TARGET_LANGS.keys()))
-            self._target_combo.configure(values=list(TARGET_LANGS.keys()))
+            self._source_combo.configure(values=[_lang_label(k) for k in TARGET_LANGS])
+            self._target_combo.configure(values=[_lang_label(k) for k in TARGET_LANGS])
         else:
             src_code, tgt_code = a, b
-            self._source_combo.configure(values=list(SOURCE_LANGS.keys()))
-            self._target_combo.configure(values=list(TARGET_LANGS.keys()))
-        self._source_combo.set(_source_name(src_code))
-        self._target_combo.set(_target_name(tgt_code))
+            self._source_combo.configure(values=[_lang_label(k) for k in SOURCE_LANGS])
+            self._target_combo.configure(values=[_lang_label(k) for k in TARGET_LANGS])
+        self._source_combo.set(_lang_label(_source_name(src_code)))
+        self._target_combo.set(_lang_label(_target_name(tgt_code)))
 
     def _on_lang_change(self, _event=None) -> None:
         d = self._direction_var.get()
+        src_shown = _lang_key(self._source_combo.get(), SOURCE_LANGS if d != "theirs" else TARGET_LANGS)
+        tgt_shown = _lang_key(self._target_combo.get(), TARGET_LANGS)
         if d == "theirs":
-            self._lang_pair["target"] = TARGET_LANGS.get(self._source_combo.get(),
+            self._lang_pair["target"] = TARGET_LANGS.get(src_shown,
                                                          self._lang_pair["target"])
-            self._lang_pair["source"] = TARGET_LANGS.get(self._target_combo.get())
+            self._lang_pair["source"] = TARGET_LANGS.get(tgt_shown)
         else:
-            self._lang_pair["source"] = SOURCE_LANGS.get(self._source_combo.get())
-            self._lang_pair["target"] = TARGET_LANGS.get(self._target_combo.get(),
+            self._lang_pair["source"] = SOURCE_LANGS.get(src_shown)
+            self._lang_pair["target"] = TARGET_LANGS.get(tgt_shown,
                                                          self._lang_pair["target"])
         if self._lang_pair["source"] is None:
             # 自动检测没有对应目标：别人说方向的目标回落到中文
             self._set_status("info",
                              t("已切换为{target} → 中文",
-                               target=_target_name(self._lang_pair["target"])))
+                               target=_lang_label(_target_name(self._lang_pair["target"]))))
         self._save_lang_config()
         self._push_lang_to_engines()
         self._update_direction_langs()
