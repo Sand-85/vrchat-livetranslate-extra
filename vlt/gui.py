@@ -113,6 +113,19 @@ TARGET_LANGS = {
 }
 
 
+def updater_env() -> dict[str, str]:
+    """启动更新器（以及它间接拉起的新实例）时用的环境变量。
+
+    ⚠️ 必须剥掉 PyInstaller 的内部变量（`_MEI*` / `_PYI_*`）—— 这是真机流程实测抓到的坑：
+    单文件 exe 的引导器靠 `_PYI_PARENT_PROCESS_LEVEL` / `_PYI_ARCHIVE_FILE` / `_MEIPASS*`
+    判断「我是不是已经被父进程解包好的子进程」。本程序拉起更新器时若原样继承自己的环境，
+    更新器里 `start` 出来的**新版本**就会带着 `_PYI_PARENT_PROCESS_LEVEL=1` 启动 →
+    引导器以为无需自解包 → 直接起不来（不写日志、无窗口、只留一个空转进程）。
+    用户看到的症状是「点完更新、程序自己关了、再没打开」。
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith(("_MEI", "_PYI_"))}
+
+
 def _source_name(code: str | None) -> str:
     return next((k for k, v in SOURCE_LANGS.items() if v == code), "自动检测")
 
@@ -1638,7 +1651,7 @@ class TranslationGUI:
         flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                  | getattr(subprocess, "DETACHED_PROCESS", 0))
         subprocess.Popen(["cmd", "/c", "start", "", "/min", str(bat_path)],
-                         creationflags=flags)
+                         creationflags=flags, env=updater_env())
         return bat_path
 
     def _maybe_replace_on_exit(self) -> None:

@@ -834,6 +834,34 @@ def test_version_changed_hint_once() -> None:
         print("  ✓ 「已更新」提示：版本变了弹一次、知道了写回、同版本/首次不弹")
 
 
+def test_updater_env_strips_pyinstaller_vars() -> None:
+    """拉起更新器/新实例的环境必须剥掉 PyInstaller 内部变量（真机实测的启动失败根因）。
+
+    PyInstaller 单文件 exe 靠 `_PYI_PARENT_PROCESS_LEVEL` 等变量判断自己是不是
+    「已被父进程解包好的子进程」。继承这些变量的新实例会跳过自解包，直接起不来。
+    """
+    from vlt.gui import updater_env
+
+    injected = {
+        "_PYI_PARENT_PROCESS_LEVEL": "1",
+        "_PYI_ARCHIVE_FILE": r"D:\x\VRChatLiveTranslate.exe",
+        "_MEIPASS2": r"C:\Temp\_MEI123456",
+        "_MEIPASS": r"C:\Temp\_MEI123456",
+        "VLT_KEEP_ME": "yes",            # 无关变量必须原样保留
+    }
+    os.environ.update(injected)
+    try:
+        env = updater_env()
+    finally:
+        for k in injected:
+            os.environ.pop(k, None)
+
+    for k in ("_PYI_PARENT_PROCESS_LEVEL", "_PYI_ARCHIVE_FILE", "_MEIPASS2", "_MEIPASS"):
+        assert k not in env, f"没剥掉 {k} —— 新实例会起不来"
+    assert env.get("VLT_KEEP_ME") == "yes", "把无关环境变量也剥掉了（只该剥 _MEI*/_PYI_*）"
+    print("  updater_env 剥 PyInstaller 变量 OK")
+
+
 def main() -> int:
     # config.yaml 备份/还原（照抄 tests/test_config_save.py 的模式）：
     # 「不再提示这个版本」会真写它，测完必须原样放回；CI 上没有它就先按模板生成、测完删掉。
@@ -845,6 +873,7 @@ def main() -> int:
         print("config.yaml 不存在 → 已从 config.example.yaml 生成（测试结束会删掉）")
 
     tests = [
+        test_updater_env_strips_pyinstaller_vars,
         test_update_dialog_and_ignore,
         test_later_snooze_session_only,
         test_update_now_source_mode_shows_guidance,

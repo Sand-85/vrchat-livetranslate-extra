@@ -456,6 +456,17 @@ def build_updater_bat(*, pid: int, current_exe: Path, new_exe: Path,
         ":start",
     ]
     if relaunch:
+        # 新实例必须是「干净环境」启动：PyInstaller 的内部变量会让它以为自己是已被解包的
+        # 子进程而跳过自解包 → 起不来（不写日志、无窗口）。详见 vlt/gui.updater_env()。
+        lines += [
+            'rem drop PyInstaller internal vars so the new instance extracts itself',
+            'set "_MEIPASS="',
+            'set "_MEIPASS2="',
+            'set "_PYI_ARCHIVE_FILE="',
+            'set "_PYI_PARENT_PROCESS_LEVEL="',
+            'set "_PYI_APPLICATION_HOME_DIR="',
+            'set "_PYI_SPLASH_IPC="',
+        ]
         lines.append(f'start "" "{cur}"')
     lines += [
         'del "%~f0"',

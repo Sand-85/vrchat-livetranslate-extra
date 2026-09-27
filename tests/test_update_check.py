@@ -475,8 +475,22 @@ def test_build_updater_bat_relaunch() -> None:
     # 【重载】形态：替换后 start "" 拉起新版；【稍后】退出时替换：只换不拉
     assert f'start "" "{cur}"' in bat_on, "relaunch=True 缺拉起行"
     assert 'start ""' not in bat_off, "relaunch=False 不该拉起新进程"
-    # 两形态除了那一行其余逐字节相同（等 PID / 备份 / move / 自删 / :fail 全保留）
-    assert bat_off == bat_on.replace(f'start "" "{cur}"\r\n', ""), "两形态差异不止拉起行"
+    # ★ 拉起新实例前必须清掉 PyInstaller 的内部变量（真机实测的启动失败根因）：
+    #   新版本会带着 _PYI_PARENT_PROCESS_LEVEL=1 启动 → 引导器以为自己是已解包的子进程
+    #   → 跳过自解包 → 起不来（不写日志、无窗口）。用户看到的就是「更新完没再打开」。
+    for var in ("_MEIPASS", "_MEIPASS2", "_PYI_ARCHIVE_FILE",
+                "_PYI_PARENT_PROCESS_LEVEL", "_PYI_APPLICATION_HOME_DIR"):
+        assert f'set "{var}="' in bat_on, f"拉起前没有清 {var} —— 新实例会起不来"
+        assert f'set "{var}="' not in bat_off, f"relaunch=False 不该出现清理 {var} 的行"
+    # 两形态除「拉起块（清理 + start 行）」外其余逐字节相同
+    extra = [ln for ln in bat_on.splitlines(keepends=True) if ln not in bat_off]
+    assert extra, "两形态居然完全一样"
+    assert all(ln.startswith(('start ""', 'set "_', "rem drop"))
+               for ln in extra), f"多出来不只是拉起块：{extra}"
+    stripped = bat_on
+    for ln in extra:
+        stripped = stripped.replace(ln, "", 1)
+    assert stripped == bat_off, "两形态差异不止拉起块"
     for needle in ("tasklist", "move /y", 'del "%~f0"', ".bak", ":fail"):
         assert needle in bat_off, f"relaunch=False 缺 {needle}"
     # 默认参数必须保持 True（既有行为不变）
