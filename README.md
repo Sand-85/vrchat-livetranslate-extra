@@ -398,7 +398,7 @@ build_exe.bat                                              :: 打包 + 打完自
   语法检查 → 凭据扫描 → 逐文件跑全部离线测试 → 再单独验一次**打包链路**（产物存在且 ≥20MB）
 - **Release**（`.github/workflows/release.yml`，推 `v*` tag 触发）：
   先对账 tag 与 `vlt/__init__.py` 的 `__version__`（不一致直接失败）→ 打包 →
-  算 SHA256 写 `SHA256SUMS.txt` → 建 Release，附件是 **exe + SHA256SUMS.txt**
+  建 Release，附件是 **exe**（校验值 GitHub 会在附件旁直接显示 `sha256:…`，不用我们自己再传一份）
 - **下载后想自己复核**：`scripts/verify_release.py` 会把 Release 附件拉下来对账
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 

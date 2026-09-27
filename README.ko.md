@@ -404,7 +404,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
   구문 검사 → 자격 증명 스캔 → 오프라인 테스트 전체 파일 단위 실행 → 이어서 별도의 **패키징 파이프라인** 검사(산출물 존재 및 20MB 이상)
 - **릴리스**(`.github/workflows/release.yml`, `v*` 태그 푸시로 시작):
   먼저 태그와 `vlt/__init__.py` 의 `__version__` 을 대조(불일치면 즉시 실패) → 패키징 →
-  SHA256을 계산해 `SHA256SUMS.txt` 생성 → **exe + SHA256SUMS.txt** 를 첨부한 Release 생성
+  **exe** 를 첨부한 Release 생성(체크섬은 GitHub가 첨부 파일 옆에 `sha256:…` 로 표시합니다 — 별도 파일을 올릴 필요가 없습니다)
 - **받은 파일을 직접 검증하고 싶다면**: `scripts/verify_release.py` 가 Release 산출물을 받아 대조합니다
   (SHA256, `--self-test` 실제 실행, 버전 줄, 신규 기능 문자열을 바이트코드에서 검색, 아이콘 픽셀 비교):
 

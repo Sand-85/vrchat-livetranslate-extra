@@ -60,8 +60,10 @@ jobs:
           Write-Host ("产物：{0}  {1:N1} MB" -f $f.Name, ($f.Length / 1MB))
           if ($f.Length -lt 20MB) { Write-Error "产物体积异常（<20MB），大概率没打全"; exit 1 }
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
-          "$hash  VRChatLiveTranslate.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
-          Get-Content dist/SHA256SUMS.txt
+          # 只打印存档，不再产出 SHA256SUMS.txt：
+          # GitHub 会在 Releases 页面为每个附件直接显示由服务端算出的 digest（可一键复制），
+          # 自己再传一份同源摘要属于重复；真正的独立凭据是 GitHub 那一份。
+          Write-Host ("sha256：{0}" -f $hash.ToLower())
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v7
@@ -69,7 +71,6 @@ jobs:
           name: VRChatLiveTranslate-exe
           path: |
             dist/VRChatLiveTranslate.exe
-            dist/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: 建 Release 并附上 exe
@@ -84,7 +85,7 @@ jobs:
             ## VRChat 实时同传 ${{ github.ref_name }}
 
             **下载附件里的 `VRChatLiveTranslate.exe`（单文件、免安装、无控制台），双击即用。**
-            同一个 exe 的 SHA256 见 `SHA256SUMS.txt`。
+            校验值看附件旁的 `sha256:`（GitHub 算的，鼠标点一下即可复制）。
 
             ### 用它之前需要什么
             - Windows 10/11
@@ -108,5 +109,4 @@ jobs:
             完整说明见仓库 [README](https://github.com/nixi-agent/vrchat-livetranslate#readme)（中文 / English / 日本語 / 한국어 / Русский）。
           files: |
             dist/VRChatLiveTranslate.exe
-            dist/SHA256SUMS.txt
           fail_on_unmatched_files: true

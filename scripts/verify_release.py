@@ -6,12 +6,16 @@
 字节码里搜得到」——不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
 复核项：
-  1. 附件下载（exe + SHA256SUMS.txt）
-  2. sha256 实测 vs 附件里写的
+  1. 附件下载（只认 exe）
+  2. sha256 实测 vs **GitHub 服务端算的 asset digest**（独立于我们 CI 的那一份）
   3. 真跑一次 `--self-test`（退出码 + GUI_SELFTEST_OK）
   4. 启动日志里的版本行 = 本次 tag（且标明「打包 exe」）
-  5. exe 里确实含俄语选项（新增功能真在产物里，不是只进了仓库）
+  5. exe 里确实含本版新增的字符串（新功能真在产物里，不是只进了仓库）
   6. exe 图标资源 vs assets/app.ico（32/16 档像素比对）
+
+⚠️ 2026-09 起不再上传 `SHA256SUMS.txt`：Releases 页面每个附件旁 GitHub 自己就显示
+`sha256:…`（可一键复制），自己再传一份同源摘要属于重复；而 GitHub 那份是**服务端对收到的
+字节算的**，才是能证明「发布出去的确实是我们构建的那个」的独立凭据。本脚本改为对它取证。
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 TAG = sys.argv[1] if len(sys.argv) > 1 else "v0.0.2"
 NEEDLE = sys.argv[2] if len(sys.argv) > 2 else "俄语"      # 本版新功能里必定出现的字符串
 ROOT = Path(__file__).resolve().parents[1]
+REPO_SLUG = "nixi-agent/vrchat-livetranslate"
 WORK = Path(tempfile.mkdtemp(prefix="verify_release_"))
 
 ok: list[str] = []
@@ -60,19 +65,21 @@ if r.returncode != 0:
     raise SystemExit(2)
 
 exes = list(WORK.glob("*.exe"))
-sums = list(WORK.glob("SHA256SUMS*.txt"))
-check("附件齐了（exe + SHA256SUMS）", bool(exes) and bool(sums),
-      f"{[p.name + ' ' + f'{p.stat().st_size:,}B' for p in exes + sums]}")
+check("附件齐了（exe）", bool(exes),
+      f"{[p.name + ' ' + f'{p.stat().st_size:,}B' for p in exes]}")
 
 exe = exes[0]
-sums_txt = sums[0].read_text(encoding="utf-8", errors="replace").strip()
 mine = sha256(exe)
-declared = ""
-m = re.search(r"([0-9a-fA-F]{64})\s+\*?(.+)$", sums_txt, re.M)
-if m:
-    declared = m.group(1).lower()
-check("sha256 实测 == 附件声明", bool(declared) and declared == mine,
-      f"\n     附件: {declared or sums_txt!r}\n     实测: {mine}")
+# 与 GitHub 的 asset digest 对账：这份是 GitHub 服务端对上传字节算出来的，
+# 不经过我们的 CI，才真正能证明「下载到的 === 当初发布的那份」。
+_api = subprocess.run(
+    ["gh", "api", f"repos/{REPO_SLUG}/releases/tags/{TAG}",
+     "--jq", f'.assets[] | select(.name=="{exe.name}") | .digest'],
+    capture_output=True, text=True, encoding="utf-8", errors="replace")
+declared = (_api.stdout or "").strip().removeprefix("sha256:").lower()
+check("sha256 实测 == GitHub 服务端 digest", bool(declared) and declared == mine,
+      f"\n     GitHub: {declared or (_api.stderr or '取不到 digest').strip()[:120]!r}"
+      f"\n     实测:   {mine}")
 
 # 真跑一次自检
 print("  跑 --self-test（可能要十几秒）…")
