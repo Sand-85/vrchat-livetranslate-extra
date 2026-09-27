@@ -83,13 +83,20 @@ class MapOpener:
         return item
 
 
-def payload(tag: str = "v9.9.9", *, exe_size: int | None = 12345678, drop: str = "") -> bytes:
-    """造一份 GitHub /releases/latest 的 JSON。drop='exe'/'sums' 可让附件缺一个。"""
+def payload(tag: str = "v9.9.9", *, exe_size: int | None = 12345678, drop: str = "",
+            digest: str | None = "sha256:" + "a" * 64) -> bytes:
+    """造一份 GitHub /releases/latest 的 JSON。
+
+    drop='exe'/'sums' 让附件缺一个；digest=None 模拟「GitHub 没给 digest」的老形态
+    （2026-09 起官方 Release 不再上传 SHA256SUMS.txt，校验值改为取 assets[].digest）。
+    """
     assets = []
     if drop != "exe":
         a = {"name": EXE_NAME, "browser_download_url": f"{DL_BASE}/{tag}/{EXE_NAME}"}
         if exe_size is not None:
             a["size"] = exe_size
+        if digest:
+            a["digest"] = digest
         assets.append(a)
     if drop != "sums":
         assets.append({"name": SUMS_NAME,
@@ -138,6 +145,7 @@ def test_fetch_latest_release() -> None:
         assert info.exe_url.endswith("/" + EXE_NAME)
         assert info.sums_url.endswith("/" + SUMS_NAME)
         assert info.exe_size == 12345678, f"exe_size 没带上：{info.exe_size}"
+        assert info.exe_digest == "a" * 64, f"没取到 GitHub 的 digest：{info.exe_digest!r}"
         # GitHub 对无 User-Agent 的请求直接 403 —— UA 必须带
         ua = op.reqs[0].headers.get("User-agent", "")
         assert ua.startswith("vrchat-livetranslate/"), f"缺 User-Agent：{ua!r}"
@@ -146,11 +154,26 @@ def test_fetch_latest_release() -> None:
         uc._opener = FakeOpener([FakeResp(payload("v9.9.9", exe_size=None))])
         assert uc.fetch_latest_release().exe_size is None
 
-        # 附件缺一个 → UpdateCheckError
+        # ★ 没有 SHA256SUMS.txt（2026-09 起官方 Release 就不带这个文件）→ 靠 digest 照样能更新。
+        #   这就是实测踩到的那个 bug：旧逻辑硬要求两个附件，删掉 sums 后更新检查直接静默失败。
         uc._opener = FakeOpener([FakeResp(payload("v9.9.9", drop="sums"))])
+        _nosum = uc.fetch_latest_release()
+        assert _nosum.exe_digest and not _nosum.sums_url, \
+            f"缺 sums 时应当用 digest 顶上：digest={_nosum.exe_digest!r} sums={_nosum.sums_url!r}"
+
+        # exe 缺了 → UpdateCheckError
+        uc._opener = FakeOpener([FakeResp(payload("v9.9.9", drop="exe"))])
         try:
             uc.fetch_latest_release()
-            raise AssertionError("附件不全居然没报错")
+            raise AssertionError("缺 exe 居然没报错")
+        except uc.UpdateCheckError as e:
+            assert "附件" in str(e)
+
+        # 既没 digest 也没 sums（没有任何可校验的凭据）→ 也必须报错，绝不装一个没法验的包
+        uc._opener = FakeOpener([FakeResp(payload("v9.9.9", digest=None, drop="sums"))])
+        try:
+            uc.fetch_latest_release()
+            raise AssertionError("没有任何校验凭据居然没报错")
         except uc.UpdateCheckError as e:
             assert "附件" in str(e)
 
@@ -549,6 +572,32 @@ def test_last_seen_version() -> None:
     print("  load/save_last_seen_version OK")
 
 
+def test_expected_sha256_prefers_github_digest() -> None:
+    """校验值优先取 GitHub 的 `assets[].digest`；只有老 Release 没 digest 才回退拉 SHA256SUMS.txt。
+
+    这条守的是「删掉 SHA256SUMS.txt 之后更新链路还能用」——真机实测就是这么坏的：
+    旧逻辑硬要求两个附件，官方 Release 不再上传 sums 后，更新检查在真 exe 上直接静默失败
+    （用户什么提示都看不到，等于永远收不到新版本）。
+    """
+    old = uc._opener
+    try:
+        info = uc.ReleaseInfo(tag="v1.0.0", version="1.0.0", html_url="h",
+                              exe_url=f"{DL_BASE}/v1.0.0/{EXE_NAME}", exe_digest="b" * 64)
+        uc._opener = MapOpener({})          # 空映射：有 digest 时**一次网络都不该走**
+        assert uc._expected_sha256(info, 1.0) == "b" * 64, "有 digest 时不该再去拉文件"
+
+        legacy = uc.ReleaseInfo(tag="v1.0.0", version="1.0.0", html_url="h",
+                                exe_url=f"{DL_BASE}/v1.0.0/{EXE_NAME}",
+                                sums_url=f"{DL_BASE}/v1.0.0/{SUMS_NAME}")
+        uc._opener = MapOpener({f"{DL_BASE}/v1.0.0/{SUMS_NAME}":
+                                FakeResp(f"{'c' * 64}  {EXE_NAME}\n".encode(),
+                                         url=f"{DL_BASE}/v1.0.0/{SUMS_NAME}")})
+        assert uc._expected_sha256(legacy, 1.0) == "c" * 64, "没 digest 时应回退到 sums 文件"
+        print("  _expected_sha256 OK（GitHub digest 优先，sums 仅老版本兜底）")
+    finally:
+        uc._opener = old
+
+
 def main() -> int:
     print("test_update_check:")
     tests = [
@@ -559,6 +608,7 @@ def main() -> int:
         test_ignore_list_roundtrip,
         test_should_prompt_and_check,
         test_download_and_verify,
+        test_expected_sha256_prefers_github_digest,
         test_redirect_guard,
         test_update_mode,
         test_build_updater_bat,

@@ -85,7 +85,10 @@ class ReleaseInfo:
     version: str          # 规范化版本，如 "0.1.2"
     html_url: str         # Release 页面（「打开页面」/ 手动下载用）
     exe_url: str          # VRChatLiveTranslate.exe 的 browser_download_url
-    sums_url: str         # SHA256SUMS.txt 的 browser_download_url
+    exe_digest: str = ""  # GitHub 算好的 sha256（assets[].digest，剥掉 "sha256:" 前缀）——
+                          # 校验的**首选**来源：服务端对收到的字节算的，不必再依赖我们自己传的摘要文件
+    sums_url: str = ""    # SHA256SUMS.txt 的 browser_download_url（仅老 Release 的兜底；
+                          # 2026-09 起发布的版本不再上传这个文件）
     exe_size: int | None = None   # assets[].size（字节）：进度条总量的兜底，Content-Length 优先
 
 
@@ -144,21 +147,29 @@ def fetch_latest_release(timeout: float = DEFAULT_TIMEOUT_S) -> ReleaseInfo:
     if ver is None:
         # tag 与 __version__ 的一致性由 release.yml 对账保证；走到这说明 Release 本身异常
         raise UpdateCheckError(t("最新 Release 的 tag 不是版本号：{tag}", tag=f"{tag!r}"))
-    exe_url = sums_url = ""
+    exe_url = sums_url = exe_digest = ""
     exe_size: int | None = None
     for a in data.get("assets") or []:
         if a.get("name") == EXE_ASSET_NAME:
             exe_url = str(a.get("browser_download_url") or "")
             size = a.get("size")
             exe_size = size if isinstance(size, int) and size > 0 else None
+            # GitHub 为每个附件算好并在 API 里返回 digest（形如 "sha256:abcd…"）。
+            # 用它做校验就不必再自己上传 SHA256SUMS.txt（2026-09 已停止上传）。
+            digest = str(a.get("digest") or "").lower()
+            if digest.startswith("sha256:"):
+                exe_digest = digest.split(":", 1)[1]
         elif a.get("name") == SUMS_ASSET_NAME:
             sums_url = str(a.get("browser_download_url") or "")
-    if not exe_url or not sums_url:
-        raise UpdateCheckError(t("Release 附件不全：需要 {exe} 和 {sums}",
-                                 exe=EXE_ASSET_NAME, sums=SUMS_ASSET_NAME))
+    if not exe_url:
+        raise UpdateCheckError(t("Release 附件不全：缺少 {exe} 或校验值", exe=EXE_ASSET_NAME))
+    if not exe_digest and not sums_url:
+        # 两个校验来源都没有 → 宁可不更新，也不装一个没法验的包（调用方按「检查失败」留痕）
+        raise UpdateCheckError(t("Release 附件不全：缺少 {exe} 或校验值", exe=EXE_ASSET_NAME))
     return ReleaseInfo(tag=tag, version=f"{ver[0]}.{ver[1]}.{ver[2]}",
                        html_url=str(data.get("html_url") or ""),
-                       exe_url=exe_url, sums_url=sums_url, exe_size=exe_size)
+                       exe_url=exe_url, exe_digest=exe_digest,
+                       sums_url=sums_url, exe_size=exe_size)
 
 
 # ---------------------------------------------------------------- 忽略列表读写
@@ -292,6 +303,17 @@ def _content_length(resp) -> int | None:  # noqa: ANN001
     return n if n > 0 else None
 
 
+def _expected_sha256(info: ReleaseInfo, timeout: float) -> str:
+    """这次下载该期望什么 sha256。
+
+    首选 GitHub 在 API 里给的 `assets[].digest`（服务端对上传字节算的，最省事也最独立）；
+    只有当老 Release 没带 digest 时，才回去拉 SHA256SUMS.txt 兜底。
+    """
+    if info.exe_digest:
+        return info.exe_digest
+    return _download_expected_sha256(info.sums_url, timeout)
+
+
 def _download_expected_sha256(sums_url: str, timeout: float) -> str:
     """拉 SHA256SUMS.txt，取 VRChatLiveTranslate.exe 那一行的 hash（小文件，直接读进内存）。"""
     req = Request(sums_url, headers={"User-Agent": f"vrchat-livetranslate/{__version__}"})
@@ -347,7 +369,7 @@ def download_and_verify(info: ReleaseInfo, dest_dir: Path,
     """
     dest = Path(dest_dir) / (EXE_ASSET_NAME + ".new")
     try:
-        expected = _download_expected_sha256(info.sums_url, timeout)
+        expected = _expected_sha256(info, timeout)
         actual = _stream_to_file(info.exe_url, dest, timeout, progress)
     except Exception as exc:  # noqa: BLE001 — 任何失败都要清理残留 + 留痕，再原样上抛
         dest.unlink(missing_ok=True)

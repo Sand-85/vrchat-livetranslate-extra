@@ -16,7 +16,7 @@ STRINGS: dict[str, str] = {
     "西班牙语": "Spanish",
     "俄语": "Russian",
     # ---- 主窗口 ----
-    "VRChat 实时同传": "VRChat Live Translate",
+    "VRChat 实时同传": "vrchat-livetranslate",
     "⚙ 设置": "⚙ Settings",
     "☕ 赞助": "☕ Sponsor",
     "开始翻译": "Start",
@@ -183,7 +183,7 @@ STRINGS: dict[str, str] = {
     "「不再提示」没存下来：{msg}": "Couldn't save the \"skip this version\" choice: {msg}",
     "发现新版本": "New Version Available",
     "VRChat Live Translate 有新版本了。现在更新只要一两分钟，不影响你正在进行的翻译。":
-        "A new version of VRChat Live Translate is available. "
+        "A new version of vrchat-livetranslate is available. "
         "Updating takes just a minute or two and won't interrupt your ongoing translation.",
     "看看这次更新了什么": "See What's New in This Release",
     "立即更新": "Update Now",
@@ -245,7 +245,7 @@ STRINGS: dict[str, str] = {
         "click \"Cancel\" to exit directly.",
     "已更新到最新版本": "Updated to the Latest Version",
     "VRChat Live Translate 已更新到最新版本，一切照常使用。":
-        "VRChat Live Translate has been updated to the latest version — "
+        "vrchat-livetranslate has been updated to the latest version — "
         "everything works as usual.",
     "知道了": "Got It",
 
@@ -272,8 +272,8 @@ STRINGS: dict[str, str] = {
     "响应不是合法 JSON：{msg}": "Response is not valid JSON: {msg}",
     "最新 Release 的 tag 不是版本号：{tag}":
         "The latest release tag is not a version number: {tag}",
-    "Release 附件不全：需要 {exe} 和 {sums}":
-        "Release assets incomplete: {exe} and {sums} are required",
+    "Release 附件不全：缺少 {exe} 或校验值":
+        "Release assets incomplete: {exe} or its checksum is missing",
     "不是合法版本号，无法写入忽略列表：{version}":
         "Not a valid version number; can't add it to the ignore list: {version}",
     "config.yaml 不是合法 YAML，已放弃写入：{msg}":

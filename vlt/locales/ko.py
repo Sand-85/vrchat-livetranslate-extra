@@ -20,7 +20,7 @@ STRINGS: dict[str, str] = {
     "西班牙语": "스페인어",
     "俄语": "러시아어",
     # ---- 主窗口 ----
-    "VRChat 实时同传": "VRChat 실시간 번역",
+    "VRChat 实时同传": "vrchat-livetranslate",
     "⚙ 设置": "⚙ 설정",
     "☕ 赞助": "☕ 후원",
     "开始翻译": "번역 시작",
@@ -184,7 +184,7 @@ STRINGS: dict[str, str] = {
     "「不再提示」没存下来：{msg}": "「다시 알리지 않음」 선택을 저장하지 못했습니다: {msg}",
     "发现新版本": "새 버전 발견",
     "VRChat Live Translate 有新版本了。现在更新只要一两分钟，不影响你正在进行的翻译。":
-        "VRChat Live Translate의 새 버전이 나왔습니다. "
+        "vrchat-livetranslate의 새 버전이 나왔습니다. "
         "업데이트는 1~2분이면 끝나며 진행 중인 번역에 영향을 주지 않습니다.",
     "看看这次更新了什么": "이번 업데이트 내용 보기",
     "立即更新": "지금 업데이트",
@@ -244,7 +244,7 @@ STRINGS: dict[str, str] = {
         "「확인」을 눌러 다운로드 페이지를 열어 직접 받으세요. 「취소」를 누르면 바로 종료합니다.",
     "已更新到最新版本": "최신 버전으로 업데이트됨",
     "VRChat Live Translate 已更新到最新版本，一切照常使用。":
-        "VRChat Live Translate가 최신 버전으로 업데이트되었습니다. 평소처럼 사용하면 됩니다.",
+        "vrchat-livetranslate가 최신 버전으로 업데이트되었습니다. 평소처럼 사용하면 됩니다.",
     "知道了": "확인",
 
     # ---- 日志区 ----
@@ -270,8 +270,8 @@ STRINGS: dict[str, str] = {
     "响应不是合法 JSON：{msg}": "응답이 올바른 JSON이 아닙니다: {msg}",
     "最新 Release 的 tag 不是版本号：{tag}":
         "최신 Release의 태그가 버전 번호가 아닙니다: {tag}",
-    "Release 附件不全：需要 {exe} 和 {sums}":
-        "Release 첨부 파일이 부족합니다: {exe}와(과) {sums}이(가) 필요합니다",
+    "Release 附件不全：缺少 {exe} 或校验值":
+        "Release 첨부 파일이 부족합니다: {exe} 또는 체크섬이 없습니다",
     "不是合法版本号，无法写入忽略列表：{version}":
         "올바른 버전 번호가 아니라 무시 목록에 기록할 수 없습니다: {version}",
     "config.yaml 不是合法 YAML，已放弃写入：{msg}":
