@@ -286,4 +286,9 @@ STRINGS: dict[str, str] = {
     "下载的文件与发布页的摘要对不上，已删除（请重试）":
         "The downloaded file doesn't match the checksum on the release page; "
         "it has been deleted (please retry)",
+    "手腕屏已开启（可用「微调 ▸」调位置）":
+        "Wrist overlay is on — use \"Tune ▸\" to adjust its position",
+    "手腕屏没启动起来，已自动取消勾选（先把 SteamVR 打开，再勾一次即可）":
+        "The wrist overlay could not start, so the tick was reverted — "
+        "start SteamVR first, then tick it again",
 }

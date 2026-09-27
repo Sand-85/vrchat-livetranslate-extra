@@ -603,7 +603,7 @@ class TranslationGUI:
                        command=self._save_ui_state,
                        **self._indicator_kw()).pack(side=tk.LEFT, padx=(6, 0))
         tk.Checkbutton(out_frame, text=t("手腕屏"), variable=self._overlay_var,
-                       command=self._save_ui_state,
+                       command=self._on_overlay_toggle,
                        **self._indicator_kw()).pack(side=tk.LEFT, padx=(10, 0))
         # 微调按钮紧跟「手腕屏」勾选：它是手腕屏的从属工具，放远了看不出归属
         self._tune_btn = ttk.Button(out_frame, text=t("微调 ▸"),
@@ -2274,25 +2274,51 @@ class TranslationGUI:
         self._q.put(("status", lvl, msg))
 
     # ---------------------------------------------------------------- 手腕屏（界面持有）
-    def _start_overlay(self) -> None:
+    def _start_overlay(self, *, force: bool = False) -> bool:
         """按勾选状态接管 SteamVR 的手腕屏。失败只禁用这一项，绝不影响翻译。
 
         手腕屏由**界面**持有而不是某个引擎：手腕上只该有一块屏，内容是最近几句对话
         （镜像聊天区）。交给两个引擎各自创建会撞 `OverlayError_KeyInUse`（用户实测）。
+
+        force=True 用于「勾上就起」那条路（此时还没点开始翻译，`self._sinks` 里没有 overlay）。
+        返回是否**真的起来了** —— 调用方要靠它决定失败时是否自动退回勾选。
         """
-        if "overlay" not in self._sinks:
-            return
+        if self._overlay_out is not None:
+            return True                       # 已经起来了（勾选时起过），别重复建（会撞 KeyInUse）
+        if not force and "overlay" not in self._sinks:
+            return False
         try:
             self._overlay_out = WristOverlay(
                 OverlayConfig.from_dict(self._cfg.overlay), config_path=DEFAULT_CONFIG)
             if not self._overlay_out.start():
                 self._overlay_out = None      # start() 内部已打印原因
-                return
+                return False
             self._push_overlay(force=True)
+            return True
         except Exception as exc:  # noqa: BLE001
             self._overlay_out = None
             print(f"[gui] ⚠️ 手腕屏初始化异常，已禁用（翻译不受影响）："
                   f"{type(exc).__name__}: {exc}", flush=True)
+            return False
+
+    def _on_overlay_toggle(self) -> None:
+        """勾选/取消「手腕屏」的即时反应。
+
+        勾上就**立刻**把屏拉起来，而不是等点开始翻译 —— 用户勾上多半是想先看位置对不对
+        （微调面板要对着屏拖），把「调试」和「开跑」绑死会很难用。
+        起不来就自动退回未勾选：否则界面显示已开启、实际什么都没有。
+        """
+        if self._overlay_var.get():
+            if self._start_overlay(force=True):
+                self._set_status("info", t("手腕屏已开启（可用「微调 ▸」调位置）"))
+            else:
+                self._overlay_var.set(False)          # 启动失败 → 自动跳回去
+                self._set_status("error", t(
+                    "手腕屏没启动起来，已自动取消勾选（先把 SteamVR 打开，再勾一次即可）"))
+        else:
+            self._stop_overlay()
+            self._sinks.discard("overlay")            # 别让下一次「开始翻译」又把它拉起来
+        self._save_ui_state()
 
     def _stop_overlay(self) -> None:
         if self._overlay_out is None:

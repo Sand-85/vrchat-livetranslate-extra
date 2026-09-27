@@ -28,8 +28,8 @@ class OverlayConfig:
     anchor: str = "right_hand"          # left_hand | right_hand | tracker | hmd
     tracker_index: int = 0              # anchor=tracker 时用第几个 tracker
     pos: tuple[float, float, float] = (0.0, 0.06, 0.02)      # 相对锚点，米
-    rot: tuple[float, float, float] = (0.0, 0.0, 0.0)        # 欧拉角，度
-    width_m: float = 0.24
+    rot: tuple[float, float, float] = (-47.0, -16.0, 0.0)    # 欧拉角，度
+    width_m: float = 0.23
     curvature: float = 0.0
     alpha: float = 0.9
     size_px: tuple[int, int] = (1024, 320)
@@ -62,8 +62,8 @@ class OverlayConfig:
             anchor=d.get("anchor", "right_hand"),
             tracker_index=int(d.get("tracker_index", 0)),
             pos=tuple(off.get("pos", (0.0, 0.06, 0.02))),          # type: ignore[arg-type]
-            rot=tuple(off.get("rot", (0.0, 0.0, 0.0))),            # type: ignore[arg-type]
-            width_m=float(off.get("width_m", 0.24)),
+            rot=tuple(off.get("rot", (-47.0, -16.0, 0.0))),         # type: ignore[arg-type]
+            width_m=float(off.get("width_m", 0.23)),
             curvature=float(off.get("curvature", 0.0)),
             alpha=float(off.get("alpha", d.get("alpha", 0.9))),
             size_px=tuple(d.get("size_px", (1024, 320))),          # type: ignore[arg-type]

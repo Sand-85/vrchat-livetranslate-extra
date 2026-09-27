@@ -19,6 +19,18 @@ for p in (str(ROOT), str(TESTS)):
         sys.path.insert(0, p)
 
 import test_overlay_steamvr as fakeov  # noqa: E402  复用假 openvr 与调用记录
+from vlt.config import DEFAULT_CONFIG  # noqa: E402
+
+
+def _ui_overlay_in_file() -> bool:
+    """看**文件**里存了什么：_save_ui_state 只写盘、不回流内存里的 _cfg。"""
+    import yaml
+
+    try:
+        data = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return False
+    return bool((data.get("ui") or {}).get("overlay"))
 
 
 # ---------------------------------------------------------------- 渲染（纯函数）
@@ -131,9 +143,98 @@ def test_gui_owns_single_wrist_panel() -> None:
     print("  界面持有唯一手腕屏 + 两个方向都上屏 + 停止时销毁 OK")
 
 
+def test_overlay_starts_on_checkbox_immediately() -> None:
+    """勾上「手腕屏」立刻起屏（不用等开始翻译）；取消勾选立刻关掉。
+
+    用户要求：「当我勾选手腕屏的时候我就需要你启动 VR 叠加层，而不是在开始翻译的时候」
+    —— 勾上多半是想先看位置对不对（微调面板要对着屏拖），把「调试」和「开跑」绑死很难用。
+    """
+    fakeov.CALLS.clear()
+    fakeov._install_fake_openvr()
+    os.environ.setdefault("DASHSCOPE_API_KEY", "sk" + "-ws-" + "overlaytoggle0123456789abcdef")
+    from vlt.gui import TranslationGUI
+
+    backup = DEFAULT_CONFIG.read_bytes() if DEFAULT_CONFIG.exists() else None
+    gui = TranslationGUI()
+    got: dict = {}
+
+    def step() -> None:
+        gui._overlay_var.set(True)
+        gui._on_overlay_toggle()              # 只勾选，**不**点开始翻译
+        got["up"] = gui._overlay_out is not None
+        got["cfg_on"] = _ui_overlay_in_file()
+        gui._overlay_var.set(False)
+        gui._on_overlay_toggle()
+        got["down"] = gui._overlay_out is None
+        got["cfg_off"] = not _ui_overlay_in_file()
+        got["closed"] = "destroyOverlay" in [c[0] for c in fakeov.CALLS]
+        gui._root.after(100, gui._on_close)
+
+    try:
+        gui._root.after(400, step)
+        gui._root.mainloop()
+    finally:
+        if backup is not None:
+            DEFAULT_CONFIG.write_bytes(backup)
+        else:
+            DEFAULT_CONFIG.unlink(missing_ok=True)
+
+    assert got.get("up"), "勾选后手腕屏没有立刻起来（仍要等开始翻译？）"
+    assert got.get("cfg_on"), "勾选状态没有写回配置"
+    assert got.get("down"), "取消勾选没有关掉手腕屏"
+    assert got.get("cfg_off"), "取消勾选的状态没有写回配置"
+    assert got.get("closed"), "取消勾选没有销毁 overlay"
+    print("  勾选即启动 / 取消即关闭 OK")
+
+
+def test_overlay_toggle_reverts_when_start_fails() -> None:
+    """起不来就必须把勾**自动退回去**：不能界面显示已开启、实际什么都没有。"""
+    from vlt import gui as guimod
+
+    class _FailOverlay:
+        def __init__(self, *a, **kw) -> None: ...
+        def start(self) -> bool:
+            return False
+        def close(self) -> None: ...
+
+    backup = DEFAULT_CONFIG.read_bytes() if DEFAULT_CONFIG.exists() else None
+    real = guimod.WristOverlay
+    guimod.WristOverlay = _FailOverlay          # type: ignore[assignment]
+    got: dict = {}
+    try:
+        g = guimod.TranslationGUI()
+
+        def step() -> None:
+            g._overlay_var.set(True)
+            g._on_overlay_toggle()
+            got["var"] = g._overlay_var.get()
+            got["cfg"] = _ui_overlay_in_file()
+            got["out"] = g._overlay_out
+            got["status"] = getattr(g, "_last_status_level", None)
+            g._root.after(100, g._on_close)
+
+        g._root.after(400, step)
+        g._root.mainloop()
+    finally:
+        guimod.WristOverlay = real
+        if backup is not None:
+            DEFAULT_CONFIG.write_bytes(backup)
+        else:
+            DEFAULT_CONFIG.unlink(missing_ok=True)
+
+    assert got.get("var") is False, "启动失败后勾选没有自动退回"
+    assert got.get("cfg") is False, "退回后的状态没有写回配置"
+    assert got.get("out") is None, "失败后不该留下 overlay 引用"
+    assert got.get("status") == "error", "启动失败没有给用户可见提示"
+    print("  启动失败自动退回勾选 OK")
+
+
+
 if __name__ == "__main__":
     print("test_overlay_conversation:")
     test_render_conversation_single_panel()
     test_render_conversation_keeps_newest()
     test_gui_owns_single_wrist_panel()
+    test_overlay_starts_on_checkbox_immediately()
+    test_overlay_toggle_reverts_when_start_fails()
     print("ALL PASSED")
