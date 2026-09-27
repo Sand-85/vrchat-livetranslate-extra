@@ -407,12 +407,12 @@ build_exe.bat                                              :: ビルド + その
   構文チェック → 認証情報スキャン → オフラインテストをファイル単位で全実行 → さらに別途**パッケージング工程**の確認（成果物が存在し 20 MB 以上）
 - **リリース**（`.github/workflows/release.yml`、`v*` タグの push で起動）：
   まずタグと `vlt/__init__.py` の `__version__` を突き合わせ（不一致なら即失敗）→ パッケージ →
-  **exe** を添付した Release を作成（チェックサムは GitHub が添付の横に `sha256:…` として表示します — 自前で別ファイルを載せる必要はありません）
+  **exe** と `SHA256SUMS.txt` を添付した Release を作成（チェックサムは GitHub が添付の横に `sha256:…` として表示します。このファイルは v0.2.0 以前のクライアント向けの移行措置です）
 - **ダウンロードしたものを自分で検証したい場合**：`scripts/verify_release.py` が Release の成果物を取得して突き合わせます
   （SHA256、`--self-test` の実実行、バージョン行、新機能の文字列をバイトコードから検索、アイコンのピクセル比較）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.2.0 "界面语言"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.2.1 "或校验值"
   ```
 
 ---

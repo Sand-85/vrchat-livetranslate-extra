@@ -1,6 +1,6 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.2.0 "界面语言"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.2.1 "或校验值"
 
 第二个参数 = 本版新增功能里必定出现的字符串（默认「俄语」）。判据是「在解包出来的
 字节码里搜得到」——不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
@@ -13,9 +13,10 @@
   5. exe 里确实含本版新增的字符串（新功能真在产物里，不是只进了仓库）
   6. exe 图标资源 vs assets/app.ico（32/16 档像素比对）
 
-⚠️ 2026-09 起不再上传 `SHA256SUMS.txt`：Releases 页面每个附件旁 GitHub 自己就显示
-`sha256:…`（可一键复制），自己再传一份同源摘要属于重复；而 GitHub 那份是**服务端对收到的
-字节算的**，才是能证明「发布出去的确实是我们构建的那个」的独立凭据。本脚本改为对它取证。
+⚠️ 复核以 **GitHub 服务端算的 asset digest** 为准，不看我们自己传的 `SHA256SUMS.txt`：
+前者是对收到的字节算的，才是能证明「发布出去的确实是我们构建的那个」的独立凭据。
+（`SHA256SUMS.txt` 仍会随 Release 一起传，但只为兼容 **v0.2.0 及更早**的客户端 ——
+它们的更新检查把「exe + SHA256SUMS.txt 两个附件」写死了，缺一个就静默查不到更新。）
 """
 from __future__ import annotations
 

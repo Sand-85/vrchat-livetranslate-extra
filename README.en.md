@@ -402,12 +402,12 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   syntax check → credential scan → all offline tests file by file → then a separate **packaging-pipeline** check (artifact exists and is ≥ 20 MB)
 - **Release** (`.github/workflows/release.yml`, triggered by pushing a `v*` tag):
   first reconciles the tag against `__version__` in `vlt/__init__.py` (mismatch = hard fail) → packages →
-  creates the Release with the **exe** attached (GitHub shows a `sha256:…` digest next to every asset — no need to ship our own copy)
+  creates the Release with the **exe** and `SHA256SUMS.txt` attached (GitHub shows a `sha256:…` digest next to every asset; the checksum file is a transition aid for clients up to v0.2.0, which only look for it)
 - **Want to verify a download yourself**: `scripts/verify_release.py` pulls the Release assets and reconciles them
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.2.0 "界面语言"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.2.1 "或校验值"
   ```
 
 ---
