@@ -405,13 +405,19 @@ def build_updater_bat(*, pid: int, current_exe: Path, new_exe: Path,
                       relaunch: bool = True) -> str:
     """生成更新器批处理文本（CRLF 行尾！cmd 对 LF-only 的 label/goto 会抽风）。
 
-    逻辑：等 PID 退出（最多 ~60s）→ 备份 current 为 .bak → move .new 顶替（同卷近原子，
+    逻辑：等 PID 退出（最多 ~60s）→ 备份 current 为 .bak → move .new 顶替（**带重试**，
     失败则用 .bak 还原）→（relaunch=True 才）start 拉起新版 → 自删；失败留一行到 exe 旁的
     update_failed.log 并 pause（用户能看到窗口，不会无声消失）。
     relaunch=False 用于【稍后】退出时替换：只换不拉，用户下次自己打开就是新版 ——
     与 True 形态的唯一差别就是没有 start "" 那一行，其余逐字节相同。
     所有路径双引号包裹（桌面/用户名常含空格）；不写注册表、不要管理员。
     bat 正文只用 ASCII：cmd 按系统 OEM 代码页解析，塞中文注释在代码页不符时会变乱码。
+
+    ⚠️ **为什么 move 要重试**（真机实测，2026-09）：PyInstaller 单文件 exe 是「父进程
+    bootloader + 子进程跑 Python」两级结构，我们等的是**自己那个 PID（子进程）**，
+    而 `VRChatLiveTranslate.exe` 的文件句柄握在**父进程**手里、它会晚一步退出。
+    子进程一消失就立刻 `move /y` 会撞上共享冲突 → 替换失败 → 回滚 + update_failed.log：
+    用户看到的是「点了立即更新、程序重启了、还是旧版本」。重试 30 次（每次约 1s）覆盖这个窗口。
     """
     cur = str(current_exe)
     new = str(new_exe)
@@ -433,8 +439,17 @@ def build_updater_bat(*, pid: int, current_exe: Path, new_exe: Path,
         ":replace",
         f'copy /y "{cur}" "{bak}" >nul',
         "if errorlevel 1 goto fail",
-        f'move /y "{new}" "{cur}"',
+        "rem the parent bootloader may still hold the exe (see docstring): retry the move",
+        "set /a MTRIES=0",
+        ":trymove",
+        f'move /y "{new}" "{cur}" >nul 2>&1',
         "if not errorlevel 1 goto start",
+        "set /a MTRIES+=1",
+        "if %MTRIES% geq 30 goto restore",
+        "ping 127.0.0.1 -n 2 >nul",
+        "goto trymove",
+        "",
+        ":restore",
         f'copy /y "{bak}" "{cur}" >nul',
         "goto fail",
         "",

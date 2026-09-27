@@ -455,6 +455,11 @@ def test_build_updater_bat() -> None:
                    "tasklist", "move /y", 'start ""', 'del "%~f0"', ".bak",
                    "update_failed.log", ":fail", "pause"):
         assert needle in bat, f"bat 缺 {needle}"
+    # ★ 替换必须带重试（真机实测）：PyInstaller 单文件的**父进程**比子进程晚一步释放 exe 句柄，
+    #   子进程一消失就 move 会撞共享冲突 → 替换失败回滚、用户升了个寂寞。没有这个循环就是回归。
+    assert ":trymove" in bat and "goto trymove" in bat, "替换没有重试循环"
+    assert ":restore" in bat, "重试用尽后应先从 .bak 还原再报失败"
+    assert ">nul 2>&1" in bat, "重试时要把 move 的报错也吞掉（否则黑窗刷错误）"
     print("  build_updater_bat OK")
 
 
