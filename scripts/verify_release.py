@@ -84,8 +84,16 @@ check("sha256 实测 == GitHub 服务端 digest", bool(declared) and declared ==
 
 # 真跑一次自检
 print("  跑 --self-test（可能要十几秒）…")
+# ⚠️ 必须用**剥掉 API key 环境变量**的环境跑：应用解析密钥的优先级是
+#    配置 → 凭据存储 → 环境变量，而环境变量优先级最低却最容易被顺手注入 ——
+#    本地跑过 GUI 测试后，测试里那个假 key 可能还留在会话环境里，一跑自检就是 401
+#    （实测踩过：复核因此从 9/9 掉到 7/9，白白怀疑了一遍产物）。
+#    剥掉它，应用就会去用自己那份真凭据。
+_env = {k: v for k, v in os.environ.items() if k != "DASHSCOPE_API_KEY"}
+if _env != dict(os.environ):
+    print("  （本机环境里有 DASHSCOPE_API_KEY，已剥掉后运行 —— 用应用自己保存的凭据）")
 r = subprocess.run([str(exe), "--self-test"], capture_output=True, text=True,
-                   encoding="utf-8", errors="replace", timeout=300)
+                   encoding="utf-8", errors="replace", timeout=300, env=_env)
 out = (r.stdout or "") + (r.stderr or "")
 check("--self-test 退出码 0", r.returncode == 0, f"rc={r.returncode}")
 check("--self-test 打出 GUI_SELFTEST_OK", "GUI_SELFTEST_OK" in out,
