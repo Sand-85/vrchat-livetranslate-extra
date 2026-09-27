@@ -1,4 +1,4 @@
-> **English** | [中文](README.md)
+> [中文](README.md) | **English** | [日本語](README.ja.md) | [한국어](README.ko.md) | [Русский](README.ru.md)
 
 # VRChat Live Interpretation
 
@@ -357,7 +357,7 @@ vlt/
     └── virtualmic.py     译音回灌：24k→48k 重采样 + 抖动缓冲（整句丢弃，绝不切句）
 
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release）
-tests/                    21 个文件、140 个测试函数（离线可跑，CI 逐文件执行）
+tests/                    23 个文件、144 个测试函数（离线可跑，CI 逐文件执行）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
 assets/                   图标、界面截图与赞助收款码
@@ -407,7 +407,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.1.1 "chatbox 只发"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.2.0 "界面语言"
   ```
 
 ---
@@ -423,6 +423,39 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   Same conditions as the third leg: "Audio output" ticked and a virtual sound card available, otherwise it's skipped automatically and only text is produced
 - **Typing replaces the microphone**: so it's only available when the direction includes "I speak", and only after you've clicked "Start translation"
 - **The chatbox only carries translations of what *I* say**: translations of what others say don't go into the chatbox bubble — watch the wrist display or the GUI chat area instead
+
+---
+
+## 🙏 Wishlist
+
+This is where I put the things **I want to see done but I'm not good at / don't know how to /
+don't want to do myself**. If one of them looks like something you'd enjoy, go right ahead — no
+need to ask first. When it's done, open an issue or a PR and I'll link your work under that item.
+
+> 📌 **This list keeps growing.** New wishes get added as they come to me; finished ones get removed
+> (or marked ✅ with the author credited). Star the repo, or just drop by every now and then.
+
+- [ ] **① A "how do I use this" tutorial video** — any creator, **any language**
+      Get the app installed and working end to end first (just follow
+      [0. Fastest start](#0-fastest-start-download-the-ready-made-exe)), then record a
+      beginner-friendly walkthrough: how to download and install it, where the API key goes, and how
+      to actually use it inside VRChat. Chinese / English / 日本語 / 한국어 / Русский all welcome — any
+      platform, any length, any style.
+
+- [ ] **② A written tutorial with screenshots** — **any language**
+      Same audience: walk a newcomer through everything from "download" to "first successful
+      translation" using screenshots plus text. A blog post, a docs page, a PDF or a long thread all
+      count.
+
+- [ ] **③ Native speakers to proofread the UI translations** — 日本語 / 한국어 / Русский / English
+      The UI ships in five languages, but the Japanese, Korean and Russian word lists were only ever
+      done by machine plus my own (non-native) pass — **naturalness, politeness level and consistent
+      terminology are exactly what only a native speaker can judge**. All it takes: switch the UI to
+      your language, use it for a bit, and file an issue with screenshots of anything that reads
+      wrong. Want to fix it directly instead? `vlt/locales/<lang>.py` is a plain
+      "Chinese original → your language" table — edit it and open a PR, **no code involved**.
+
+It doesn't have to be perfect — sparing one person a single footgun already counts as a win.
 
 ---
 

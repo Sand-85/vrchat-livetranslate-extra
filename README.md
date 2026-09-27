@@ -1,6 +1,6 @@
 # VRChat 实时同传
 
-> [English](README.en.md) | 中文
+> **中文** | [English](README.en.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Русский](README.ru.md)
 
 [![CI](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml/badge.svg)](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/nixi-agent/vrchat-livetranslate?label=release)](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)
@@ -353,7 +353,7 @@ vlt/
     └── virtualmic.py     译音回灌：24k→48k 重采样 + 抖动缓冲（整句丢弃，绝不切句）
 
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release）
-tests/                    21 个文件、140 个测试函数（离线可跑，CI 逐文件执行）
+tests/                    23 个文件、144 个测试函数（离线可跑，CI 逐文件执行）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
 assets/                   图标、界面截图与赞助收款码
@@ -403,7 +403,7 @@ build_exe.bat                                              :: 打包 + 打完自
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.1.1 "chatbox 只发"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.2.0 "界面语言"
   ```
 
 ---
@@ -419,6 +419,34 @@ build_exe.bat                                              :: 打包 + 打完自
   条件与第三条腿一致：勾了「译音输出」且虚拟声卡可用，否则自动跳过、只出文字
 - **打字替代的是麦克风**：所以只在方向含「我说」时可用，且需要先点「开始翻译」
 - **chatbox 只发『我说的话』的译文**：对方说的话的译文不进 chatbox 气泡，看手腕屏或界面聊天区即可
+
+---
+
+## 🙏 许愿列表（Wishlist）
+
+这里放的是**我想做、但自己不擅长 / 不会 / 不想自己做**的事。你如果看到哪条觉得「这个我能做」，
+不用先问我，直接动手就行 —— 做完开个 issue 或者 PR 喊我一声，我把你的成果挂到这条下面。
+
+> 📌 **这个列表会持续更新**：想到新的就往上加，做完的会移走（或者标上 ✅ 和作者）。
+> 想第一时间看到新增，点个 Star 或者偶尔回来翻翻即可。
+
+- [ ] **① 一份「怎么用」的教程视频** — 录制者不限，**语言不限**
+      先自己把软件装好、完整跑通一遍（照着 [零、最快上手](#零最快上手下载现成的-exe) 走就行），
+      然后录一个面向新手的教程：怎么下载安装、API key 填在哪里、怎么在 VRChat 里真正用起来。
+      中文 / English / 日本語 / 한국어 / Русский 都可以；发在哪个平台、多长、什么风格都随你。
+
+- [ ] **② 一份图文版教程** — **语言不限**
+      同样是面向新手：用截图 + 文字，把「从下载到第一次翻译成功」的全过程讲清楚。
+      博客文章、文档站、PDF、一条长帖都算数。
+
+- [ ] **③ 母语者帮忙校对界面翻译** — 需要 日本語 / 한국어 / Русский / English 的母语者
+      界面现在支持五种语言，但日/韩/俄三套词表是我的机翻 + 我这个非母语者手动过了一遍 ——
+      **语感、敬体一致性、术语统一这些只有母语者看得出来**。做法很简单：把界面切到你的语言、
+      正常用一用，把「翻错 / 不自然 / 看不懂」的地方配上截图开个 issue 就行；
+      想直接改也可以：`vlt/locales/<语言>.py` 就是一张「中文原文 → 你的语言」的对照表，
+      照着改、提 PR 即可，**不需要碰代码**。
+
+不要求做得完美 —— 能让后来的人少踩一个坑，就算成功。
 
 ---
 
