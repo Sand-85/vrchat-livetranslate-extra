@@ -663,8 +663,8 @@ class TranslationGUI:
         ov = self._cfg.overlay if isinstance(self._cfg.overlay, dict) else {}
         off = ov.get("offset") or {}
         pos = list(off.get("pos") or [0.0, 0.06, 0.02])
-        rot = list(off.get("rot") or [0, 0, 0])
-        _sz = list(ov.get("size_px") or [1024, 320])
+        rot = list(off.get("rot") or [-47, -16, 0])
+        _sz = list(ov.get("size_px") or [1024, 440])
         self._tune_panel_w = int(_sz[0])
         self._tune_values: dict[str, float] = {
             "pos_x": float(pos[0]), "pos_y": float(pos[1]), "pos_z": float(pos[2]),

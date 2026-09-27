@@ -32,10 +32,10 @@ class OverlayConfig:
     width_m: float = 0.23
     curvature: float = 0.0
     alpha: float = 0.9
-    size_px: tuple[int, int] = (1024, 320)
+    size_px: tuple[int, int] = (1024, 440)
     font: str = "C:/Windows/Fonts/msyh.ttc"
-    font_size: int = 42                      # 译文字号（面板 1024x320 时 42~48 都清晰）
-    source_font_size: int = 30               # 原文小字号
+    font_size: int = 36                      # 译文字号（面板 1024x440 时 36~44 都清晰）
+    source_font_size: int = 29               # 原文小字号
     # 配色：统一白色系，层级只靠字号 + 透明度区分（避免出现"蓝原文 + 白译文"这种像残留色的观感）
     color_translation: tuple[int, int, int] = (255, 255, 255)
     color_source: tuple[int, int, int] = (255, 255, 255)
@@ -66,10 +66,10 @@ class OverlayConfig:
             width_m=float(off.get("width_m", 0.23)),
             curvature=float(off.get("curvature", 0.0)),
             alpha=float(off.get("alpha", d.get("alpha", 0.9))),
-            size_px=tuple(d.get("size_px", (1024, 320))),          # type: ignore[arg-type]
+            size_px=tuple(d.get("size_px", (1024, 440))),          # type: ignore[arg-type]
             font=d.get("font", "C:/Windows/Fonts/msyh.ttc"),
-            font_size=int(d.get("font_size", 42)),
-            source_font_size=int(d.get("source_font_size", 30)),
+            font_size=int(d.get("font_size", 36)),
+            source_font_size=int(d.get("source_font_size", 29)),
             color_translation=tuple(d.get("color_translation", (255, 255, 255))),   # type: ignore[arg-type]
             color_source=tuple(d.get("color_source", (255, 255, 255))),             # type: ignore[arg-type]
             source_alpha=int(d.get("source_alpha", 205)),

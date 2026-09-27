@@ -66,9 +66,11 @@ def test_render_conversation_keeps_newest() -> None:
     img = render_conversation(entries, cfg)
     assert img.size == cfg.size_px
     px = img.load()
-    # 最新那条（第7句）必须出现：它的译文是白字，底部区域应有近白像素
+    # 最新那条（第7句）必须出现：它的译文是白字，**底部一带**应有近白像素。
+    # 注意别探单行：布局是底对齐的（y = h - 2*pad - used），每块尾部还有 ~14px 留白，
+    # 字号/面板高改一下，固定行就会正好落进留白里，红得莫名其妙（实测踩过）。
     w, h = img.size
-    bottom = [px[x, h - 40] for x in range(30, w - 30, 3)]
+    bottom = [px[x, y] for y in range(h - 100, h - 8, 4) for x in range(30, w - 30, 6)]
     bright = [p for p in bottom if p[0] > 200 and p[1] > 200 and p[2] > 200]
     assert bright, "底部没找到最新那条的文字（被更早的条目挤掉了）"
     print(f"  塞不下时保留最新 OK（底部近白像素 {len(bright)} 个）")

@@ -110,9 +110,10 @@ def main() -> int:
         assert d.textlength(ln, font=font) <= MAX_W + 1, \
             f"硬切后仍超宽（{d.textlength(ln, font=font):.0f}px > {MAX_W}）：{ln[:20]!r}"
 
-    # ⑥ 渲染不崩、尺寸正确、有内容
+    # ⑥ 渲染不崩、尺寸正确、有内容（尺寸取默认配置，别写死 —— 默认值改了这里就得跟着改）
+    from vlt.output.overlay import OverlayConfig
     im = render_panel(CASES[1], CASES[0])
-    assert im.size == (1024, 320), im.size
+    assert im.size == OverlayConfig().size_px, im.size
     assert im.getextrema()[3][1] > 0, "面板全透明，没有画出内容"
 
     print("\n" + "=" * 60)

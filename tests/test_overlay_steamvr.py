@@ -187,7 +187,7 @@ def test_update_uploads_texture() -> None:
     ov.update("Hello, this is a test.", "你好，这是测试。")
     assert "setOverlayRaw" in _names(), f"没有上传贴图：{_names()}"
     w, h, depth = next(c[1:] for c in CALLS if c[0] == "setOverlayRaw")
-    assert (w, h, depth) == (1024, 320, 4), f"贴图尺寸/通道不对：{w}x{h}x{depth}"
+    assert (w, h, depth) == (1024, 440, 4), f"贴图尺寸/通道不对：{w}x{h}x{depth}"
     ov.close()
     print(f"  贴图上传 OK（{w}x{h}x{depth}）")
 
