@@ -353,8 +353,19 @@ def test_all_ui_languages_window_guard() -> None:
             assert not bad_vals, (f"{lang} 下拉选项出现不该有的书写系统（{len(bad_vals)} 条）：\n"
                                   + "\n".join(f"  {b}" for b in bad_vals[:15]))
 
-            # ③ 固定字符宽的控件：文案比 width 长就会被裁
+            # ③ 固定字符宽的控件：文案要的宽度 > 给的宽度就会被裁
+            #    ⚠️ 不能只数字符数：Tk 的 `width=N` 单位是**字体平均字符宽**（本机 ≈7px），
+            #    而一个汉字/假名 ≈2 倍宽 ⇒ 字符数相等照样裁字。实测「訳文の文字サイズ」
+            #    自然宽 100px，按 8 字符只申请到 67px，屏幕上只剩「訳文の文字」。
+            #    所以用 `vlt.gui._char_width_for`（字体真实 measure 换算）来判。
+            from vlt.gui import FONT_UI, _char_width_for
             narrow: list[str] = []
+
+            def _font_spec_of(w):
+                try:
+                    return w.cget("font") or FONT_UI
+                except Exception:      # ttk 控件的字体在 style 里，取不到就用应用字体
+                    return FONT_UI
 
             def _walk_fixed(win) -> None:
                 for w in win.winfo_children():
@@ -370,9 +381,10 @@ def test_all_ui_languages_window_guard() -> None:
                         except Exception:  # noqa: BLE001
                             cw = 0
                         if txt.strip() and cw:
-                            longest = max(len(ln) for ln in txt.split("\n"))
-                            if longest > cw:
-                                narrow.append(f"{txt!r} 最长 {longest} 字，width={cw}")
+                            need_chars = _char_width_for(max(txt.split("\n"), key=len),
+                                                         _font_spec_of(w))
+                            if need_chars > cw:
+                                narrow.append(f"{txt!r} 需 {need_chars} 字符宽，只给了 {cw}")
                     _walk_fixed(w)
 
             _walk_fixed(gui._root)

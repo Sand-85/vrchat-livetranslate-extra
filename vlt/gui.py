@@ -21,6 +21,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
 import yaml
@@ -140,10 +141,31 @@ def _lang_key(shown: str, table: dict[str, str | None]) -> str | None:
     return None
 
 
-def _combo_width(names, minimum: int = 9) -> int:
-    """下拉框宽度（字符）：按当前语言里最长的名字算，避免「Автоопределение」被截断。"""
-    longest = max((len(str(n)) for n in names), default=0)
-    return max(minimum, longest + 1)
+def _char_width_for(text: str, font_spec, minimum: int = 0) -> int:
+    """把「这段文字需要多宽」换算成 Tk 的**字符宽度单位**（给 width= 用）。
+
+    ⚠️ 坑（实测）：Tk 的 `width=N` 单位是**字体平均字符宽**（本机 ≈7px），而一个汉字/假名
+    约等于 2 倍宽 ⇒ `width=len(text)` 对中日韩文字**必然裁字**：
+    「訳文の文字サイズ」自然宽 100px，按 8 个字符只申请到 67px，屏幕上只剩「訳文の文字」。
+    中文同样中招（「译文字号」需 52px、按 6 字符只给 46px），只是裁得少不容易看出来。
+    这里用字体的真实 measure 换算，并留 1 个字符余量。
+    """
+    try:
+        f = tkfont.Font(font=font_spec)
+        avg = max(1, f.measure("0"))
+        need = -(-f.measure(text) // avg) + 1     # 向上取整 + 1 字符余量
+    except Exception:  # noqa: BLE001 — 量不出来就退回字符数（至少不比改动前差）
+        need = len(text) + 1
+    return max(minimum, need)
+
+
+def _combo_width(names, minimum: int = 9, font_spec=None) -> int:
+    """下拉框宽度（字符单位）：按当前语言里最长的名字算，避免被截断。
+
+    同样受「平均字符宽 ≠ 汉字宽」影响，所以走 `_char_width_for` 换算，不直接数字符。
+    """
+    f = font_spec or FONT_UI
+    return max(minimum, max((_char_width_for(str(n), f) for n in names), default=0))
 
 
 def round_rect(cv: tk.Canvas, x1, y1, x2, y2, r, **kw):
@@ -572,7 +594,7 @@ class TranslationGUI:
                        **self._indicator_kw()).pack(side=tk.LEFT, padx=(10, 0))
         # 微调按钮紧跟「手腕屏」勾选：它是手腕屏的从属工具，放远了看不出归属
         self._tune_btn = ttk.Button(out_frame, text=t("微调 ▸"),
-                                    width=max(7, len(t("微调 ▸")) + 1),
+                                    width=_char_width_for(t("微调 ▸"), FONT_UI, 7),
                                     command=self._toggle_tune_panel)
         self._tune_btn.pack(side=tk.LEFT, padx=(4, 0))
         tk.Checkbutton(out_frame, text=t("译音输出"), variable=self._vmic_var,
@@ -684,7 +706,7 @@ class TranslationGUI:
         # 但英语 "Curvature"、俄语 "Размер оригинала" 会被 6 字宽截断 ——
         # 俄语下「Позиция X/Y/Z」全挤成「Позиц.」，三个位置参数根本分不出来（实测）。
         # 标签长到放不下三列时自动降成两列，宁可面板高一点，也不裁字。
-        label_w = max(6, max(len(spec[1]) for spec in specs) + 1)
+        label_w = max(6, max(_char_width_for(spec[1], FONT_UI) for spec in specs))
         cols = 3 if label_w <= 9 else 2
         for i, (key, label, lo, hi, res, unit) in enumerate(specs):
             row_i, col_i = divmod(i, cols)
@@ -1102,7 +1124,7 @@ class TranslationGUI:
 
         ttk.Label(body, text=t("扫码支持 · 你给的钱会变成 API token，然后被我烧掉"),
                   style="Dim.TLabel").pack(anchor=tk.CENTER, pady=(14, 4))
-        ttk.Button(body, text=t("关闭"), width=max(8, len(t("关闭")) + 1),
+        ttk.Button(body, text=t("关闭"), width=_char_width_for(t("关闭"), FONT_UI, 8),
                    command=self._close_sponsor).pack(anchor=tk.CENTER, pady=(8, 0))
 
         # 定位到主窗口附近 + 深色标题栏（与设置弹窗同一套做法）
@@ -1904,7 +1926,8 @@ class TranslationGUI:
         self._text_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
         self._text_entry.bind("<Return>", self._on_text_enter)
         self._text_entry.bind("<Escape>", lambda _e: self._text_var.set(""))
-        self._send_btn = ttk.Button(row, text=t("发送"), width=max(8, len(t("发送")) + 1),
+        self._send_btn = ttk.Button(row, text=t("发送"),
+                                    width=_char_width_for(t("发送"), FONT_UI, 8),
                                     command=self._send_typed)
         self._send_btn.pack(side=tk.LEFT)
         ttk.Label(row, text=t("回车发送 · Esc 清空"), style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
