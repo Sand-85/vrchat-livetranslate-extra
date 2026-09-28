@@ -2,14 +2,32 @@
 
 > **中文** | [English](README.en.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Русский](README.ru.md)
 
-[![CI](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml/badge.svg)](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/nixi-agent/vrchat-livetranslate?label=release)](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)
+[![CI](https://github.com/Sand-85/vrchat-livetranslate-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/Sand-85/vrchat-livetranslate-plus/actions/workflows/ci.yml)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](GUIDE.md#一前置条件)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](GUIDE.md#一前置条件)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 在 VRChat 里做**实时同声传译**：采集麦克风 / 游戏音频 → 阿里云百炼实时同传模型 →
 译文送到 **chatbox 气泡**、**VR 手腕屏**，可选把译音回灌进虚拟麦克风**让对方直接听见**。
+
+## 📌 关于本仓库
+
+本仓库是 **[nixi-agent/vrchat-livetranslate](https://github.com/nixi-agent/vrchat-livetranslate)**（MIT）的**独立增强版**，由
+[@Sand-85](https://github.com/Sand-85) 维护 —— 上游保持原样，这里维护的是一组「让译音真正可用」的增强。
+**基础全部来自上游原作者 [nixi-agent](https://github.com/nixi-agent)，协议沿用 MIT（见 `LICENSE`，版权归原作者）。**
+
+相对上游多出来的部分：
+
+| 能力 | 说明 |
+|---|---|
+| **打字替代说话** | 底栏输入框，回车即发，译文走聊天气泡 / 手腕屏 / chatbox（上游已合并 ✅） |
+| **打字也出声** | 译文经 TTS 合成后写进虚拟声卡，对方能听到（上游已合并 ✅） |
+| **流式合成（SSE）** | 打字腿「开口」从 ~1.7s 降到 **~0.52s**；源语言=目标语言时直接跳过翻译请求 |
+| **语音腿译音音源 A/B** | 设置里热切换：**A** 实时模型自带音色（延迟最低）/ **B** 本地流式 TTS（音色与打字腿**完全一致**） |
+| **语速可调** | `text_input.tts.speech_rate`（实测单调可控），音色语言锁定、cosyvoice 后端等细节见 `GUIDE.md` |
+| **修复：整段反复重念** | 多路流式 TTS 并发写同一虚拟声卡导致分片交错 —— 改为单飞队列 + 合并 |
+
+> 没有预编译 exe（上游的 Release 只含上游版本）。要 exe 请按 `GUIDE.md` 的「打包」一节自己构建。
 
 ![界面](assets/gui.png)
 

@@ -132,6 +132,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
   源语言选 `自动检测` 时对方方向的目标回落中文并在状态栏说明。改动**立即生效**并写回配置，下次启动保留
 - **设置弹窗**（`⚙ 设置`）：API key 输入 / 清除、三个音频设备下拉 + `刷新`、日志区（`导出日志压缩包…`）
 - **微调面板**（`微调 ▸`）：手腕屏的锚点 + 12 个滑块，**拖动即热重载、不用重启**（详见「六、配置」）
+- **译音音源 A/B（「⚙ 设置 → 译音音源」，热切换不用重启）**：**A `realtime`（默认）** 语音腿用实时模型自带的译音 —— 延迟最低，音色受模型限制（`Tina`/`Ethan`/`Jennifer`/`Serena`）；**B `tts`** 语音腿的译音改用本地**流式 TTS** 合成 —— 音色与打字腿**完全一致**（`text_input.tts` 那套参数），代价是要等该句**终版文本**（短句约 +0.5s，连续长句可能等到句末）。切换会**重建一次会话**（算一次连接，受 RPM 10 预算保护），文字输出不受影响；选择写回 `output.audio.mode`，下次启动沿用
 - **打字输入**：不想开麦时用键盘替代麦克风 —— 底栏输入框敲字，**回车即发**。译文走的是和说话**完全相同**的下游（聊天气泡 / 手腕屏 / chatbox）；勾了「译音输出」时**还会出声**：译文经 TTS 合成后写进虚拟声卡，对方能听到（见「六、配置」的 `text_input.tts`）。它替代的是**麦克风**，故只在方向含「我说」时可用（其余情况输入框置灰）
 
 #### 自动化验收（无头，不开窗口）
@@ -245,8 +246,12 @@ text_input:                   # 打字输入（底栏输入框，回车发送）
   timeout_s: 20               # 单次翻译超时（秒）
   tts:                        # 打字也要出声（译文经 TTS 合成 → 虚拟声卡 → 对方能听到）
     enabled: true             # 需勾选「译音输出」且方向含「我说」；没开译音时这步自动跳过，只出文字
-    model: qwen3-tts-flash    # 也可换 qwen3-tts-instruct-flash
-    voice: Cherry             # 多语言音色（中/英/日实测都能读）
+    model: qwen3-tts-flash    # 也可换 qwen3-tts-instruct-flash / qwen3-tts-vd-<日期>（自建音色同模型）
+    voice: Cherry             # 多语言音色；自建音色用它的 id，且必须与创建时所用模型配对
+    stream: true              # 流式合成（SSE）：首段音频 ~0.5s 起播；false = 等整段（~1.7s）
+    speech_rate: 1.0          # 语速（仅 qwen3-tts 生效）：1 = 默认；0.85 约慢 20%，1.2 约快 20%
+    seed: null                # 仅 cosyvoice 生效：固定后同句两次合成逐字节一致；null = 随机
+    instruction: ""           # 仅 cosyvoice 生效：可选语气/方言提示，如「请用四川话说」
     timeout_s: 30
 
 merger:
@@ -264,6 +269,8 @@ overlay:
 output:
   audio:
     enabled: false            # 译音总开关：与 directions.<X>.output_audio 是「与」关系
+    mode: realtime            # 译音音源（设置里可热切换）：realtime = A 实时模型音色（延迟最低）/
+                              # tts = B 用本地流式 TTS 合成，音色与打字腿完全一致（每句多等约 0.5s）
     device_name: ""           # 手选的虚拟声卡名（非空时优先于回退链）
 ```
 

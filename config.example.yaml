@@ -116,6 +116,11 @@ overlay:
 output:
   audio:
     enabled: false           # 总开关（与 direction 的 output_audio 是「与」关系——两边都 true 才出声）
+    # 译音**音源**（界面「设置 → 译音音源」可热切换，无需重启）：
+    #   realtime = A：实时模型自带的译音，延迟最低；音色受模型限制（Tina/Ethan/Jennifer/Serena）
+    #   tts      = B：本地流式 TTS 合成，音色与打字腿完全一致（text_input.tts）；
+    #              代价是每句要等该句**终版文本**（短句约 +0.5s；连续长句可能等到句末才开口）
+    mode: realtime
     device:                  # 按名称回退链找虚拟声卡（设备 ID 会随插拔变化，绝不写死）
       - "voicemeeter input"
       - "voicemeeter aux input"
@@ -141,8 +146,17 @@ text_input:
   # 没开译音时这一步自动跳过，只出文字。
   tts:
     enabled: true
-    model: qwen3-tts-flash   # 也可换 qwen3-tts-instruct-flash
+    # 两个后端，按模型名自动分派（响应的音频字段相同，下游管线不动）：
+    #   qwen3-tts-*  内置音色（Cherry/Ethan/…）或声音设计音色 id
+    #                —— 同一句每次合成都不同（不可复现；设计音色连音高都会漂）
+    #   cosyvoice-*  如 cosyvoice-v3.5-flash + 自制音色 id
+    #                —— seed 真生效：同 seed 逐字节一致，音色稳定（推荐）
+    model: qwen3-tts-flash   # 也可换 qwen3-tts-instruct-flash / cosyvoice-v3.5-flash
     voice: Cherry            # 多语言音色（中/英/日实测都能读）
+    seed: 1234               # 仅 cosyvoice 生效：固定后同一句两次合成逐字节一致；null = 随机
+    instruction: ""          # 仅 cosyvoice 生效：可选语气/方言提示，如「请用四川话说」
+    stream: true             # 流式合成（SSE）：首段音频 ~0.5s 就能起播；false = 等整段（~1.7s）
+    speech_rate: 1.0         # 语速（仅 qwen3-tts 生效）：1 = 默认；0.85 约慢 20%，1.2 约快 20%
     timeout_s: 30
 
 # 界面（图形界面上次的选择，**启动时自动恢复**；手改也有效）

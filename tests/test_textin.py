@@ -124,10 +124,11 @@ def _wav24k(seconds: float = 0.5) -> bytes:
     return buf.getvalue()
 
 
-def _mk_engine(direction: str = "mine", tts: dict | None = None) -> Engine:
+def _mk_engine(direction: str = "mine", tts: dict | None = None,
+               dirs: dict | None = None) -> Engine:
     cfg = AppConfig(
         session_base={"api_key": "sk-test", "model": "qwen3.8-livetranslate-flash-realtime"},
-        directions={"mine": Direction(source_lang="zh", target_lang="en")},
+        directions=dirs or {"mine": Direction(source_lang="zh", target_lang="en")},
         chatbox={"max_chars": 144},
         merger={},
         text_input={"model": "qwen-mt-flash", "timeout_s": 5, "tts": tts if tts is not None else {}},
@@ -410,6 +411,53 @@ class FakeTtsOpener:
         return FakeResp(self.json_body) if url == tts_mod.ENDPOINT else FakeBinResp(self.audio)
 
 
+class FakeSseResp:
+    """SSE 响应替身：可迭代出行，带 headers（流式判定看 Content-Type）。"""
+
+    def __init__(self, lines: list[str], ctype: str = "text/event-stream;charset=UTF-8") -> None:
+        self._body = "".join(lines).encode("utf-8")
+        self.headers = {"Content-Type": ctype}
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __iter__(self):
+        return iter(self._body.splitlines(keepends=True))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class ExplodingSseResp(FakeSseResp):
+    """读到第 fail_after 行时炸掉 —— 模拟流式中途断线。"""
+
+    def __init__(self, lines: list[str], fail_after: int) -> None:
+        super().__init__(lines)
+        self.fail_after = fail_after
+
+    def __iter__(self):
+        for i, line in enumerate(self._body.splitlines(keepends=True)):
+            if i >= self.fail_after:
+                raise ConnectionResetError("stream broke")
+            yield line
+
+
+class FakeSseOpener:
+    """返回 SSE 替身（或直接抛错），并留下请求体供断言。"""
+
+    def __init__(self, resp, err: Exception | None = None) -> None:
+        self.resp, self.err, self.req = resp, err, None
+
+    def open(self, req, timeout=None):  # noqa: ANN001
+        self.req = req
+        if self.err is not None:
+            raise self.err
+        return self.resp
+
+
 def test_tts_payload_and_decode() -> bool:
     ok = True
     wav = _wav24k(0.5)
@@ -447,6 +495,98 @@ def test_tts_payload_and_decode() -> bool:
     cond = abs(len(pcm2) - want) <= 2 and len(f2.calls) == 2
     print(f"  url 路径：{len(pcm2)}B，请求 {len(f2.calls)} 次（服务端+下载）  "
           f"{'OK' if cond else '✗'}")
+    ok &= cond
+    return ok
+
+
+def test_tts_cosyvoice_backend() -> bool:
+    """cosyvoice 后端：换端点 + seed/instruction 只长在它身上，qwen3-tts 完全不受影响。"""
+    ok = True
+    wav = _wav24k(0.25)
+    body = json.dumps({"output": {"audio": {"data": base64.b64encode(wav).decode()}}})
+    vid = "cosyvoice-v3.5-flash-vd-demo-0123456789abcdef"
+    want = 6000 * 2                                        # 0.25s @24kHz 单声道 s16
+
+    f = FakeOpener(body)
+    tts_mod._opener = f
+    pcm = tts_mod.synthesize("你好", model="cosyvoice-v3.5-flash", voice=vid,
+                             api_key="sk-x", language="zh", seed=1234)
+    payload = json.loads(f.req.data.decode("utf-8"))
+    inp = payload["input"]
+    cond = (f.req.full_url == tts_mod.ENDPOINT_COSYVOICE
+            and payload["model"] == "cosyvoice-v3.5-flash"
+            and inp["voice"] == vid and inp["format"] == "wav"
+            and inp["sample_rate"] == tts_mod.SAMPLE_RATE
+            and payload["parameters"] == {"seed": 1234}
+            and "language_type" not in inp                  # cosyvoice 不吃这个参数
+            and abs(len(pcm) - want) <= 2)
+    print(f"  cosyvoice 端点={f.req.full_url.rsplit('/', 1)[-1]} seed={payload.get('parameters')} "
+          f"pcm={len(pcm)}B（期望≈{want}）  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # seed=None → 不传 parameters（服务端自己随机）
+    f = FakeOpener(body)
+    tts_mod._opener = f
+    tts_mod.synthesize("你好", model="cosyvoice-v3.5-flash", voice=vid, api_key="sk-x", seed=None)
+    payload = json.loads(f.req.data.decode("utf-8"))
+    cond = "parameters" not in payload
+    print(f"  seed=None：payload 键={sorted(payload)}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # instruction：给了才传
+    f = FakeOpener(body)
+    tts_mod._opener = f
+    tts_mod.synthesize("你好", model="cosyvoice-v3.5-flash", voice=vid, api_key="sk-x",
+                       instruction="请用四川话说")
+    payload = json.loads(f.req.data.decode("utf-8"))
+    cond = payload["input"].get("instruction") == "请用四川话说"
+    print(f"  instruction={payload['input'].get('instruction')!r}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # 默认（qwen3-tts）仍走老端点，seed/instruction 不该泄漏过去
+    f = FakeOpener(body)
+    tts_mod._opener = f
+    tts_mod.synthesize("hi", api_key="sk-x", seed=1234, instruction="x")
+    payload = json.loads(f.req.data.decode("utf-8"))
+    cond = (f.req.full_url == tts_mod.ENDPOINT
+            and "parameters" not in payload and "instruction" not in payload["input"])
+    print(f"  回退 qwen3-tts：端点不变、seed 未泄漏  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ⑥ 语速参数（speech_rate）：只对 qwen3-tts 下发，cosyvoice 端点不吃
+    f = FakeOpener(body)
+    tts_mod._opener = f
+    tts_mod.synthesize("你好", api_key="sk-x", speech_rate=0.85)
+    payload = json.loads(f.req.data.decode("utf-8"))
+    cond = payload.get("parameters", {}).get("speech_rate") == 0.85
+    print(f"  speech_rate=0.85：parameters={payload.get('parameters')}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    f = FakeOpener(body)
+    tts_mod._opener = f
+    tts_mod.synthesize("你好", api_key="sk-x")                      # 不给 → 不下发
+    payload = json.loads(f.req.data.decode("utf-8"))
+    cond = "parameters" not in payload
+    print(f"  不给 speech_rate：payload 键={sorted(payload)}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    f = FakeOpener(body)
+    tts_mod._opener = f
+    tts_mod.synthesize("你好", model="cosyvoice-v3.5-flash", voice=vid, api_key="sk-x",
+                       seed=1234, speech_rate=0.85)                  # cosyvoice：忽略语速
+    payload = json.loads(f.req.data.decode("utf-8"))
+    cond = "speech_rate" not in payload.get("parameters", {})
+    print(f"  cosyvoice 忽略 speech_rate：parameters={payload.get('parameters')}  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+
+    # config：seed 三种写法都要能吃（含 null = 不传、脏值不炸）
+    from vlt.config import _opt_int
+
+    cond = (_opt_int(1234) == 1234 and _opt_int(None) is None
+            and _opt_int("") is None and _opt_int("abc") is None)
+    print(f"  config seed 解析：1234/None/''/'abc' → {_opt_int(1234)}/{_opt_int(None)}/"
+          f"{_opt_int('')}/{_opt_int('abc')}  {'OK' if cond else '✗'}")
     ok &= cond
     return ok
 
@@ -498,15 +638,78 @@ def test_tts_errors() -> bool:
     return ok
 
 
+def test_tts_streaming() -> bool:
+    """流式合成（打字腿延迟的大头就在这里）：SSE 分片直出 + 各种兜底。"""
+    ok = True
+    c1, c2, c3 = (b"\x01\x02" * 2400, b"\x03\x04" * 2400, b"\x05\x06" * 2400)   # 各 0.1s @24k
+    def ev(pcm: bytes) -> str:
+        return "data: " + json.dumps({"output": {"audio": {"data": base64.b64encode(pcm).decode()}}}) + "\n"
+
+    sse = [ev(c1), "data: {坏 JSON，要跳过}\n", ev(c2), "data: [DONE]\n", ev(c3)]
+
+    # ① SSE 路径：脏分片跳过、[DONE] 不当数据、顺序与字节数原样
+    f = FakeSseOpener(FakeSseResp(sse))
+    tts_mod._opener = f
+    parts = list(tts_mod.synthesize_stream("你好", api_key="sk-x", language="zh"))
+    hdrs = {k.lower(): v for k, v in (f.req.headers or {}).items()}
+    cond = (parts == [c1, c2, c3] and f.req.full_url == tts_mod.ENDPOINT
+            and hdrs.get("x-dashscope-sse") == "enable"
+            and "event-stream" in hdrs.get("accept", ""))
+    print(f"  SSE 路径：{len(parts)} 个分片（各 {len(parts[0]) if parts else 0}B），"
+          f"请求带 SSE 头={'是' if 'x-dashscope-sse' in hdrs else '否'}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ② 服务端降级成整段 JSON（没有 event-stream）→ 当一整块 yield
+    body = json.dumps({"output": {"audio": {"data": base64.b64encode(_wav24k(0.25)).decode()}}})
+    tts_mod._opener = FakeSseOpener(FakeSseResp([body], ctype="application/json"))
+    parts = list(tts_mod.synthesize_stream("你好", api_key="sk-x"))
+    cond = len(parts) == 1 and abs(len(parts[0]) - 12000) <= 2
+    print(f"  降级整段：{len(parts)} 块 / {len(parts[0]) if parts else 0}B（期望≈12000）  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ③ 流式请求被拒（HTTP 400）→ 自动退回整段 synthesize()
+    err = HTTPError(tts_mod.ENDPOINT, 400, "Bad Request", {},
+                    io.BytesIO(b'{"message":"sse not supported"}'))
+    real_s = tts_mod.synthesize
+    tts_mod.synthesize = lambda text, **kw: b"\x07" * 100
+    try:
+        tts_mod._opener = FakeSseOpener(None, err=err)
+        parts = list(tts_mod.synthesize_stream("你好", api_key="sk-x"))
+        cond = parts == [b"\x07" * 100]
+        print(f"  流式被拒 → 整段兜底：{len(parts)} 块  {'OK' if cond else '✗'}")
+        ok &= cond
+    finally:
+        tts_mod.synthesize = real_s
+
+    # ④ 中途断流 → 保住已 yield 的分片（宁可少说半句，也别整句消失）
+    tts_mod._opener = FakeSseOpener(ExplodingSseResp(sse, fail_after=2))
+    parts = list(tts_mod.synthesize_stream("你好", api_key="sk-x"))
+    cond = parts == [c1]
+    print(f"  中途断流：已 yield 的 {len(parts)} 个分片保留、未抛异常  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ⑤ 服务端在流末尾补发的「整段汇总」必须被吃掉（否则整句念两遍 —— 实测踩过）
+    tts_mod._opener = FakeSseOpener(FakeSseResp([ev(c1), ev(c2), ev(c1 + c2)]))
+    parts = list(tts_mod.synthesize_stream("你好", api_key="sk-x"))
+    cond = parts == [c1, c2]
+    print(f"  末尾整段汇总：{len(parts)} 个分片（期望 2，汇总片被丢弃）  {'OK' if cond else '✗'}")
+    ok &= cond
+    return ok
+
+
 def test_engine_tts() -> bool:
-    """打字音频必须进**同一个**虚拟麦实例，且没开译音时不白花钱。"""
+    """打字音频必须进**同一个**虚拟麦实例；默认走流式；没开译音时不白花钱。"""
     ok = True
     real_t, real_s = engine_mod.translate_text, engine_mod.synthesize
+    real_ss = engine_mod.synthesize_stream
     pcm24 = b"\x01\x00" * 2400                       # 0.1s @24k 单声道
+    called: list[str] = []
     engine_mod.translate_text = lambda text, **kw: "Hello from typing"
-    engine_mod.synthesize = lambda text, **kw: pcm24
+    engine_mod.synthesize = lambda text, **kw: (called.append(text), pcm24)[1]
+    engine_mod.synthesize_stream = lambda text, **kw: (called.append(text), iter([pcm24]))[1]
     try:
-        # ① 译音腿在 → 推进虚拟麦（48k 立体声，字节数 = 4×）+ 封句尾
+        # ① 默认（流式）→ s先合成、逐分片推进虚拟麦（48k 立体声，字节数 = 4×）+ 封句尾
         eng = _mk_engine()
         vm, st = FakeVirtualMic(), []
         eng._virtualmic, eng._chatbox = vm, FakeChatbox()
@@ -515,41 +718,65 @@ def test_engine_tts() -> bool:
         cond = (len(vm.pushed) == 1 and len(vm.pushed[0]) == len(pcm24) * 4
                 and vm.pushed[0] == resample_24k_mono_to_48k_stereo(pcm24)
                 and vm.sentences == 1 and any("已出声" in m for _l, m in st))
-        print(f"  译音腿在：推入 {len(vm.pushed)} 段（{len(vm.pushed[0]) if vm.pushed else 0}B），"
-              f"封句 {vm.sentences} 次，状态={[m for _l, m in st][-1:] }  {'OK' if cond else '✗'}")
+        print(f"  流式（默认）：推入 {len(vm.pushed)} 段（{len(vm.pushed[0]) if vm.pushed else 0}B），"
+              f"封句 {vm.sentences} 次，状态={[m for _l, m in st][-1:]}  {'OK' if cond else '✗'}")
         ok &= cond
 
-        # ② 译音腿没开 → 不合成（不能白花钱）
-        called: list[str] = []
-        engine_mod.synthesize = lambda text, **kw: (called.append(text), pcm24)[1]
-        eng2 = _mk_engine()
-        eng2._virtualmic, eng2._chatbox = None, FakeChatbox()
+        # ② stream=false → 退回整段合成，行为不变
+        called.clear()
+        eng2 = _mk_engine(tts={"stream": False})
+        vm2 = FakeVirtualMic()
+        eng2._virtualmic, eng2._chatbox = vm2, FakeChatbox()
         asyncio.run(eng2._async_send_text("你好"))
+        cond = called == ["Hello from typing"] and len(vm2.pushed) == 1 and vm2.sentences == 1
+        print(f"  stream=false：整段合成 {len(called)} 次，推入 {len(vm2.pushed)} 段  "
+              f"{'OK' if cond else '✗'}")
+        ok &= cond
+
+        # ③ 同语种（zh→zh）→ 直通、不调翻译接口（省一次请求 ≈0.25s）
+        called.clear()
+        tcalled: list[str] = []
+        engine_mod.translate_text = lambda text, **kw: (tcalled.append(text), "X")[1]
+        eng3 = _mk_engine(dirs={"mine": Direction(source_lang="zh", target_lang="zh")})
+        eng3._virtualmic, eng3._chatbox = FakeVirtualMic(), FakeChatbox()
+        asyncio.run(eng3._async_send_text("你好"))
+        cond = tcalled == [] and called == ["你好"]
+        print(f"  zh→zh 直通：翻译调用={len(tcalled)} 次，合成的是原文  {'OK' if cond else '✗'}")
+        ok &= cond
+        engine_mod.translate_text = lambda text, **kw: "Hello from typing"
+
+        # ④ 译音腿没开 → 不合成（不能白花钱）
+        called.clear()
+        eng4 = _mk_engine()
+        eng4._virtualmic, eng4._chatbox = None, FakeChatbox()
+        asyncio.run(eng4._async_send_text("你好"))
         cond = called == []
         print(f"  译音腿关：合成调用={len(called)} 次  {'OK' if cond else '✗'}")
         ok &= cond
 
-        # ③ 配置里显式关掉 tts → 同样不合成
-        eng3 = _mk_engine(tts={"enabled": False})
-        eng3._virtualmic, eng3._chatbox = FakeVirtualMic(), FakeChatbox()
-        asyncio.run(eng3._async_send_text("你好"))
+        # ⑤ 配置里显式关掉 tts → 同样不合成
+        called.clear()
+        eng5 = _mk_engine(tts={"enabled": False})
+        eng5._virtualmic, eng5._chatbox = FakeVirtualMic(), FakeChatbox()
+        asyncio.run(eng5._async_send_text("你好"))
         cond = called == []
         print(f"  tts.enabled=false：合成调用={len(called)} 次  {'OK' if cond else '✗'}")
         ok &= cond
 
-        # ④ 合成失败 → 只 warn，文字照常出去（绝不能因为出声失败把整条打字打死）
-        engine_mod.synthesize = lambda text, **kw: (_ for _ in ()).throw(
+        # ⑥ 合成失败 → 只 warn，文字照常出去（绝不能因为出声失败把整条打字打死）
+        engine_mod.synthesize_stream = lambda text, **kw: (_ for _ in ()).throw(
             tts_mod.TtsError("模拟 TTS 失败"))
-        eng4 = _mk_engine()
-        cb4, st4 = FakeChatbox(), []
-        eng4._virtualmic, eng4._chatbox = FakeVirtualMic(), cb4
-        eng4._events = EngineEvents(on_status=lambda l, m: st4.append((l, m)))
-        asyncio.run(eng4._async_send_text("你好"))
-        cond = (bool(cb4.sent) and any(l == "warn" and "打字译音失败" in m for l, m in st4))
-        print(f"  合成失败：chatbox={len(cb4.sent)} 条，状态={st4}  {'OK' if cond else '✗'}")
+        eng6 = _mk_engine()
+        cb6, st6 = FakeChatbox(), []
+        eng6._virtualmic, eng6._chatbox = FakeVirtualMic(), cb6
+        eng6._events = EngineEvents(on_status=lambda l, m: st6.append((l, m)))
+        asyncio.run(eng6._async_send_text("你好"))
+        cond = (bool(cb6.sent) and any(l == "warn" and "打字译音失败" in m for l, m in st6))
+        print(f"  合成失败：chatbox={len(cb6.sent)} 条，状态={st6}  {'OK' if cond else '✗'}")
         ok &= cond
     finally:
         engine_mod.translate_text, engine_mod.synthesize = real_t, real_s
+        engine_mod.synthesize_stream = real_ss
     return ok
 
 
@@ -562,6 +789,8 @@ def main() -> int:
         ("引擎下游", test_engine_downstream()),
         ("界面接线", test_gui_wiring()),
         ("TTS 请求体/解码", test_tts_payload_and_decode()),
+        ("TTS cosyvoice 后端", test_tts_cosyvoice_backend()),
+        ("TTS 流式合成", test_tts_streaming()),
         ("TTS 错误路径", test_tts_errors()),
         ("引擎出声路由", test_engine_tts()),
     ]
