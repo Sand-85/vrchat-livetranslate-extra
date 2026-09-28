@@ -124,12 +124,13 @@ STRINGS: dict[str, str] = {
     "A 实时模型音色": "A Real-time model voice",
     "B 打字腿同款音色（TTS）": "B Same voice as typed input (TTS)",
     "译音音源已切到 {label}": "Voice source switched to {label}",
-    "语音腿的译音由本地流式 TTS 合成，音色 = 打字腿音色（config.yaml 的 text_input.tts）；代价是每句比实时模型晚约 0.5s。":
+    "译音：音源与音色": "Voice: Source & Timbre",
+    "语音腿的译音由本地流式 TTS 合成，音色与打字腿一致（每句约 +0.5s）；音色用下方「打字译音」。":
         "The speaking side is synthesized by local streaming TTS — same voice as typed input "
-        "(text_input.tts in config.yaml); each sentence starts about 0.5 s later than the real-time model.",
-    "语音腿的译音来自实时模型本身，延迟最低；音色由 session.voice / directions.<方向>.voice 决定。":
-        "The speaking side uses the real-time model's own audio — lowest latency; the voice comes "
-        "from session.voice / directions.<direction>.voice.",
+        "(~+0.5 s per sentence); pick it in “Typed voice” below.",
+    "语音腿的译音来自实时模型本身，延迟最低；音色用下方「说话译音」。":
+        "The speaking side uses the real-time model's own audio — lowest latency; "
+        "pick the voice in “Spoken voice” below.",
     "⚠️ 还没勾选「译音输出」：本项暂不生效（没有虚拟声卡，VRChat 里听不到）。":
         "⚠️ “Voice Output” is not checked: this setting has no effect yet "
         "(no virtual mic, so VRChat can't hear it).",

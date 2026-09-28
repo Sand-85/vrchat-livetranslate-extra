@@ -948,12 +948,15 @@ class TranslationGUI:
         ttk.Label(body, text=t("设备选择自动保存到 config.yaml"),
                   style="Muted.TLabel").pack(anchor=tk.W, pady=(6, 0))
 
-        # ---- 译音音源（A/B 热切换）----
-        # 两条腿的译音从哪来：A 用实时模型自带的音频（延迟最低，音色受模型限制）；
-        # B 用本地流式 TTS 合成（音色与打字腿一致，代价每句约 +0.5s）。
-        # 切换即刻生效（引擎每侧重建一次会话），并写回 config.yaml 下次沿用。
+        # ---- 译音：音源（A/B 热切换）+ 音色 ----
+        # 一个菜单管两件事：
+        #   ① **译音从哪来**：A 用实时模型自带的音频（延迟最低）；B 用本地流式 TTS 合成
+        #      （音色与打字腿一致，代价每句约 +0.5s）。切换即刻生效（引擎每侧重建一次会话）
+        #      并写回 config.yaml 下次沿用。
+        #   ② **用什么音色**：两条腿的音色来自**不同模型**、id 不通用（跨模型混用会被服务端拒），
+        #      所以两个下拉分开 —— 跟着上面的音源一起读（A 看「说话译音」/ B 看「打字译音」）。
         ttk.Separator(body).pack(fill=tk.X, pady=14)
-        ttk.Label(body, text=t("译音音源"), style="Section.TLabel").pack(anchor=tk.W)
+        ttk.Label(body, text=t("译音：音源与音色"), style="Section.TLabel").pack(anchor=tk.W)
         self._voice_mode_var = tk.StringVar(value=str(audio_cfg.get("mode") or "realtime"))
         for val, text in (
                 ("realtime", t("A 实时模型音色（延迟最低；音色在下方「说话译音」下拉里选）")),
@@ -966,15 +969,12 @@ class TranslationGUI:
         self._voice_mode_hint.pack(anchor=tk.W, pady=(6, 0))
         self._refresh_voice_mode_hint()
 
-        # ---- 音色 ----
-        # 两条出声音色来自**不同模型**，音色 id 不通用（跨模型混用会被服务端拒），
-        # 所以分两个下拉：「说话译音」写 session.voice（实时模型直出的译音），
+        # ---- 音色（同一菜单内，跟在音源下面）----
+        # 「说话译音」写 session.voice（实时模型直出的译音）；
         # 「打字译音」写 text_input.tts.voice（文本翻译后单独调 qwen3-tts-flash）。
         # 下拉**可编辑**：表里没有的（新音色 / 声音复刻的 voice id）也能手填。
-        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
-        ttk.Label(body, text=t("音色"), style="Section.TLabel").pack(anchor=tk.W)
         vgrid = ttk.Frame(body)
-        vgrid.pack(fill=tk.X, pady=(8, 2))
+        vgrid.pack(fill=tk.X, pady=(10, 2))
         vgrid.columnconfigure(1, weight=1)
         self._speech_voice_var = tk.StringVar()
         self._tts_voice_var = tk.StringVar()
@@ -2281,9 +2281,9 @@ class TranslationGUI:
         if not on:
             txt = t("⚠️ 还没勾选「译音输出」：本项暂不生效（没有虚拟声卡，VRChat 里听不到）。")
         elif self._voice_mode_var.get() == "tts":
-            txt = t("语音腿的译音由本地流式 TTS 合成，音色 = 打字腿音色（config.yaml 的 text_input.tts）；代价是每句比实时模型晚约 0.5s。")
+            txt = t("语音腿的译音由本地流式 TTS 合成，音色与打字腿一致（每句约 +0.5s）；音色用下方「打字译音」。")
         else:
-            txt = t("语音腿的译音来自实时模型本身，延迟最低；音色由 session.voice / directions.<方向>.voice 决定。")
+            txt = t("语音腿的译音来自实时模型本身，延迟最低；音色用下方「说话译音」。")
         self._voice_mode_hint.configure(text=txt)
 
     # ---------------------------------------------------------------- 音色
