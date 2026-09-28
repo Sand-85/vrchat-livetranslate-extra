@@ -957,7 +957,8 @@ class TranslationGUI:
         #      所以两个下拉分开 —— 跟着上面的音源一起读（A 看「说话译音」/ B 看「打字译音」）。
         ttk.Separator(body).pack(fill=tk.X, pady=14)
         ttk.Label(body, text=t("译音：音源与音色"), style="Section.TLabel").pack(anchor=tk.W)
-        self._voice_mode_var = tk.StringVar(value=str(audio_cfg.get("mode") or "realtime"))
+        self._voice_mode_var = tk.StringVar(master=self._root,
+                                            value=str(audio_cfg.get("mode") or "realtime"))
         for val, text in (
                 ("realtime", t("A 实时模型音色（延迟最低；音色在下方「说话译音」下拉里选）")),
                 ("tts", t("B 打字腿同款音色（与打字一致；每句约 +0.5s）"))):

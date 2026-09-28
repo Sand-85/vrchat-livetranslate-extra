@@ -24,6 +24,12 @@ from urllib.error import HTTPError
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+# 界面语言钉死为中文：CI / 外国机器是英文系统，而本文件的断言写的是中文文案
+# （上游 test_config_save / test_update_dialog 同样的做法）。产品代码不依赖这个补丁。
+import vlt.i18n as _i18n                      # noqa: E402
+
+_i18n.detect_system_language = lambda: "zh"
+
 import vlt.engine as engine_mod            # noqa: E402
 import vlt.gui as gui_mod                  # noqa: E402
 from vlt.config import AppConfig, Direction, load_config   # noqa: E402

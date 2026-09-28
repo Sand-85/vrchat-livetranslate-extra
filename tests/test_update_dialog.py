@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 import hashlib
 import io
 import os
@@ -95,6 +96,16 @@ def _destroy(gui) -> None:
         gui._root.destroy()
     except Exception:  # noqa: BLE001
         pass
+    # ⚠️ Windows CI 上偶发进程级崩溃：`Tcl_AsyncDelete: async handler deleted by the wrong thread`
+    #    —— 本文件在一个进程里建/销毁了多个 Tk 解释器，若还有 Tk 对象活到**解释器关闭阶段**
+    #    才被回收，Tcl 的 async handler 就会被"错误的线程"删除，进程直接 abort。
+    #    这里在**主线程**把残引用断开并立即回收，不让任何 Tk 对象留到关闭阶段。
+    #    （本机复现不出来；CI 的时序更慢才撞上。）
+    try:
+        gui._root = None
+    except Exception:  # noqa: BLE001
+        pass
+    gc.collect()
 
 
 @contextlib.contextmanager
