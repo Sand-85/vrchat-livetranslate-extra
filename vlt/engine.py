@@ -30,14 +30,29 @@ from .textin import DEFAULT_MODEL as DEFAULT_TEXT_MODEL
 from .textin import DEFAULT_TIMEOUT_S as DEFAULT_TEXT_TIMEOUT_S
 from .textin import TextTranslateError, split_for_chatbox, translate_text
 from .tts import DEFAULT_MODEL as DEFAULT_TTS_MODEL
+from .tts import DEFAULT_SEED as DEFAULT_TTS_SEED
 from .tts import DEFAULT_TIMEOUT_S as DEFAULT_TTS_TIMEOUT_S
 from .tts import DEFAULT_VOICE as DEFAULT_TTS_VOICE
-from .tts import TtsError, synthesize
+from .tts import TtsError, synthesize, synthesize_stream
 
 ROOT = Path(__file__).resolve().parent.parent
 CHUNK_BYTES = 3200          # 100ms @16kHz s16le mono
 # 音频流静默超过这个时长 = 上一句说完了（给虚拟麦打句尾标记的兜底触发）
 SENTENCE_GAP_S = 0.6
+# B 模式：同一条终版在这么短时间内重复下发 → 视为服务端重复事件、不重念；
+# 超过这个间隔又出现同样的文本 → 当成用户真的又说了一遍，照念。
+VOICE_DUP_WINDOW_S = 1.0
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    """两个字符串的公共前缀长度（用来识别"同一句在续写"）。"""
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
+
+
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
 SILENCE_PEAK = 220
 
@@ -316,6 +331,18 @@ class Engine:
         self._reconnect_task: asyncio.Task | None = None
         self._last_audio_ts = 0.0      # 上一段 TTS 音频到达时刻（判句边界）
         self._pending_seal = False     # 上一句终版文本已到 → 下一段音频前封句尾
+        # B 模式（语音腿走本地 TTS）用：已经念出去的文本 + 时刻。
+        # 服务端在纯文本模式下会**连续下发多个终版**，且每个都是前一个的**前缀扩展**
+        # （`你好，` → `你好，我是逆袭。` → …）；照单全念就会叠着念（实测 ASR：
+        # 「你好你好我是我是逆袭逆袭…」）→ 这里只念**新增的后缀**。
+        self._voice_spoken = ""
+        self._voice_spoken_ts = 0.0
+        # 语音腿 TTS 必须**串行**：两路流式合成同时往同一个虚拟声卡推分片 = 分片交错，
+        # 听感就是"整段反复重念"（实测踩过：同一句的两段并发，7.57s 与 7.66s 同时开始）。
+        # 这里用「待念队列 + 单飞 worker」：并发请求被合并成一次念，不会交错。
+        self._voice_pending: list[str] = []
+        self._voice_speaking = False
+        self._speak_lock_obj: asyncio.Lock | None = None
         # ---- 黑匣子：断线定位用（不影响功能，只在断线时打出来）----
         self._audio_in_chunks = 0      # 发送出去的输入音频块数
         self._silent_chunks = 0        # 其中判为静音的块数
@@ -387,6 +414,93 @@ class Engine:
     def _chatbox_wanted(self) -> bool:
         """chatbox 只对「我说的话」方向有意义——对方的译文进手腕屏 / 聊天区，不进气泡。"""
         return "chatbox" in self._sinks and self._direction == "mine"
+
+    # ---------------------------------------------------------------- 译音音源（A/B 热切换）
+
+    def _voice_mode(self) -> str:
+        """语音腿译音的**音源**：`realtime`(A) = 实时模型自带音频；`tts`(B) = 本地流式 TTS。"""
+        audio_cfg = (self._cfg.output or {}).get("audio") or {}
+        mode = str(audio_cfg.get("mode") or "realtime").strip().lower()
+        return "tts" if mode in ("tts", "b", "typing", "same") else "realtime"
+
+    def _audio_out_enabled(self) -> bool:
+        """「译音输出」总开关（命令行 `--audio-out` 可覆盖）。"""
+        if self._audio_out_override is not None:
+            return bool(self._audio_out_override)
+        return bool(((self._cfg.output or {}).get("audio") or {}).get("enabled", False))
+
+    def _tts_cfg(self) -> dict:
+        return (self._cfg.text_input or {}).get("tts") or {}
+
+    def _typed_leg_wants_audio(self) -> bool:
+        """打字腿出声：只对「我说」方向有意义，且 text_input / tts 都开着。"""
+        if self._direction != "mine":
+            return False
+        tcfg = self._cfg.text_input or {}
+        return bool(tcfg.get("enabled", True) and self._tts_cfg().get("enabled", True))
+
+    def _needs_virtualmic(self) -> bool:
+        """虚拟声卡何时要建。
+
+        以前是「总开关 AND 方向级 output_audio」—— 结果打字腿想让译文出声、但方向级
+        output_audio 没勾时，虚拟声卡压根不建，打字 TTS 推了个寂寞（用户实测踩到）。
+        B 模式（语音腿走 TTS）与打字腿一样**不依赖**实时模型的音频输出。
+        """
+        d = self._cfg.directions.get(self._direction)
+        if d is not None and d.output_audio:
+            return True                       # A：模型的译音；B：本地 TTS 的译音（同一开关）
+        return self._typed_leg_wants_audio()   # 打字腿出声
+
+    def _session_cfg(self):
+        """按当前音源模式构造会话配置：B 模式不再向实时模型要音频输出
+        （音源是本地 TTS，要了只是白付音频 token，还会与 TTS 抢着说）。"""
+        scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
+        if self._voice_mode() == "tts":
+            scfg.output_audio = False
+        return scfg
+
+    def _speak_kwargs(self) -> dict:
+        """TTS 参数（打字腿与 B 模式共用同一套配置 → 音色天然一致）。"""
+        tts_cfg = self._tts_cfg()
+        d = self._cfg.directions.get(self._direction)
+        return dict(
+            voice=str(tts_cfg.get("voice") or DEFAULT_TTS_VOICE),
+            model=str(tts_cfg.get("model") or DEFAULT_TTS_MODEL),
+            api_key=str(self._cfg.session_base.get("api_key") or ""),
+            language=(d.target_lang if d else None),
+            seed=tts_cfg.get("seed", DEFAULT_TTS_SEED),
+            instruction=str(tts_cfg.get("instruction") or "") or None,
+            speech_rate=tts_cfg.get("speech_rate"),
+            timeout=float(tts_cfg.get("timeout_s", DEFAULT_TTS_TIMEOUT_S)),
+        )
+
+    def set_voice_output(self, mode: str) -> bool:
+        """运行时切换译音音源：A=realtime（实时模型音色）/ B=tts（打字腿同款音色）。
+
+        音频模态在会话建立时定死，所以真切换要**重建会话**（走与语言切换同一套连接预算）；
+        没在跑时只改配置，下次「开始翻译」生效。返回 False = 预算不足、已 on_status 告知。
+        """
+        norm = "tts" if str(mode).strip().lower() in ("tts", "b") else "realtime"
+        audio_cfg = (self._cfg.output or {}).get("audio")
+        if not isinstance(audio_cfg, dict):
+            return False
+        if audio_cfg.get("mode") == norm:
+            return True
+        audio_cfg["mode"] = norm
+        label = "B 打字腿同款音色（TTS）" if norm == "tts" else "A 实时模型音色"
+        if self._session is not None and self._loop is not None and self._loop.is_running():
+            now = time.monotonic()
+            rpm = int(self._cfg.session_base.get("max_new_sessions_per_minute", 4))
+            recent = [t for t in self._connect_ts if now - t < 60]
+            if len(recent) >= rpm:
+                self._events.on_status("warn",
+                    f"连接预算不足（{len(recent)}/{rpm} min），译音音源下次连接生效")
+                return False
+            asyncio.run_coroutine_threadsafe(
+                self._rebuild_session(f"译音音源已切换：{label}"), self._loop)
+        else:
+            self._events.on_status("info", f"译音音源：{label}（下次开始翻译生效）")
+        return True
 
     def set_languages(self, source_lang: str | None, target_lang: str) -> bool:
         """运行时切换语言：重建会话。预算不足时返回 False 并通过 on_status 告知。"""
@@ -496,7 +610,7 @@ class Engine:
             pass
 
     async def _build_and_run(self) -> None:
-        scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
+        scfg = self._session_cfg()
 
         if "chatbox" in self._sinks and not self._chatbox_wanted:
             msg = ("chatbox 只发『我说的话』的译文"
@@ -540,9 +654,7 @@ class Engine:
                       f"{type(exc).__name__}: {exc}", flush=True)
 
         audio_cfg = (self._cfg.output or {}).get("audio") or {}
-        audio_enabled = self._audio_out_override if self._audio_out_override is not None else audio_cfg.get("enabled", False)
-        d = self._cfg.directions.get(self._direction)
-        if audio_enabled and d is not None and d.output_audio:
+        if self._audio_out_enabled() and self._needs_virtualmic():
             self._setup_virtualmic(audio_cfg)
 
         merger_cfg = self._cfg.merger or {}
@@ -636,18 +748,21 @@ class Engine:
         self._events.on_status("info", f"会话已建立（{ms:.0f}ms）")
         self._events.on_stats({"connect_ms": round(ms, 1)})
 
-    async def _rebuild_session(self) -> None:
+    async def _rebuild_session(self, reason: str = "语言已切换") -> None:
         try:
             if self._session is not None:
                 await self._session.close()
                 self._session = None
-            scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
+            scfg = self._session_cfg()
             await self._create_session(scfg)
             d = self._cfg.directions[self._direction]
-            self._events.on_status("info",
-                f"语言已切换：{d.source_lang or '自动'}→{d.target_lang}")
+            if reason == "语言已切换":
+                self._events.on_status("info",
+                    f"{reason}：{d.source_lang or '自动'}→{d.target_lang}")
+            else:
+                self._events.on_status("info", reason)
         except Exception as exc:
-            self._events.on_status("error", f"切换语言失败：{exc}")
+            self._events.on_status("error", f"{reason}失败：{exc}")
 
     async def _pump_loop(self) -> None:
         while True:
@@ -702,6 +817,7 @@ class Engine:
         if d.is_final:
             # 一句译音出完了 → 下一段音频起始处给它封句尾（虚拟麦整句丢弃的依据）
             self._pending_seal = True
+            self._maybe_speak_final(text)
         if self._overlay is not None:
             self._overlay.update(text, d.source or "")
         if self._merger is not None and self._chatbox_wanted:
@@ -766,9 +882,121 @@ class Engine:
         if s is not None and (self._reconnect_task is None or self._reconnect_task.done()):
             self._reconnect_task = asyncio.create_task(self._reconnect_loop(reason))
 
-    def _on_audio(self, pcm: bytes) -> None:
-        if self._virtualmic is None:
+    def _maybe_speak_final(self, text: str) -> None:
+        """B 模式：语音腿的译音改由**本地 TTS**合成（音色与打字腿完全一致）。
+
+        A 模式（默认）下这里什么都不做 —— 音频由实时模型自带（`_on_audio`）。
+
+        ⚠️ 关键：纯文本模式下服务端会**连续下发多个终版**，每个是前一个的**前缀扩展**
+        （`你好，` → `你好，我是逆袭。` → `你好，我是逆袭。今天…`）。所以这里只念**增量后缀**，
+        否则同一段话被念好几遍（实测踩过：ASR 转写「你好你好我是我是逆袭逆袭…」）。
+        """
+        if self._voice_mode() != "tts" or self._virtualmic is None:
             return
+        if not self._audio_out_enabled():
+            return
+        dd = self._cfg.directions.get(self._direction)
+        if dd is None or not dd.output_audio:
+            return
+        text = (text or "").strip()
+        if not text or self._loop is None or not self._loop.is_running():
+            return
+        delta = self._voice_delta_for(text)
+        if delta is None:
+            return
+        if delta == text:
+            # 新的一句：先给上一句封句尾（虚拟麦整句丢弃的依据）
+            self._virtualmic.end_sentence()
+        self._schedule_voice_speak(delta)
+
+    def _speak_lock(self) -> asyncio.Lock:
+        """所有 TTS 出声共用一把锁（打字腿 + 语音腿 B 模式都写同一个虚拟声卡）。"""
+        if self._speak_lock_obj is None:
+            self._speak_lock_obj = asyncio.Lock()
+        return self._speak_lock_obj
+
+    def _schedule_voice_speak(self, text: str) -> None:
+        """把 B 模式的增量文本排进**串行**队列（已在念就先攒着，念完一起念下一段）。
+
+        ⚠️ 绝不能每个增量各起一个任务：前缀扩展的终版会在 0.1s 内连着来，两路流式分片
+        交错进同一个抖动缓冲 → 听感就是整段反复重念（实测踩过）。
+        """
+        if not text:
+            return
+        self._voice_pending.append(text)
+        if self._voice_speaking or self._loop is None or not self._loop.is_running():
+            return
+        self._voice_speaking = True
+        asyncio.run_coroutine_threadsafe(self._voice_speak_worker(), self._loop)
+
+    async def _voice_speak_worker(self) -> None:
+        """单飞 worker：把排队中的增量合并成一次 TTS 念出去（顺序严格不乱）。"""
+        try:
+            while self._voice_pending:
+                text = "".join(self._voice_pending)
+                self._voice_pending.clear()
+                await self._speak_for_voice_leg(text)
+        finally:
+            self._voice_speaking = False
+
+    def _voice_delta_for(self, text: str) -> str | None:
+        """B 模式判重：这次的终版**该念哪一段**（None = 不用念）。
+
+        纯文本模式下服务端会连续下发多个终版，且每个都是前一个的**前缀扩展**
+        （`你好，` → `你好，我是逆袭。` → `你好，我是逆袭。今天…`）；照单全念就会
+        叠着念（实测 ASR：「你好你好我是我是逆袭逆袭…」）。规则：
+
+        - 前缀扩展 → 只返回**新增后缀**（标点轻微漂移也能认出，见 80% 共同前缀）；
+        - 同一条终版在 `VOICE_DUP_WINDOW_S` 内重复下发 → None（服务端重复事件）；
+        - 更短/等长的重复下发 → None；
+        - 与游标无关的新句子 → 整句返回，并把游标移到新句子。
+        """
+        prev = self._voice_spoken
+        if not prev:
+            self._voice_spoken, self._voice_spoken_ts = text, time.monotonic()
+            return text
+        if text == prev:
+            if time.monotonic() - self._voice_spoken_ts < VOICE_DUP_WINDOW_S:
+                return None
+            self._voice_spoken, self._voice_spoken_ts = text, time.monotonic()
+            return text
+        common = _common_prefix_len(text, prev)
+        growing = len(text) > len(prev)
+        # 续写时按"旧文本"量共同前缀；更短的重复下发则按"新文本"量；
+        # 下限取 2 字（"你好，"→"你好，我是逆袭。"这种短句扩展也要认出来），
+        # 同时容忍末尾一两个字的标点漂移（服务端偶尔改写标点）。
+        base = len(prev) if growing else len(text)
+        if common >= max(2, int(base * 0.8)):
+            if not growing:
+                # 更短/等长的重复下发：短时间内算服务端重复事件；
+                # 隔得够久则是用户真的又说了一遍 → 照念（别把真重复吞掉）
+                if time.monotonic() - self._voice_spoken_ts < VOICE_DUP_WINDOW_S:
+                    return None
+                self._voice_spoken, self._voice_spoken_ts = text, time.monotonic()
+                return text
+            delta = text[common:].strip()
+            self._voice_spoken, self._voice_spoken_ts = text, time.monotonic()
+            return delta or None
+        self._voice_spoken, self._voice_spoken_ts = text, time.monotonic()
+        return text
+
+    async def _speak_for_voice_leg(self, text: str) -> None:
+        """把语音腿的终版译文送进流式 TTS（分片直推，首段 ~0.5s 起播）。
+
+        与打字腿共用同一把锁 → 同一时刻只有一路在往虚拟声卡写，分片绝不交错。
+        """
+        try:
+            async with self._speak_lock():
+                await asyncio.to_thread(self._speak_stream, text, self._speak_kwargs())
+        except TtsError as exc:
+            self._events.on_status("warn", f"语音译音失败：{exc}（文字输出不受影响）")
+        except Exception as exc:  # noqa: BLE001
+            self._events.on_status("warn",
+                f"语音译音异常：{type(exc).__name__}: {exc}（文字输出不受影响）")
+
+    def _on_audio(self, pcm: bytes) -> None:
+        if self._virtualmic is None or self._voice_mode() == "tts":
+            return              # B 模式音源是本地 TTS，模型偶尔漏过来的音频一律不要
         self._audio_chunks += 1
         stereo = resample_24k_mono_to_48k_stereo(pcm)
         # 句子边界（两条触发，缺一不可）：
@@ -804,18 +1032,36 @@ class Engine:
         asyncio.run_coroutine_threadsafe(self._async_send_text(text), self._loop)
         return True
 
+    def _speak_stream(self, text: str, kw: dict) -> float:
+        """把流式合成的分片**就地**喂给虚拟声卡，返回推入的秒数。
+
+        在**工作线程**里跑（`asyncio.to_thread`）：迭代 SSE 是阻塞 IO。
+        虚拟声卡自带抖动缓冲（攒到 buffer_ms 起播 / 停更 0.35s 强制起播），
+        所以第一个分片就能让它开口 —— 这就是打字腿"开口时间"从 ~1.9s 降到 ~0.4s 的原因。
+        """
+        total = 0
+        for pcm24 in synthesize_stream(text, **kw):
+            self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
+            total += len(pcm24)
+        self._virtualmic.end_sentence()
+        return total / 2 / 24000
+
     async def _async_send_text(self, text: str) -> None:
         d = self._cfg.directions.get(self._direction) or Direction()
         tcfg = self._cfg.text_input or {}
         try:
-            translated = await asyncio.to_thread(
-                translate_text, text,
-                target_lang=d.target_lang or "en",
-                source_lang=d.source_lang,
-                model=str(tcfg.get("model") or DEFAULT_TEXT_MODEL),
-                api_key=str(self._cfg.session_base.get("api_key") or ""),
-                timeout=float(tcfg.get("timeout_s", DEFAULT_TEXT_TIMEOUT_S)),
-            )
+            if d.source_lang and d.target_lang and d.source_lang == d.target_lang:
+                # 同语种直通：源=目标时 MT 只是原样回吐（实测），省一次请求（≈0.25s）也不花钱
+                translated = text
+            else:
+                translated = await asyncio.to_thread(
+                    translate_text, text,
+                    target_lang=d.target_lang or "en",
+                    source_lang=d.source_lang,
+                    model=str(tcfg.get("model") or DEFAULT_TEXT_MODEL),
+                    api_key=str(self._cfg.session_base.get("api_key") or ""),
+                    timeout=float(tcfg.get("timeout_s", DEFAULT_TEXT_TIMEOUT_S)),
+                )
         except TextTranslateError as exc:
             self._events.on_status("error", f"打字翻译失败：{exc}")
             return
@@ -841,18 +1087,18 @@ class Engine:
         spoke_s = 0.0
         tts_cfg = tcfg.get("tts") or {}
         if self._virtualmic is not None and tts_cfg.get("enabled", True):
+            kw = self._speak_kwargs()      # 与语音腿 B 模式共用同一套参数 → 音色天然一致
             try:
-                pcm24 = await asyncio.to_thread(
-                    synthesize, translated,
-                    voice=str(tts_cfg.get("voice") or DEFAULT_TTS_VOICE),
-                    model=str(tts_cfg.get("model") or DEFAULT_TTS_MODEL),
-                    api_key=str(self._cfg.session_base.get("api_key") or ""),
-                    language=d.target_lang,
-                    timeout=float(tts_cfg.get("timeout_s", DEFAULT_TTS_TIMEOUT_S)),
-                )
-                self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
-                self._virtualmic.end_sentence()
-                spoke_s = len(pcm24) / 2 / 24000
+                if tts_cfg.get("stream", True):
+                    # 流式：首包 ~0.4s 就能起播（整段合成要等 1.6~1.9s 才开口）
+                    # 与语音腿 B 模式共用锁：连打两条也不会两路分片交错
+                    async with self._speak_lock():
+                        spoke_s = await asyncio.to_thread(self._speak_stream, translated, kw)
+                else:
+                    pcm24 = await asyncio.to_thread(synthesize, translated, **kw)
+                    self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
+                    self._virtualmic.end_sentence()
+                    spoke_s = len(pcm24) / 2 / 24000
             except TtsError as exc:
                 self._events.on_status("warn", f"打字译音失败：{exc}（文字输出不受影响）")
             except Exception as exc:  # noqa: BLE001
@@ -938,7 +1184,7 @@ class Engine:
         except Exception:  # noqa: BLE001
             pass
         self._session = None
-        scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
+        scfg = self._session_cfg()
         await self._create_session(scfg)
 
     async def _reconnect_loop(self, reason: str) -> None:
