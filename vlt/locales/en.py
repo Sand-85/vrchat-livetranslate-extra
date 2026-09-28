@@ -115,6 +115,24 @@ STRINGS: dict[str, str] = {
     "麦克风:": "Microphone:",
     "VRChat 音频:": "VRChat Audio:",
     "译音输出:": "Voice Output:",
+    # ---- 译音音源 A/B（设置弹窗，热切换）----
+    "译音音源": "Voice Source",
+    "A 实时模型音色（延迟最低；音色限 Tina / Ethan / Jennifer / Serena）":
+        "A Real-time model voice (lowest latency; only Tina / Ethan / Jennifer / Serena)",
+    "B 打字腿同款音色（与打字一致；每句约 +0.5s）":
+        "B Same voice as typed input (matches typing; ~+0.5 s per sentence)",
+    "A 实时模型音色": "A Real-time model voice",
+    "B 打字腿同款音色（TTS）": "B Same voice as typed input (TTS)",
+    "译音音源已切到 {label}": "Voice source switched to {label}",
+    "语音腿的译音由本地流式 TTS 合成，音色 = 打字腿音色（config.yaml 的 text_input.tts）；代价是每句比实时模型晚约 0.5s。":
+        "The speaking side is synthesized by local streaming TTS — same voice as typed input "
+        "(text_input.tts in config.yaml); each sentence starts about 0.5 s later than the real-time model.",
+    "语音腿的译音来自实时模型本身，延迟最低；音色由 session.voice / directions.<方向>.voice 决定。":
+        "The speaking side uses the real-time model's own audio — lowest latency; the voice comes "
+        "from session.voice / directions.<direction>.voice.",
+    "⚠️ 还没勾选「译音输出」：本项暂不生效（没有虚拟声卡，VRChat 里听不到）。":
+        "⚠️ “Voice Output” is not checked: this setting has no effect yet "
+        "(no virtual mic, so VRChat can't hear it).",
     "设备选择自动保存到 config.yaml": "Device selection is saved to config.yaml automatically",
     "日志": "Logs",
     "导出日志压缩包…": "Export Log Archive…",

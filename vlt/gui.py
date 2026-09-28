@@ -905,6 +905,24 @@ class TranslationGUI:
         ttk.Label(body, text=t("设备选择自动保存到 config.yaml"),
                   style="Muted.TLabel").pack(anchor=tk.W, pady=(6, 0))
 
+        # ---- 译音音源（A/B 热切换）----
+        # 两条腿的译音从哪来：A 用实时模型自带的音频（延迟最低，音色受模型限制）；
+        # B 用本地流式 TTS 合成（音色与打字腿一致，代价每句约 +0.5s）。
+        # 切换即刻生效（引擎每侧重建一次会话），并写回 config.yaml 下次沿用。
+        ttk.Separator(body).pack(fill=tk.X, pady=14)
+        ttk.Label(body, text=t("译音音源"), style="Section.TLabel").pack(anchor=tk.W)
+        self._voice_mode_var = tk.StringVar(value=str(audio_cfg.get("mode") or "realtime"))
+        for val, text in (
+                ("realtime", t("A 实时模型音色（延迟最低；音色限 Tina / Ethan / Jennifer / Serena）")),
+                ("tts", t("B 打字腿同款音色（与打字一致；每句约 +0.5s）"))):
+            tk.Radiobutton(body, text=text, value=val, variable=self._voice_mode_var,
+                           command=self._on_voice_mode_change,
+                           **self._indicator_kw()).pack(anchor=tk.W, pady=(4, 0))
+        self._voice_mode_hint = ttk.Label(body, text="", style="Muted.TLabel",
+                                          justify=tk.LEFT, wraplength=420)
+        self._voice_mode_hint.pack(anchor=tk.W, pady=(6, 0))
+        self._refresh_voice_mode_hint()
+
         # ---- 日志 ----
         ttk.Separator(body).pack(fill=tk.X, pady=(14, 10))
         log_head = ttk.Frame(body)
@@ -2124,6 +2142,54 @@ class TranslationGUI:
             print(f"[gui] 译音输出总开关 → {'开' if want else '关'}（已写入 config.yaml）", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] 保存译音开关失败：{exc}", flush=True)
+        self._refresh_voice_mode_hint()
+
+    # ---- 译音音源 A/B（热切换）----
+
+    def _on_voice_mode_change(self) -> None:
+        """A/B 热切换：改内存配置 → 写回 config.yaml → 通知在跑的引擎重建会话。
+
+        「热」在哪：两条腿都**不用重启程序**。引擎侧重建会话是按需的（受连接预算保护，
+        RPM 10 下每次切换算一次连接），切换期间的文字输出不受影响。
+        """
+        mode = "tts" if self._voice_mode_var.get() == "tts" else "realtime"
+        audio_cfg = self._cfg.output.setdefault("audio", {})
+        audio_cfg["mode"] = mode
+        self._save_audio_mode(mode)
+        for eng in list(self._engines):
+            try:
+                eng.set_voice_output(mode)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[gui] 切换译音音源失败：{type(exc).__name__}: {exc}", flush=True)
+        label = t("B 打字腿同款音色（TTS）") if mode == "tts" else t("A 实时模型音色")
+        self._set_status("info", t("译音音源已切到 {label}", label=label))
+        self._refresh_voice_mode_hint()
+
+    def _save_audio_mode(self, mode: str) -> None:
+        """把译音音源写回 config.yaml（output.audio.mode），下次启动沿用。"""
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            return
+        try:
+            text = p.read_text(encoding="utf-8")
+            text = _yaml_set_in_text(text, ["output", "audio", "mode"], _fmt_scalar(mode))
+            _write_config_text(p, text)
+            print(f"[gui] 译音音源 → {mode}（已写入 config.yaml）", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 保存译音音源失败：{exc}", flush=True)
+
+    def _refresh_voice_mode_hint(self) -> None:
+        """给 A/B 选项配一句「现在会怎样」的说明（含没开总开关时的提醒）。"""
+        if not hasattr(self, "_voice_mode_hint"):
+            return
+        on = bool(((self._cfg.output or {}).get("audio") or {}).get("enabled", False))
+        if not on:
+            txt = t("⚠️ 还没勾选「译音输出」：本项暂不生效（没有虚拟声卡，VRChat 里听不到）。")
+        elif self._voice_mode_var.get() == "tts":
+            txt = t("语音腿的译音由本地流式 TTS 合成，音色 = 打字腿音色（config.yaml 的 text_input.tts）；代价是每句比实时模型晚约 0.5s。")
+        else:
+            txt = t("语音腿的译音来自实时模型本身，延迟最低；音色由 session.voice / directions.<方向>.voice 决定。")
+        self._voice_mode_hint.configure(text=txt)
 
     def _push_lang_to_engines(self) -> None:
         a, b = self._lang_pair["source"], self._lang_pair["target"] or "en"
@@ -2765,6 +2831,8 @@ class TranslationGUI:
         cfg = load_config()
         cfg.directions["mine"].source_lang = "zh"
         cfg.directions["mine"].target_lang = "en"
+        # 自检只验链路，**不碰真实音频设备**（否则用户的虚拟声卡被写进测试音频）。
+        cfg.output.setdefault("audio", {})["enabled"] = False
 
         events = EngineEvents(on_text=on_text, on_status=on_status)
         engine = Engine(
@@ -2802,6 +2870,7 @@ class TranslationGUI:
         cfg.directions["theirs"].target_lang = "zh"
 
         engines: list[Engine] = []
+        cfg.output.setdefault("audio", {})["enabled"] = False   # 自检不碰真实音频设备
         for who, direction, pcm_path in (("mine", "mine", zh), ("theirs", "theirs", en)):
             def on_text(src, txt, final, who=who):
                 self._add_text(src, txt, final, who=who)
