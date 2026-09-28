@@ -570,6 +570,20 @@ def test_pending_download() -> None:
         assert uc.check_pending_download(exe, current_version="9.9.9") is None
     assert not new_exe.exists() and not pending.exists()
     assert "不比当前" in buf.getvalue(), "换完残留分支没留痕"
+    # 当前版本号不是严格 X.Y.Z（测试版/预发布版，如 0.4.0-beta.1）→ 新旧无法比较，
+    # ⚠️ 绝不能当成「换完剩下的残留」删掉（is_newer 对不可解析版本一律返回 False，
+    #    那是防御性默认值，不是「不比当前新」的结论）。
+    new_exe.write_bytes(body)
+    uc.write_pending(tmp, "9.9.9", sha)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        hit = uc.check_pending_download(exe, current_version="0.4.0-beta.1")
+    assert hit is not None, "当前版本号不可解析时，校验完好的待更新文件被误判成残留丢弃"
+    assert new_exe.exists() and pending.exists(), "文件不该被清掉"
+    assert "无法比较" in buf.getvalue(), "无法比较分支没留痕"
+    new_exe.unlink()
+    pending.unlink()
+
     print("  write_pending / check_pending_download OK")
 
 

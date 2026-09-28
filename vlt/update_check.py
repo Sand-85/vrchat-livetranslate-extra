@@ -541,9 +541,17 @@ def check_pending_download(exe_path: Path,
         _cleanup("记录文件损坏")
         return None
     if current_version and not is_newer(version, current_version):
-        # 待替换版本不新于当前版本 = 上次其实换成功了、只是残留没清掉
-        _cleanup(f"（v{version}）不比当前 v{current_version} 新，是换完剩下的")
-        return None
+        # ⚠️ is_newer() 在**任一边版本号不合法**时也返回 False（它的注释写着「防御：绝不崩」），
+        #    但「没法比」和「不比当前新」是两回事 —— 把前者当成残留，就会把一个校验完好的
+        #    更新包直接删掉。真机触发条件：当前版本是 0.4.0-beta.1 这类非严格 X.Y.Z
+        #    （测试版/预发布版），于是每次退出都把下载好的更新当垃圾清理。
+        if parse_version(current_version) is None:
+            print(f"[update] 当前版本 v{current_version} 不是严格 X.Y.Z，与待更新文件 "
+                  f"v{version} 无法比较新旧：保留待复核，不按残留清理", flush=True)
+        else:
+            # 待替换版本不新于当前版本 = 上次其实换成功了、只是残留没清掉
+            _cleanup(f"（v{version}）不比当前 v{current_version} 新，是换完剩下的")
+            return None
     actual = file_sha256(new_exe)
     if actual != expected:
         _cleanup(f"完整性复核不通过（期望 {expected[:12]}… 实测 {actual[:12]}…）")
