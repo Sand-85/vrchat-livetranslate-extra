@@ -199,7 +199,7 @@ def test_gui_starts_without_any_key() -> None:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             gui = TranslationGUI()                 # 关键：不能抛，窗口要建起来
 
-        # ★ 未配置态：状态槽位显示**可点按钮**（跳转百炼开通页），不是纯展示标签。
+        # ★ 未配置态：状态槽位显示**可点按钮**（跳转千问云开通页），不是纯展示标签。
         # （旧约定「状态永远不可点」已被本次需求推翻——仅限未配置态。）
         assert gui._key_btn.winfo_manager() == "pack", "未配置时应显示可点按钮"
         assert gui._key_btn.winfo_class() == "TButton", \
@@ -223,8 +223,8 @@ def test_gui_starts_without_any_key() -> None:
                 os.environ[k] = v
 
 
-# 期望值原样写死在测试里：防止实现抄错、或被格式化工具顺手「规范化」改写（推广码必须逐字符一致）。
-_EXPECTED_BAILIAN_URL = "https://www.aliyun.com/minisite/goods?userCode=q8nma978"
+# 期望值原样写死在测试里：防止实现抄错、或被格式化工具顺手「规范化」改写。
+_EXPECTED_QIANWEN_URL = "https://www.qianwenai.com/"
 
 
 def test_key_chip_button_switching() -> None:
@@ -243,16 +243,16 @@ def test_key_chip_button_switching() -> None:
     os.environ.pop("DASHSCOPE_API_KEY", None)
     try:
         from vlt import gui as gui_mod
-        from vlt.gui import BAILIAN_SIGNUP_URL, TranslationGUI
+        from vlt.gui import QIANWEN_SIGNUP_URL, TranslationGUI
 
         # 链接必须逐字符等于简报里那一行
-        assert BAILIAN_SIGNUP_URL == _EXPECTED_BAILIAN_URL, \
-            f"BAILIAN_SIGNUP_URL 与简报不一致：{BAILIAN_SIGNUP_URL!r}"
+        assert QIANWEN_SIGNUP_URL == _EXPECTED_QIANWEN_URL, \
+            f"QIANWEN_SIGNUP_URL 与简报不一致：{QIANWEN_SIGNUP_URL!r}"
 
         with contextlib.redirect_stdout(buf):
             gui = TranslationGUI()
 
-        # ---- 未配置态：按钮可见、可点，点击 → webbrowser.open(BAILIAN_SIGNUP_URL) ----
+        # ---- 未配置态：按钮可见、可点，点击 → webbrowser.open(QIANWEN_SIGNUP_URL) ----
         assert gui._key_btn.winfo_manager() == "pack", "未配置时应显示可点按钮"
         assert not gui._key_chip.winfo_manager(), "未配置时标签不应显示"
         calls = []
@@ -263,11 +263,11 @@ def test_key_chip_button_switching() -> None:
                 gui._key_btn.invoke()                # 打桩：绝不真开浏览器
         finally:
             gui_mod.webbrowser.open = orig_open
-        assert calls == [BAILIAN_SIGNUP_URL], \
-            f"点击按钮应以 BAILIAN_SIGNUP_URL 调 webbrowser.open，实际：{calls!r}"
+        assert calls == [QIANWEN_SIGNUP_URL], \
+            f"点击按钮应以 QIANWEN_SIGNUP_URL 调 webbrowser.open，实际：{calls!r}"
         out = buf.getvalue()
-        assert "[gui]" in out and BAILIAN_SIGNUP_URL in out, "点击成功/失败都要打日志"
-        print("  未配置态：按钮点击 → webbrowser.open(BAILIAN_SIGNUP_URL) OK（已打桩）")
+        assert "[gui]" in out and QIANWEN_SIGNUP_URL in out, "点击成功/失败都要打日志"
+        print("  未配置态：按钮点击 → webbrowser.open(QIANWEN_SIGNUP_URL) OK（已打桩）")
 
         # ---- 运行时切换：保存 key → 立刻变回纯展示 TLabel（按钮不残留） ----
         with contextlib.redirect_stdout(buf):

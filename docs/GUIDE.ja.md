@@ -12,7 +12,7 @@
 **`VRChatLiveTranslate.exe`** を入手し（**単一ファイル・インストール不要・コンソールウィンドウなし**）、
 ダブルクリックするだけです。
 
-- **Alibaba Cloud Bailian（百錬）の API key** はご自身で用意してください。「⚙ 設定」で貼り付けて保存します
+- **Qwen Cloud の API key** はご自身で用意してください。「⚙ 設定」で貼り付けて保存します
 - 設定とログは `%APPDATA%\vrchat-livetranslate` に置かれます（読み取り専用フォルダに exe を置いても動作します）
 - ポータブル運用（設定を exe と同じ場所に）したい場合は、exe の隣に**空の `portable.txt`** を置きます
 - 古いバージョンが exe の隣に `config.yaml` / `logs/` を残している場合、初回起動時に**自動で新しい場所へ移行**します。元のファイルは削除されません
@@ -45,7 +45,7 @@
    <https://www.python.org/downloads/release/python-3119/>
 3. **VRChat**：設定で OSC を有効化（`OSC enabled: True`）し、チャット吹き出しの表示を **Everyone** にします
 4. **SteamVR** — 「相手の発話 → 手首オーバーレイ」を使う場合のみ必要
-5. **Alibaba Cloud Bailian（百錬）の API key**（個人の実名認証で OK）
+5. **Qwen Cloud の API key**（個人の実名認証で OK）
 
 ## 2. インストール（ソースから）
 
@@ -61,7 +61,7 @@ python -m venv .venv
 
 ## 3. API key の設定
 
-> 🔑 Bailian のアカウントをお持ちでない場合はこちら → **[Alibaba Cloud Bailian に登録 ▸](https://www.aliyun.com/minisite/goods?userCode=q8nma978)**
+> 🔑 Qwen Cloud のアカウントをお持ちでない場合はこちら → **[Qwen Cloud に登録 ▸](https://www.qianwenai.com/)**
 
 以下の順に探索し、**最初に見つかったものが使われます**：
 
@@ -114,7 +114,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 | エリア | 内容 |
 |---|---|
 | 1 行目 | `翻訳を開始` / `翻訳を停止`、方向のラジオボタン（`自分` / `相手` / `双方向`）、言語ペアのドロップダウン（原文 → 訳文）、右側に `☕ サポート` と `⚙ 設定` |
-| 2 行目 | `出力:` の `chatbox` / `手首オーバーレイ` / `翻訳音声を出力` チェックボックスと `微調整 ▸` ボタン。右端に API key の状態（設定済みなら `API key 設定済み`、**未設定ならクリックできる「⚠ API key 未設定 ・ Bailian の登録はこちら ▸」**） |
+| 2 行目 | `出力:` の `chatbox` / `手首オーバーレイ` / `翻訳音声を出力` チェックボックスと `微調整 ▸` ボタン。右端に API key の状態（設定済みなら `API key 設定済み`、**未設定ならクリックできる「⚠ API key 未設定 ・ Qwen Cloud の登録はこちら ▸」**） |
 | チャット欄 | 右の青い吹き出し＝自分の発話、左の灰色＝相手の発話。1 つの吹き出しは 2 行構成で、**上に原文を小さく、下に訳文を大きく**表示。履歴はスクロール可（最大 500 件） |
 | ステータスバー | 左：色付きの丸印＋最新の状態メッセージ／右：統計（`実行中` / `{n} 件翻訳` / `初回差分 {ms}ms`）。両者は重なりません |
 | 下部バー | **テキスト入力**：`テキスト入力:` 欄と `送信`。**Enter で送信**（`Esc` でクリア）。方向に「自分」が含まれるときだけ有効で、それ以外はグレーアウトします |

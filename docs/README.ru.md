@@ -1,4 +1,4 @@
-> [中文](README.md) | [English](README.en.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | **Русский**
+> [中文](../README.md) | [English](README.en.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | **Русский**
 
 # vrchat-livetranslate
 
@@ -6,14 +6,14 @@
 [![Release](https://img.shields.io/github/v/release/nixi-agent/vrchat-livetranslate?label=release)](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](GUIDE.ru.md#1-что-нужно-заранее)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](GUIDE.ru.md#1-что-нужно-заранее)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green)](../LICENSE)
 
 **Синхронный перевод прямо в VRChat**: захватывает микрофон / звук игры → отправляет в модель
-синхронного перевода Alibaba Cloud Bailian (百炼) → перевод уходит в **пузырь chatbox** и на
+синхронного перевода Qwen Cloud → перевод уходит в **пузырь chatbox** и на
 **экран на запястье в VR**; дополнительно можно вернуть переведённый голос в виртуальную
 звуковую карту, чтобы **собеседник услышал его напрямую**.
 
-![Интерфейс](assets/gui.png)
+![Интерфейс](../assets/gui.png)
 
 ---
 
@@ -93,9 +93,9 @@
 
 - В Китае: сканируйте через WeChat / Alipay
 
-![QR-коды](assets/sponsor-qrcodes.png)
+![QR-коды](../assets/sponsor-qrcodes.png)
 
-- 🔑 Ещё не зарегистрировались в Bailian? → **[Регистрация в Alibaba Cloud Bailian ▸](https://www.aliyun.com/minisite/goods?userCode=q8nma978)**
+- 🔑 Ещё не зарегистрировались в Qwen Cloud? → **[Регистрация в Qwen Cloud ▸](https://www.qianwenai.com/)**
 
 > В верхней панели интерфейса тоже есть кнопка «☕ Поддержать» — она открывает те же ссылки.
 
@@ -103,4 +103,4 @@
 
 ## Лицензия
 
-[MIT License](LICENSE) © 2026 Nixi
+[MIT License](../LICENSE) © 2026 Nixi

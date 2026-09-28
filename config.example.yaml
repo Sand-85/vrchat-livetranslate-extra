@@ -15,9 +15,11 @@ session:
   model: qwen3.8-livetranslate-flash-realtime
   # 实测：旧域名可用，无需 WorkspaceId。要迁到 maas 域名时改成
   #   wss://{workspace_id}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime 并填 workspace_id
-  base_url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
+  base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime
   workspace_id: ""
   # ⚠️ 必须显式指定：不填会抛 Voice 'Chelsie' is not supported（纯文本模式也校验）
+  # 这是「说话译音」的音色（实时模型直出）；也可在界面「⚙ 设置 → 音色」里选。
+  # 音色 id 按模型区分，不能与下面 text_input.tts 的音色表混用。
   voice: Tina
   # 断句：留空 = 用服务端默认（3.8 为 speaker_detection）；也可填 server_vad
   turn_detection: null
@@ -152,7 +154,7 @@ text_input:
     #   cosyvoice-*  如 cosyvoice-v3.5-flash + 自制音色 id
     #                —— seed 真生效：同 seed 逐字节一致，音色稳定（推荐）
     model: qwen3-tts-flash   # 也可换 qwen3-tts-instruct-flash / cosyvoice-v3.5-flash
-    voice: Cherry            # 多语言音色（中/英/日实测都能读）
+    voice: Cherry            # 多语言音色（中/英/日实测都能读）；界面「⚙ 设置 → 音色」也可选
     seed: 1234               # 仅 cosyvoice 生效：固定后同一句两次合成逐字节一致；null = 随机
     instruction: ""          # 仅 cosyvoice 生效：可选语气/方言提示，如「请用四川话说」
     stream: true             # 流式合成（SSE）：首段音频 ~0.5s 就能起播；false = 等整段（~1.7s）

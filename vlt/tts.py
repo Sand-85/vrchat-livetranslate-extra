@@ -34,15 +34,22 @@ from typing import Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
-ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-# cosyvoice 系走另一个端点（响应形态相同：output.audio.data / url）
-ENDPOINT_COSYVOICE = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer"
+ENDPOINT = "https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation"
+# cosyvoice 系走另一个端点（响应形态相同：output.audio.data / url）；同一网关，只是路径不同
+ENDPOINT_COSYVOICE = "https://maas.qianwenaiapi.com/api/v1/services/audio/tts/SpeechSynthesizer"
 DEFAULT_MODEL = "qwen3-tts-flash"
 DEFAULT_VOICE = "Cherry"
 DEFAULT_TIMEOUT_S = 30.0
 # 仅 cosyvoice 生效：固定 seed 让同一句两次合成**逐字节一致**（可复现、可缓存）
 DEFAULT_SEED = 1234
 SAMPLE_RATE = 24000
+
+# 说话译音用的是 Qwen-Omni 系列音色（Tina/Cindy/…），qwen3-tts-flash **不认这些 id**
+# （会 InvalidParameter）。要试听它们只能走非实时 Qwen-Omni —— 同一个 compatible-mode
+# 端点（textin.py 已在用、同一把 key、无需 workspace），但音频输出**强制流式**。
+OMNI_ENDPOINT = "https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions"
+DEFAULT_OMNI_MODEL = "qwen3.5-omni-flash"
+DEFAULT_OMNI_VOICE = "Tina"
 
 # 目标语言码 → DashScope 的 language_type（可选参数；拿不准就不传，服务端自己判）
 LANG_NAMES = {
@@ -307,3 +314,91 @@ def synthesize_stream(
         yield synthesize(text, voice=voice, model=model, api_key=api_key, language=language,
                          seed=seed, instruction=instruction, speech_rate=speech_rate,
                          timeout=timeout)
+
+
+def synthesize_omni(
+    text: str,
+    *,
+    voice: str = DEFAULT_OMNI_VOICE,
+    model: str = DEFAULT_OMNI_MODEL,
+    api_key: str = "",
+    timeout: float = DEFAULT_TIMEOUT_S,
+) -> bytes:
+    """用**非实时 Qwen-Omni** 合成一段文本 → 24kHz 单声道 s16le PCM（与 `synthesize` 同格式）。
+
+    为何单独一条路：说话译音的音色（Tina/Cindy/Liora Mira…）属于 Qwen-Omni 系列，
+    `qwen3-tts-flash` 不支持（跨模型混用会 InvalidParameter），要试听只能走 Omni。
+
+    实现要点（均有官方文档依据）：
+    - Omni 是对话模型，音频输出**必须** `stream=True`；自己解 SSE，把分片的
+      `choices[0].delta.audio.data`（base64）**拼接后一次解码**（官方示例就是这么干的）。
+    - 它不是逐字 TTS：下一条指令让它朗读样例句，个别措辞可能略有出入 —— 试听音色足够。
+    - 回的是 24k 单声道音频（可能裸 PCM、也可能带 WAV 头），统一过一遍解码器，
+      解不动就当裸 s16le PCM 直接用（本就是目标格式）。
+    """
+    text = (text or "").strip()
+    if not text:
+        raise TtsError("内容为空")
+    if not (api_key or "").strip():
+        raise TtsError("还没配置 API key（见界面右上角「设置」）")
+
+    payload = {
+        "model": model or DEFAULT_OMNI_MODEL,
+        "messages": [{"role": "user",
+                      "content": f"请逐字朗读下面引号内的这句话，只朗读、不要回答或补充任何内容：「{text}」"}],
+        "modalities": ["text", "audio"],
+        "audio": {"voice": voice or DEFAULT_OMNI_VOICE, "format": "wav"},
+        "stream": True,                             # ⚠️ Omni 音频输出必须流式
+        "stream_options": {"include_usage": True},
+    }
+    req = Request(OMNI_ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                  headers={"Authorization": f"Bearer {api_key}",
+                           "Content-Type": "application/json",
+                           "Accept": "text/event-stream"}, method="POST")
+    b64: list[str] = []
+    try:
+        with _get_opener().open(req, timeout=timeout) as r:
+            for raw_line in r:                        # 逐行读 SSE
+                line = raw_line.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except Exception:  # noqa: BLE001 — 心跳/不完整帧直接略过
+                    continue
+                if isinstance(obj.get("error"), dict):
+                    err = obj["error"]
+                    raise TtsError(str(err.get("message") or err)[:300])
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                aud = (choices[0].get("delta") or {}).get("audio") or {}
+                if aud.get("data"):
+                    b64.append(aud["data"])
+    except HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:  # noqa: BLE001
+            pass
+        raise TtsError(f"HTTP {exc.code}：{detail or exc.reason}") from exc
+    except URLError as exc:
+        raise TtsError(f"网络不可达：{exc.reason}") from exc
+    except TtsError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise TtsError(f"{type(exc).__name__}: {exc}") from exc
+
+    if not b64:
+        raise TtsError("服务端没返回音频")
+    try:
+        raw = base64.b64decode("".join(b64))
+    except Exception as exc:  # noqa: BLE001
+        raise TtsError(f"base64 音频解析失败：{exc}") from exc
+    try:
+        return _decode_to_24k_mono(raw)
+    except TtsError:
+        return raw                                  # 已是裸 24k 单声道 s16le PCM，直接用

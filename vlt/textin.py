@@ -4,7 +4,7 @@
     实测 `qwen3.8-livetranslate-flash-realtime` **不接受文本入口** ——
     发 `conversation.item.create`（input_text）之后再发 `response.create`，
     服务端直接回 `invalid_request_error / invalid_value: 'response.create'`。
-    所以打字走百炼的**文本翻译**接口（compatible-mode /chat/completions）。
+    所以打字走千问云的**文本翻译**接口（compatible-mode /chat/completions）。
 
 **为什么默认 `qwen-mt-flash` 而不是 `qwen3-livetranslate-flash`**：
     后者是实时模型的文本兄弟，但实测它的文本接口**会原样回吐**（中文进、中文出；
@@ -21,7 +21,7 @@ import json
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
-ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+ENDPOINT = "https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions"
 DEFAULT_MODEL = "qwen-mt-flash"
 DEFAULT_TIMEOUT_S = 20.0
 
@@ -33,7 +33,7 @@ def _get_opener():
     """返回一个**显式禁用代理**的 opener。
 
     国内端点直连：注册表里的系统代理（翻墙客户端）在国内域名上是纯负担，
-    代理挂掉时会把本可直连的百炼请求一起拖死 —— 这个项目已经在代理上吃过亏。
+    代理挂掉时会把本可直连的千问云请求一起拖死 —— 这个项目已经在代理上吃过亏。
     """
     global _opener
     if _opener is None:

@@ -74,6 +74,76 @@ def _yaml_set_in_text(text: str, path: list[str], value: str) -> str:
     return "\n".join(lines)
 
 
+def _yaml_set_or_create(text: str, path: list[str], value: str) -> str:
+    """就地改一个（可嵌套的）叶子值；**父级键缺失时按缩进补建整条链**。
+
+    与 `_yaml_set_in_text` 同一取舍（保住注释 / 空行 / 键顺序，只在写前校验合法 YAML），
+    区别只在「老配置里整段不存在」：旧函数遇到父键找不到就返回原文（静默 no-op），
+    本函数把缺失的层级补到**已存在的父块末尾**（顶层缺就补到文件末尾）。
+    场景：GUI 新加的打字译音音色写 `text_input.tts.voice`，而用户的旧 `config.yaml`
+    是从更早的模板生成的、根本没有 `text_input` 段 —— 不补建的话这个设置永远存不下去。
+    已存在的路径（如 `session.voice`）走就地替换，行为与旧函数一致。
+    """
+    lines = text.split("\n")
+
+    def _find(key: str, indent: int, lo: int, hi: int):
+        """在 [lo,hi) 里找缩进为 indent 的 `key:` → (行号, 子区间 lo, 子区间 hi)；没有返回 None。"""
+        head = re.compile(rf"^(\s*){re.escape(key)}:(\s*)([^#\n]*)(\s*#.*)?$")
+        for i in range(lo, hi):
+            s = lines[i].lstrip()
+            if not s or s.startswith("#"):
+                continue
+            if len(lines[i]) - len(s) != indent:
+                continue
+            if head.match(lines[i]) is None:
+                continue
+            child_hi = hi
+            for j in range(i + 1, hi):
+                s2 = lines[j].lstrip()
+                if not s2 or s2.startswith("#"):
+                    continue
+                if len(lines[j]) - len(s2) <= indent:
+                    child_hi = j
+                    break
+            return i, i + 1, child_hi
+        return None
+
+    def _walk(key_path: list[str], indent: int, lo: int, hi: int) -> None:
+        got = _find(key_path[0], indent, lo, hi)
+        if got is None:                          # 父级缺失 → 在本区间末尾补建整条链
+            at = hi
+            if at == len(lines) and lines and lines[-1] == "":
+                at = len(lines) - 1               # 保住文件末尾的那个换行
+            block: list[str] = []
+            for d, k in enumerate(key_path):
+                pad = " " * (indent + 2 * d)
+                block.append(f"{pad}{k}: {value}" if d == len(key_path) - 1 else f"{pad}{k}:")
+            lines[at:at] = block
+            return
+        i, clo, chi = got
+        if len(key_path) == 1:                    # 叶子：就地替换，连带删掉旧的块子行（同旧函数）
+            m = re.compile(rf"^(\s*){re.escape(key_path[0])}:(\s*)([^#\n]*)(\s*#.*)?$").match(lines[i])
+            comment = (m.group(4) or "").strip() if m else ""
+            lines[i] = f"{' ' * indent}{key_path[0]}: {value}" + (f"   {comment}" if comment else "")
+            j = i + 1
+            while j < chi:
+                s = lines[j].lstrip()
+                if not s:
+                    j += 1
+                    continue
+                ind_j = len(lines[j]) - len(s)
+                if ind_j > indent or (ind_j == indent and s.startswith("- ")):
+                    j += 1
+                    continue
+                break
+            del lines[i + 1:j]
+            return
+        _walk(key_path[1:], indent + 2, clo, chi)
+
+    _walk(path, 0, 0, len(lines))
+    return "\n".join(lines)
+
+
 def _write_config_text(path: Path, text: str) -> None:
     """写回配置前先验证仍是合法 YAML。
 

@@ -1,4 +1,4 @@
-> [中文](README.md) | [English](README.en.md) | **日本語** | [한국어](README.ko.md) | [Русский](README.ru.md)
+> [中文](../README.md) | [English](README.en.md) | **日本語** | [한국어](README.ko.md) | [Русский](README.ru.md)
 
 # vrchat-livetranslate
 
@@ -6,14 +6,14 @@
 [![Release](https://img.shields.io/github/v/release/nixi-agent/vrchat-livetranslate?label=release)](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](GUIDE.ja.md#1-前提条件)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](GUIDE.ja.md#1-前提条件)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green)](../LICENSE)
 
 VRChat の中で**リアルタイム同時通訳**を行うツールです：マイク／ゲーム音声を取り込み →
-Alibaba Cloud Bailian（百錬）のリアルタイム通訳モデルへ送信 → 訳文を **chatbox の吹き出し**と
+Qwen Cloud のリアルタイム通訳モデルへ送信 → 訳文を **chatbox の吹き出し**と
 **VR 手首オーバーレイ**に表示します。オプションで、翻訳音声を仮想サウンドカードに戻して
 **相手にそのまま聞かせる**こともできます。
 
-![画面](assets/gui.png)
+![画面](../assets/gui.png)
 
 ---
 
@@ -93,9 +93,9 @@ UI は **簡体字中国語 / English / 日本語 / 한국어 / Русский**
 
 - 中国国内：WeChat / Alipay でスキャン
 
-![QR コード](assets/sponsor-qrcodes.png)
+![QR コード](../assets/sponsor-qrcodes.png)
 
-- 🔑 Bailian のアカウントをお持ちでない場合はこちら → **[Alibaba Cloud Bailian に登録 ▸](https://www.aliyun.com/minisite/goods?userCode=q8nma978)**
+- 🔑 Qwen Cloud のアカウントをお持ちでない場合はこちら → **[Qwen Cloud に登録 ▸](https://www.qianwenai.com/)**
 
 > GUI の上部バーにも「☕ サポート」ボタンがあり、同じリンクを開きます。
 
@@ -103,4 +103,4 @@ UI は **簡体字中国語 / English / 日本語 / 한국어 / Русский**
 
 ## ライセンス
 
-[MIT License](LICENSE) © 2026 Nixi
+[MIT License](../LICENSE) © 2026 Nixi

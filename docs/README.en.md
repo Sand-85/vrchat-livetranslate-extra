@@ -1,4 +1,4 @@
-> [中文](README.md) | **English** | [日本語](README.ja.md) | [한국어](README.ko.md) | [Русский](README.ru.md)
+> [中文](../README.md) | **English** | [日本語](README.ja.md) | [한국어](README.ko.md) | [Русский](README.ru.md)
 
 # vrchat-livetranslate
 
@@ -6,14 +6,14 @@
 [![Release](https://img.shields.io/github/v/release/nixi-agent/vrchat-livetranslate?label=release)](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](GUIDE.en.md#1-prerequisites)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](GUIDE.en.md#1-prerequisites)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green)](../LICENSE)
 
 Real-time simultaneous interpretation inside VRChat: capture your microphone / game audio →
-Alibaba Cloud Bailian real-time interpretation model → translation goes to the **chatbox bubble** and a
+Qwen Cloud real-time interpretation model → translation goes to the **chatbox bubble** and a
 **VR wrist display**, with an optional path that feeds the translated voice back into a virtual
 microphone so the other person **hears it directly**.
 
-![UI](assets/gui.png)
+![UI](../assets/gui.png)
 
 ---
 
@@ -94,9 +94,9 @@ It doesn't have to be perfect — sparing one person a single footgun already co
 
 - In China: scan with WeChat / Alipay
 
-![QR codes](assets/sponsor-qrcodes.png)
+![QR codes](../assets/sponsor-qrcodes.png)
 
-- 🔑 Haven't signed up for Bailian yet? **[Sign up for Alibaba Cloud Bailian ▸](https://www.aliyun.com/minisite/goods?userCode=q8nma978)**
+- 🔑 Haven't signed up for Qwen Cloud yet? **[Sign up for Qwen Cloud ▸](https://www.qianwenai.com/)**
 
 > The GUI's top bar also has a "☕ Sponsor" button — it opens the same links.
 
@@ -104,4 +104,4 @@ It doesn't have to be perfect — sparing one person a single footgun already co
 
 ## License
 
-[MIT License](LICENSE) © 2026 Nixi
+[MIT License](../LICENSE) © 2026 Nixi

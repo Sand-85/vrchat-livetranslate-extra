@@ -11,7 +11,7 @@
 **[Releases](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)** 에서
 **`VRChatLiveTranslate.exe`** 를 받아(**단일 파일, 설치 불필요, 콘솔 창 없음**) 두 번 클릭하면 됩니다.
 
-- **Alibaba Cloud Bailian(百炼) API key** 는 직접 준비하셔야 합니다. "⚙ 설정"에서 붙여넣고 저장하세요
+- **Qwen Cloud API key** 는 직접 준비하셔야 합니다. "⚙ 설정"에서 붙여넣고 저장하세요
 - 설정과 로그는 `%APPDATA%\vrchat-livetranslate` 에 저장됩니다(읽기 전용 폴더에 exe를 둬도 동작합니다)
 - 포터블로 쓰고 싶다면(설정이 exe 옆에 저장됨) exe 옆에 **빈 `portable.txt`** 를 두세요
 - 예전 버전이 exe 옆에 남긴 `config.yaml` / `logs/` 는 첫 실행 때 **자동으로 새 위치로 이전**됩니다. 원본 파일은 삭제되지 않습니다
@@ -44,7 +44,7 @@
    <https://www.python.org/downloads/release/python-3119/>
 3. **VRChat**: 설정에서 OSC를 켜고(`OSC enabled: True`) 채팅 말풍선 표시를 **Everyone** 으로 설정
 4. **SteamVR** — "상대가 말함 → 손목 오버레이" 기능에만 필요합니다
-5. **Alibaba Cloud Bailian(百炼) API key** (개인 실명 인증이면 충분합니다)
+5. **Qwen Cloud API key** (개인 실명 인증이면 충분합니다)
 
 ## 2. 설치 (소스)
 
@@ -60,7 +60,7 @@ python -m venv .venv
 
 ## 3. API key 설정
 
-> 🔑 Bailian 계정이 없다면 → **[Alibaba Cloud Bailian 가입 ▸](https://www.aliyun.com/minisite/goods?userCode=q8nma978)**
+> 🔑 Qwen Cloud 계정이 없다면 → **[Qwen Cloud 가입 ▸](https://www.qianwenai.com/)**
 
 아래 순서로 찾아보고 **처음 발견된 것이 사용됩니다**:
 
@@ -113,7 +113,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 | 영역 | 내용 |
 |---|---|
 | 첫 줄 | `번역 시작` / `번역 중지`, 방향 라디오(`나` / `상대` / `양방향`), 언어 쌍 드롭다운(원문 → 번역문), 오른쪽에 `☕ 후원` 과 `⚙ 설정` |
-| 둘째 줄 | `출력:` 아래 `chatbox` / `손목 오버레이` / `번역 음성 출력` 체크박스와 `미세 조정 ▸` 버튼. 맨 오른쪽에 API key 상태(설정되면 `API key 설정됨`, **아니면 클릭 가능한 "⚠ API key 미설정 ・ Bailian 등록은 여기 ▸"**) |
+| 둘째 줄 | `출력:` 아래 `chatbox` / `손목 오버레이` / `번역 음성 출력` 체크박스와 `미세 조정 ▸` 버튼. 맨 오른쪽에 API key 상태(설정되면 `API key 설정됨`, **아니면 클릭 가능한 "⚠ API key 미설정 ・ Qwen Cloud 등록은 여기 ▸"**) |
 | 채팅 영역 | 오른쪽 파란 말풍선 = 내가 한 말, 왼쪽 회색 = 상대가 한 말. 말풍선 하나에 두 줄 — **위에 원문(작게), 아래에 번역문(크게)**. 기록 스크롤 가능(최대 500개) |
 | 상태 표시줄 | 왼쪽: 색 점 + 최신 상태 메시지 / 오른쪽: 통계(`실행 중` / `{n}건 번역` / `첫 증분 {ms}ms`). 둘은 겹치지 않습니다 |
 | 하단 줄 | **텍스트 입력**: `텍스트 입력:` 칸과 `보내기`. **Enter로 전송** (`Esc` 로 지우기). 방향에 "나"가 포함될 때만 활성화되고, 아니면 회색으로 비활성화됩니다 |

@@ -177,7 +177,7 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
     s = raw.get("session", {}) or {}
     session_base = {
         "model": s.get("model", "qwen3.8-livetranslate-flash-realtime"),
-        "base_url": s.get("base_url", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"),
+        "base_url": s.get("base_url", "wss://maas.qianwenaiapi.com/api-ws/v1/realtime"),
         "voice": s.get("voice", "Tina"),
         "turn_detection": s.get("turn_detection"),
         "workspace_id": s.get("workspace_id") or "",

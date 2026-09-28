@@ -26,9 +26,14 @@ from tkinter import messagebox, ttk
 
 import yaml
 
-from . import __version__, crashlog, i18n, update_check
-from .config import Direction, DEFAULT_CONFIG, load_config
-from .config_io import _fmt_scalar, _write_config_text, _yaml_set_in_text
+from . import __version__, crashlog, i18n, tts, update_check
+from .config import Direction, DEFAULT_CONFIG, load_api_key, load_config
+from .config_io import (
+    _fmt_scalar,
+    _write_config_text,
+    _yaml_set_in_text,
+    _yaml_set_or_create,
+)
 from .i18n import t
 from .output.overlay import OverlayConfig, WristOverlay
 from .devices import (
@@ -39,10 +44,17 @@ from .devices import (
     format_device_display,
 )
 from .engine import Engine, EngineEvents
+from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
 
 from .paths import APP_DIR, BUNDLE_DIR
 
 ROOT = APP_DIR
+
+# 音色试听：固定样例句 + 打字侧合成模型。两条腿各走各的模型（音色不通用）：
+#   打字侧 qwen3-tts-flash（一次性 HTTP）；说话侧走非实时 Qwen-Omni（见 tts.synthesize_omni，
+#   因为 Tina 等实时音色只有 Omni 认）。VOICE_PREVIEW_MODEL 只用于打字侧。
+VOICE_PREVIEW_TEXT = "你好，这是我的音色试听。"
+VOICE_PREVIEW_MODEL = "qwen3-tts-flash"
 
 FONT = ("Microsoft YaHei UI", 11)          # 译文（主）
 FONT_SMALL = ("Microsoft YaHei UI", 9)     # 原文（辅，小一号）
@@ -78,9 +90,9 @@ COLOR_SRC_THEIRS = TEXT_DIM
 SPONSOR_URL = "https://ko-fi.com/kcmnixi"
 SPONSOR_QR_SIZE = 240          # 收款码等比缩放的目标边长（严禁拉伸：拉变形就扫不出来）
 
-# ---- 百炼开通页（未配置 API key 时，状态按钮点击跳转）----
-# 链接逐字符照抄用户给的那串，不做任何 URL 解码/重组 —— 推广码被改坏就白推广了。
-BAILIAN_SIGNUP_URL = "https://www.aliyun.com/minisite/goods?userCode=q8nma978"
+# ---- 千问云开通页（未配置 API key 时，状态按钮点击跳转）----
+# 链接逐字符照抄，不做任何 URL 解码/重组。
+QIANWEN_SIGNUP_URL = "https://www.qianwenai.com/"
 
 
 def _sponsor_qr_specs() -> list[tuple[str, Path]]:
@@ -220,6 +232,34 @@ def _dir_writable(d: Path) -> bool:
     return True
 
 
+def _play_pcm_local(pcm_24k_mono: bytes) -> None:
+    """在**本地默认输出设备**播放 24kHz 单声道 s16le PCM（阻塞到播完）。
+
+    试听走本地扬声器，绝不进虚拟声卡 —— 否则对面会在 VRChat 里听到你的试听音。
+    离线测试会把它打桩替换（CI 机器没有音频设备，也不该真出声）。
+    """
+    if not pcm_24k_mono:
+        return
+    import numpy as np
+    import sounddevice as sd
+
+    arr = np.frombuffer(pcm_24k_mono, dtype=np.int16)
+    sd.play(arr, samplerate=24000, blocking=True)
+
+
+# 服务端拒收音色的典型报错标记：说话译音用的是实时模型（Qwen-Omni）音色，
+# 像默认的 Tina 根本不在 qwen3-tts-flash 的支持表里，合成会返回 InvalidParameter。
+_UNSUPPORTED_VOICE_MARKERS = ("invalidparameter", "not supported", "is not support",
+                              "engine error")
+
+
+def _is_unsupported_voice_err(msg: str) -> bool:
+    """判断一条 TtsError 是不是「音色不被该模型支持」—— 用来把说话侧的失败
+    说成人话（而不是甩一串服务端原始报文）。"""
+    low = (msg or "").lower()
+    return any(m in low for m in _UNSUPPORTED_VOICE_MARKERS)
+
+
 class TranslationGUI:
     """主界面。headless=True 时不创建 Tk 窗口（给 --self-test / --self-test-dual 用）。"""
 
@@ -235,6 +275,9 @@ class TranslationGUI:
         self._sinks: set[str] = set()
         self._pending_starts = 0
         self._start_job: str | None = None
+        self._preview_busy = False               # 一次只试听一个音色（避免两条音频叠着放）
+        self._speech_preview_btn = None
+        self._tts_preview_btn = None
         self._bubbles: list[_Bubble] = []
         self._current: dict[str, _Bubble] = {}  # 每个方向一条正在流式刷新的气泡
         self._auto_scroll = True
@@ -395,7 +438,7 @@ class TranslationGUI:
         style.configure("Section.TLabel", foreground=TEXT_DIM,
                         font=("Microsoft YaHei UI", 8, "bold"))
         # API key 状态槽位里的两个控件：**已配置 → 纯展示标签**（「⚙ 设置」是改 key 的入口，
-        # 标签不可点）；**未配置 → 可点按钮**，点击用默认浏览器打开百炼开通页（BAILIAN_SIGNUP_URL）。
+        # 标签不可点）；**未配置 → 可点按钮**，点击用默认浏览器打开千问云开通页（QIANWEN_SIGNUP_URL）。
         style.configure("Chip.TLabel", font=FONT_STATUS, foreground=TEXT_DIM)
         style.configure("ChipWarn.TLabel", font=FONT_STATUS, foreground=COLOR_WARN)
         # 未配置按钮：暗橙底 + 警示橙字，悬停/按下亮一档 —— 警示色系但不刺眼。
@@ -581,14 +624,14 @@ class TranslationGUI:
         out_frame.pack(fill=tk.X)
 
         # 右侧：API key 状态槽位（**先 pack 占住右侧**——本行空间不足时 Tk 从最后 pack 的开始裁）。
-        # 槽位里两个控件互斥显示：已配置 → 纯展示标签；未配置 → 可点按钮（跳百炼开通页）。
+        # 槽位里两个控件互斥显示：已配置 → 纯展示标签；未配置 → 可点按钮（跳千问云开通页）。
         # 显隐只换**常驻容器**里的孩子：若直接对控件 pack_forget/重 pack，它会被排到本行
         # packing list 末尾，运行时切换后反而成了空间不足时第一个被裁的。
         self._key_slot = ttk.Frame(out_frame)
         self._key_slot.pack(side=tk.RIGHT, padx=(0, 4))
         self._key_chip = ttk.Label(self._key_slot, text="", style="Chip.TLabel")
         self._key_btn = ttk.Button(self._key_slot, text="", style="ChipWarn.TButton",
-                                   command=self._open_bailian_signup)
+                                   command=self._open_qianwen_signup)
         # 初始先放标签；随后 _build_settings_dialog() 里的 _refresh_key_status() 会按真实状态切换。
         self._key_chip.pack()
 
@@ -913,7 +956,7 @@ class TranslationGUI:
         ttk.Label(body, text=t("译音音源"), style="Section.TLabel").pack(anchor=tk.W)
         self._voice_mode_var = tk.StringVar(value=str(audio_cfg.get("mode") or "realtime"))
         for val, text in (
-                ("realtime", t("A 实时模型音色（延迟最低；音色限 Tina / Ethan / Jennifer / Serena）")),
+                ("realtime", t("A 实时模型音色（延迟最低；音色在下方「说话译音」下拉里选）")),
                 ("tts", t("B 打字腿同款音色（与打字一致；每句约 +0.5s）"))):
             tk.Radiobutton(body, text=text, value=val, variable=self._voice_mode_var,
                            command=self._on_voice_mode_change,
@@ -922,6 +965,58 @@ class TranslationGUI:
                                           justify=tk.LEFT, wraplength=420)
         self._voice_mode_hint.pack(anchor=tk.W, pady=(6, 0))
         self._refresh_voice_mode_hint()
+
+        # ---- 音色 ----
+        # 两条出声音色来自**不同模型**，音色 id 不通用（跨模型混用会被服务端拒），
+        # 所以分两个下拉：「说话译音」写 session.voice（实时模型直出的译音），
+        # 「打字译音」写 text_input.tts.voice（文本翻译后单独调 qwen3-tts-flash）。
+        # 下拉**可编辑**：表里没有的（新音色 / 声音复刻的 voice id）也能手填。
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+        ttk.Label(body, text=t("音色"), style="Section.TLabel").pack(anchor=tk.W)
+        vgrid = ttk.Frame(body)
+        vgrid.pack(fill=tk.X, pady=(8, 2))
+        vgrid.columnconfigure(1, weight=1)
+        self._speech_voice_var = tk.StringVar()
+        self._tts_voice_var = tk.StringVar()
+        self._speech_voice_combo = ttk.Combobox(
+            vgrid, textvariable=self._speech_voice_var, state="normal", width=18)
+        self._tts_voice_combo = ttk.Combobox(
+            vgrid, textvariable=self._tts_voice_var, state="normal", width=18)
+        # 每行末尾一个「试听」按钮：合成一句固定样例、在**本地扬声器**播放。
+        # 说话侧是尽力而为 —— 实时模型音色（如默认 Tina）多为 Qwen-Omni 独占，
+        # qwen3-tts-flash 合成不了，会明确提示「暂不支持试听」，绝不静默失败。
+        _preview_w = _char_width_for(t("试听中…"), FONT_UI, 6)
+        for i, (label, combo, values, kind, cb) in enumerate((
+                (t("说话译音:"), self._speech_voice_combo,
+                 voice_choices(self._effective_speech_voice(), REALTIME_VOICES),
+                 "speech", self._on_preview_speech_voice),
+                (t("打字译音:"), self._tts_voice_combo,
+                 voice_choices(str((self._cfg.text_input.get("tts") or {}).get("voice") or ""),
+                               TTS_VOICES),
+                 "tts", self._on_preview_tts_voice))):
+            ttk.Label(vgrid, text=label, style="Dim.TLabel").grid(
+                row=i, column=0, sticky="w", pady=3)
+            combo.configure(values=values)
+            combo.grid(row=i, column=1, sticky="ew", padx=(8, 0), pady=3)
+            btn = ttk.Button(vgrid, text=t("试听"), width=_preview_w, command=cb)
+            btn.grid(row=i, column=2, sticky="w", padx=(8, 0), pady=3)
+            if kind == "speech":
+                self._speech_preview_btn = btn
+            else:
+                self._tts_preview_btn = btn
+        # 从配置回显：读不到就显服务端默认（说话 Tina / 打字 Cherry），
+        # 与 config.load 的回落口径一致 —— 宁可显示真正在生效的值，也不显示空白。
+        self._speech_voice_var.set(self._effective_speech_voice())
+        self._tts_voice_var.set(
+            str((self._cfg.text_input.get("tts") or {}).get("voice") or "Cherry"))
+        self._speech_voice_combo.bind("<<ComboboxSelected>>", self._on_speech_voice_change)
+        self._speech_voice_combo.bind("<Return>", self._on_speech_voice_change)
+        self._tts_voice_combo.bind("<<ComboboxSelected>>", self._on_tts_voice_change)
+        self._tts_voice_combo.bind("<Return>", self._on_tts_voice_change)
+        self._voice_note = ttk.Label(body, text=t("说话译音跟随「译音输出」开关（改完下次开始翻译生效）；"
+                                                  "打字译音立刻生效"),
+                                     style="Muted.TLabel", justify=tk.LEFT)
+        self._voice_note.pack(anchor=tk.W, pady=(6, 0))
 
         # ---- 日志 ----
         ttk.Separator(body).pack(fill=tk.X, pady=(14, 10))
@@ -1816,7 +1911,7 @@ class TranslationGUI:
 
         写两处：设置弹窗里的完整状态（_key_status）+ 主界面第二行右侧的状态槽位
         ——已配置时显示纯展示标签（_key_chip），未配置时换成可点按钮（_key_btn，
-        点击打开百炼开通页）；保存/清除 key 后本方法会被再次调用，界面立刻切换。
+        点击打开千问云开通页）；保存/清除 key 后本方法会被再次调用，界面立刻切换。
         """
         try:
             from .credentials import key_source
@@ -1838,35 +1933,35 @@ class TranslationGUI:
                 if not self._key_chip.winfo_manager():
                     self._key_chip.pack()
             else:
-                # 未配置：换成可点按钮（跳转百炼开通页）
+                # 未配置：换成可点按钮（跳转千问云开通页）
                 # 文案档位：最小宽度 928 下能完整显示（实测见改动报告）
-                self._key_btn.configure(text=t("⚠ 未配置 API key · 点此开通百炼 ▸"))
+                self._key_btn.configure(text=t("⚠ 未配置 API key · 点此开通千问云 ▸"))
                 if self._key_chip.winfo_manager():
                     self._key_chip.pack_forget()
                 if not self._key_btn.winfo_manager():
                     self._key_btn.pack()
 
-    def _open_bailian_signup(self) -> None:
-        """「未配置」状态按钮：用默认浏览器打开百炼开通页。
+    def _open_qianwen_signup(self) -> None:
+        """「未配置」状态按钮：用默认浏览器打开千问云开通页。
 
         绝不抛异常、绝不影响主功能：失败时把链接写进状态栏让用户手动复制；
         成功/失败都打一行日志。链接原文使用，不做任何解码/重组。
         """
         try:
-            ok = bool(webbrowser.open(BAILIAN_SIGNUP_URL))
+            ok = bool(webbrowser.open(QIANWEN_SIGNUP_URL))
         except Exception as exc:  # noqa: BLE001
             ok = False
-            print(f"[gui] ⚠ 打开浏览器失败（{exc}），请手动访问：{BAILIAN_SIGNUP_URL}",
+            print(f"[gui] ⚠ 打开浏览器失败（{exc}），请手动访问：{QIANWEN_SIGNUP_URL}",
                   flush=True)
         else:
             if ok:
-                print(f"[gui] 已在默认浏览器打开百炼开通页：{BAILIAN_SIGNUP_URL}", flush=True)
+                print(f"[gui] 已在默认浏览器打开千问云开通页：{QIANWEN_SIGNUP_URL}", flush=True)
             else:
-                print(f"[gui] ⚠ webbrowser.open 返回 False，请手动访问：{BAILIAN_SIGNUP_URL}",
+                print(f"[gui] ⚠ webbrowser.open 返回 False，请手动访问：{QIANWEN_SIGNUP_URL}",
                       flush=True)
         if not ok:
             self._set_status("warn", t("打不开浏览器，请手动复制访问：{url}",
-                                       url=BAILIAN_SIGNUP_URL))
+                                       url=QIANWEN_SIGNUP_URL))
 
     def _refresh_api_key_in_cfg(self) -> None:
         """按既有优先级链重新解析 API key 并写回 self._cfg.session_base["api_key"]。
@@ -2190,6 +2285,172 @@ class TranslationGUI:
         else:
             txt = t("语音腿的译音来自实时模型本身，延迟最低；音色由 session.voice / directions.<方向>.voice 决定。")
         self._voice_mode_hint.configure(text=txt)
+
+    # ---------------------------------------------------------------- 音色
+    def _effective_speech_voice(self) -> str:
+        """「说话译音」现在**真正生效**的音色 —— 与 `Direction.to_session_config` 同口径：
+        `directions.mine.voice` > `session.voice` > Tina。
+
+        为什么看 mine：译音回灌只对「我说的话」那条腿有意义（theirs 的译文是我自己的
+        母语，不需要出声），所以下拉里必须显 mine 那条腿实际会用到的那个值 ——
+        显一个被方向级覆盖挡掉的值，用户只会觉得「改了没用」。
+        """
+        d = (self._cfg.directions or {}).get("mine")
+        over = (getattr(d, "voice", "") or "") if d is not None else ""
+        base = (self._cfg.session_base or {}).get("voice") or ""
+        return str(over or base or "Tina")
+
+    def _on_speech_voice_change(self, _event=None) -> None:
+        """「说话译音」音色：写 session.voice 并同步内存（引擎重建会话时读到新值）。
+
+        说话译音是会话创建时定下的，改完不会立刻变声 —— 明确告知「下次开始翻译生效」，
+        不静默（用户最容易在这里误以为「改了没用」）。连接预算有限，不主动强制重连。
+        """
+        voice = self._speech_voice_var.get().strip()
+        if not voice:
+            return
+        self._set_voice_config(voice)
+        if isinstance(self._cfg.session_base, dict):
+            self._cfg.session_base["voice"] = voice
+        # 方向级覆盖比 session.voice 优先：不同步它就会做成一个「改了没反应」的下拉，
+        # 所以一并改掉，并在状态栏说清还动了哪里。
+        synced = ""
+        d = (self._cfg.directions or {}).get("mine")
+        if d is not None and (getattr(d, "voice", "") or ""):
+            self._write_leaf(["directions", "mine", "voice"], voice, "保存说话译音音色（方向级）",
+                             create=True)
+            d.voice = voice
+            synced = t("（已同步方向级音色 directions.mine.voice）")
+            print(f"[gui] ⚠️ directions.mine.voice 优先于 session.voice，已同步改为 {voice!r}",
+                  flush=True)
+        running = any(e.running for e in self._engines)
+        hint = t("（正在翻译：下次开始翻译生效）") if running else t("（下次开始翻译生效）")
+        self._set_status("info", t("说话译音音色已保存：{v}", v=voice) + synced + hint)
+        print(f"[gui] 说话译音音色 → {voice!r}（已写入 session.voice）", flush=True)
+
+    def _on_tts_voice_change(self, _event=None) -> None:
+        """「打字译音」音色：写 text_input.tts.voice 并同步内存 —— 下一次打字立刻生效。
+
+        打字那条腿每次出声都实时读 `self._cfg.text_input['tts']['voice']`（见
+        `engine._async_send_text`），所以不像说话那样要等重连，不用提示「下次生效」。
+        """
+        voice = self._tts_voice_var.get().strip()
+        if not voice:
+            return
+        self._set_tts_voice_config(voice)
+        if isinstance(self._cfg.text_input, dict):
+            self._cfg.text_input.setdefault("tts", {})["voice"] = voice
+        self._set_status("info", t("打字译音音色已保存：{v}（下一条打字即生效）", v=voice))
+        print(f"[gui] 打字译音音色 → {voice!r}（已写入 text_input.tts.voice）", flush=True)
+
+    def _set_voice_config(self, voice: str) -> None:
+        """把说话译音音色写回 config.yaml 的 `session.voice`（就地改，保住注释与顺序）。"""
+        self._write_leaf(["session", "voice"], voice, "保存说话译音音色")
+
+    def _set_tts_voice_config(self, voice: str) -> None:
+        """把打字译音音色写回 `text_input.tts.voice`。
+
+        用 `_yaml_set_or_create` 而不是 `_yaml_set_in_text`：老配置可能整段没有
+        `text_input`（从更早模板生成），旧函数会静默 no-op —— 这个设置就永远存不下去。
+        """
+        self._write_leaf(["text_input", "tts", "voice"], voice, "保存打字译音音色",
+                         create=True)
+
+    def _write_leaf(self, path: list[str], value: str, err_label: str,
+                    *, create: bool = False) -> None:
+        """把一个叶子值就地写进 config.yaml；失败只留痕，绝不把配置写坏。"""
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            return
+        try:
+            text = p.read_text(encoding="utf-8")
+            setter = _yaml_set_or_create if create else _yaml_set_in_text
+            text = setter(text, path, value)
+            _write_config_text(p, text)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] {err_label}失败：{exc}", flush=True)
+
+    # ---- 音色试听 ----
+    def _on_preview_speech_voice(self) -> None:
+        self._preview_voice("speech")
+
+    def _on_preview_tts_voice(self) -> None:
+        self._preview_voice("tts")
+
+    def _preview_voice(self, kind: str) -> None:
+        """合成一句固定样例并在本地扬声器播放。
+
+        合成是网络调用（几百 ms～数秒），放守护线程里跑，绝不卡界面；线程只把结果
+        塞 self._q，由 _poll() 在主线程改控件（与设备扫描/更新检查同一纪律）。
+        """
+        if self._preview_busy:
+            return                              # 一次只放一个，免得两条音频叠着响
+        btn = self._speech_preview_btn if kind == "speech" else self._tts_preview_btn
+        var = self._speech_voice_var if kind == "speech" else self._tts_voice_var
+        voice = (var.get() or "").strip()
+        if not voice:
+            self._set_status("warn", t("请先选择或填写音色"))
+            return
+        api_key = self._resolve_api_key_safe()
+        if not api_key:
+            self._set_status("warn", t("还没配置 API key，无法试听（见右上角「设置」）"))
+            return
+        self._preview_busy = True
+        if btn is not None:
+            btn.configure(state=tk.DISABLED, text=t("试听中…"))
+        self._set_status("info", t("正在试听「{v}」…", v=voice))
+        print(f"[gui] 试听音色 → {voice!r}（{kind}，模型 {VOICE_PREVIEW_MODEL}）", flush=True)
+        threading.Thread(target=self._preview_worker, args=(kind, voice, api_key),
+                         daemon=True, name="vlt-voice-preview").start()
+
+    def _preview_worker(self, kind: str, voice: str, api_key: str) -> None:
+        """守护线程体：合成 + 播放，结果（含失败原因）回主线程。绝不静默。
+
+        两条腿走**各自的模型**（音色不通用）：打字侧 qwen3-tts-flash；说话侧非实时
+        Qwen-Omni（Tina 等实时音色只有它认）。两者输出同为 24k 单声道 PCM，播放路径一致。
+        """
+        err = ""
+        try:
+            if kind == "speech":
+                pcm = tts.synthesize_omni(VOICE_PREVIEW_TEXT, voice=voice, api_key=api_key)
+            else:
+                pcm = tts.synthesize(VOICE_PREVIEW_TEXT, voice=voice,
+                                     model=VOICE_PREVIEW_MODEL, api_key=api_key)
+            _play_pcm_local(pcm)
+        except tts.TtsError as exc:
+            err = str(exc)
+        except Exception as exc:  # noqa: BLE001 — 失败也要把原因带回主线程
+            err = f"{type(exc).__name__}: {exc}"
+        self._q.put(("voice_preview", kind, voice, err))
+
+    def _on_voice_preview_done(self, kind: str, voice: str, err: str) -> None:
+        """主线程：恢复按钮 + 报结果。说话侧的「音色不支持」翻成人话。"""
+        self._preview_busy = False
+        btn = self._speech_preview_btn if kind == "speech" else self._tts_preview_btn
+        try:
+            if btn is not None and btn.winfo_exists():
+                btn.configure(state=tk.NORMAL, text=t("试听"))
+        except Exception:  # noqa: BLE001
+            pass
+        if not err:
+            self._set_status("info", t("试听完成：{v}", v=voice))
+            return
+        if _is_unsupported_voice_err(err):
+            self._set_status("warn", t("此音色暂不支持试听（服务端拒收该音色 id）"))
+            print(f"[gui] ⚠️ 音色 {voice!r}（{kind}）试听被服务端拒收：{err}", flush=True)
+            return
+        self._set_status("error", t("试听失败：{msg}", msg=err))
+        print(f"[gui] 试听失败（{voice!r}）：{err}", flush=True)
+
+    def _resolve_api_key_safe(self) -> str:
+        """按 config.load_api_key 的口径取 key，但**取不到返回空串而不是抛 SystemExit**
+        —— 试听失败不该把整个界面带走。"""
+        try:
+            return load_api_key()
+        except SystemExit:
+            return ""
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _push_lang_to_engines(self) -> None:
         a, b = self._lang_pair["source"], self._lang_pair["target"] or "en"
@@ -2620,6 +2881,8 @@ class TranslationGUI:
                     self._on_download_done(item[1])
                 elif kind == "update_download_error":
                     self._on_download_error(item[1])
+                elif kind == "voice_preview":
+                    self._on_voice_preview_done(item[1], item[2], item[3])
         except queue.Empty:
             pass
         if (self._pending_starts == 0 and self._engines

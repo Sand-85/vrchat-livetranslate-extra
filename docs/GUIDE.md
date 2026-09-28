@@ -2,7 +2,7 @@
 
 > **中文** | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
 
-[← 返回 README](README.md)
+[← 返回 README](../README.md)
 
 ---
 
@@ -11,7 +11,7 @@
 到 **[Releases](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)** 下载
 `VRChatLiveTranslate.exe`（**单文件、免安装、无控制台窗口**），双击即用。
 
-- 仍然要自备一个**阿里云百炼 API key**：界面里的「⚙ 设置」粘贴保存
+- 仍然要自备一个**千问云 API key**：界面里的「⚙ 设置」粘贴保存
 - 配置与日志写在 `%APPDATA%\vrchat-livetranslate`（exe 放在只读目录也能跑）
 - 想做成绿色版（配置跟着 exe 走）→ 在 exe 旁边放一个**空的 `portable.txt`**
 - 旧版把 `config.yaml` / `logs/` 放在 exe 旁边的话，首次运行会**自动迁移**到新位置，原来的文件不删
@@ -51,7 +51,7 @@
    <https://www.python.org/downloads/release/python-3119/>
 3. **VRChat**：设置里打开 OSC（`OSC enabled: True`），chat bubble visibility 设为 **Everyone**
 4. **SteamVR** —— 只有「别人说 → 手腕屏」这个功能需要
-5. **阿里云百炼 API key**（个人实名认证即可）
+5. **千问云 API key**（个人实名认证即可）
 
 ## 二、安装（源码）
 
@@ -67,7 +67,7 @@ python -m venv .venv
 
 ## 三、配置 API key
 
-> 🔑 还没有百炼账号？**[点此开通「阿里云百炼大模型」▸](https://www.aliyun.com/minisite/goods?userCode=q8nma978)**
+> 🔑 还没有千问云账号？**[点此开通「千问云」▸](https://www.qianwenai.com/)**
 
 按下面的顺序找一个用，**前面找到就不看后面**：
 
@@ -119,7 +119,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 | 区域 | 内容 |
 |---|---|
 | 第一行 | `开始翻译` / `停止翻译`、方向单选（`我说` / `别人说` / `双向同时`）、语言对下拉（源 → 目标）、右侧 `☕ 赞助` 与 `⚙ 设置` |
-| 第二行 | `输出:` 勾选 `chatbox` / `手腕屏` / `译音输出`，以及 `微调 ▸` 按钮；最右侧是 API key 状态位（已配置时是纯文本 `API key 已配置`，**未配置时变成可点的「⚠ 未配置 API key · 点此开通百炼 ▸」**） |
+| 第二行 | `输出:` 勾选 `chatbox` / `手腕屏` / `译音输出`，以及 `微调 ▸` 按钮；最右侧是 API key 状态位（已配置时是纯文本 `API key 已配置`，**未配置时变成可点的「⚠ 未配置 API key · 点此开通千问云 ▸」**） |
 | 聊天区 | 右侧蓝色气泡 = 我说的，左侧灰色气泡 = 别人说的；每格两行，**上行原文小字、下行译文大字**；可滚动回看（上限 500 条） |
 | 状态栏 | 左侧彩色圆点 + 最新一条状态；右侧统计（`运行中` / `已翻译 N 条` / `首增量 Xms`），两者互不覆盖 |
 | 底栏 | **打字输入框**：`打字:` 输入框 + `发送`，**回车即发**（`Esc` 清空）。只在方向含「我说」时可用，其余情况置灰 |
@@ -403,4 +403,4 @@ build_exe.bat                                              :: 打包 + 打完自
 
 ---
 
-[← 返回 README](README.md)
+[← 返回 README](../README.md)

@@ -50,7 +50,7 @@ class SessionConfig:
     voice: str = "Tina"                 # 实测：不指定会抛 Voice 'Chelsie' is not supported
     hotwords: dict[str, str] = field(default_factory=dict)
     turn_detection: str | None = None   # None = 用服务端默认（3.8 为 speaker_detection）
-    base_url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    base_url: str = "wss://maas.qianwenaiapi.com/api-ws/v1/realtime"
     workspace_id: str = ""              # 非空则用 maas 域名
     api_key: str = ""
     # 连接预算（RPM 10：每次 WS 连接算一次请求）

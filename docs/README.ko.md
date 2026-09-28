@@ -1,4 +1,4 @@
-> [中文](README.md) | [English](README.en.md) | [日本語](README.ja.md) | **한국어** | [Русский](README.ru.md)
+> [中文](../README.md) | [English](README.en.md) | [日本語](README.ja.md) | **한국어** | [Русский](README.ru.md)
 
 # vrchat-livetranslate
 
@@ -6,14 +6,14 @@
 [![Release](https://img.shields.io/github/v/release/nixi-agent/vrchat-livetranslate?label=release)](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](GUIDE.ko.md#1-사전-준비)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](GUIDE.ko.md#1-사전-준비)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green)](../LICENSE)
 
 VRChat 안에서 **실시간 동시 통역**을 해 주는 도구입니다: 마이크 / 게임 오디오를 캡처 →
-Alibaba Cloud Bailian(百炼) 실시간 통역 모델로 전송 → 번역문을 **chatbox 말풍선**과
+Qwen Cloud 실시간 통역 모델로 전송 → 번역문을 **chatbox 말풍선**과
 **VR 손목 오버레이**에 표시합니다. 선택적으로 번역 음성을 가상 사운드카드로 되돌려
 **상대방이 바로 듣게** 할 수도 있습니다.
 
-![화면](assets/gui.png)
+![화면](../assets/gui.png)
 
 ---
 
@@ -93,9 +93,9 @@ UI는 **중국어 간체 / English / 日本語 / 한국어 / Русский** �
 
 - 중국 내: WeChat / Alipay로 스캔
 
-![QR 코드](assets/sponsor-qrcodes.png)
+![QR 코드](../assets/sponsor-qrcodes.png)
 
-- 🔑 아직 Bailian에 가입하지 않으셨다면 → **[Alibaba Cloud Bailian 가입 ▸](https://www.aliyun.com/minisite/goods?userCode=q8nma978)**
+- 🔑 아직 Qwen Cloud에 가입하지 않으셨다면 → **[Qwen Cloud 가입 ▸](https://www.qianwenai.com/)**
 
 > GUI 상단 바에도 "☕ 후원" 버튼이 있으며 같은 링크를 엽니다.
 
@@ -103,4 +103,4 @@ UI는 **중국어 간체 / English / 日本語 / 한국어 / Русский** �
 
 ## 라이선스
 
-[MIT License](LICENSE) © 2026 Nixi
+[MIT License](../LICENSE) © 2026 Nixi

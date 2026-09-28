@@ -12,7 +12,7 @@ Grab **`VRChatLiveTranslate.exe`** from
 **[Releases](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)**
 (**single file, no install, no console window**) and double-click it.
 
-- You still need your own **Alibaba Cloud Bailian API key**: paste and save it in "⚙ Settings"
+- You still need your own **Qwen Cloud API key**: paste and save it in "⚙ Settings"
 - Config and logs live in `%APPDATA%\vrchat-livetranslate` (works even if the exe sits in a read-only folder)
 - Want a portable build (config travels with the exe) → put an **empty `portable.txt`** next to the exe
 - If an older version left `config.yaml` / `logs/` next to the exe, the first run **migrates them automatically** to the new location; the original files are not deleted
@@ -44,7 +44,7 @@ Want to read the source / build it yourself / hack on it → start from section 
    <https://www.python.org/downloads/release/python-3119/>
 3. **VRChat**: enable OSC in settings (`OSC enabled: True`) and set chat bubble visibility to **Everyone**
 4. **SteamVR** — only needed for the "others speak → wrist display" feature
-5. **Alibaba Cloud Bailian API key** (individual real-name verification is enough)
+5. **Qwen Cloud API key** (individual real-name verification is enough)
 
 ## 2. Install (from source)
 
@@ -60,7 +60,7 @@ python -m venv .venv
 
 ## 3. Configure the API key
 
-> 🔑 No Bailian account yet? **[Sign up for Alibaba Cloud Bailian ▸](https://www.aliyun.com/minisite/goods?userCode=q8nma978)**
+> 🔑 No Qwen Cloud account yet? **[Sign up for Qwen Cloud ▸](https://www.qianwenai.com/)**
 
 Sources are tried in the order below — **the first hit wins**:
 
@@ -114,7 +114,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 | Area | Contents |
 |---|---|
 | Top row | `Start translation` / `Stop translation`, direction radio (`I speak` / `Others speak` / `Both at once`), language-pair dropdown (source → target), `☕ Sponsor` and `⚙ Settings` on the right |
-| Second row | `Output:` checkboxes for `chatbox` / `wrist display` / `audio output`, plus the `Fine-tune ▸` button; on the far right the API key status (plain text `API key configured` when set, **otherwise a clickable "⚠ No API key · sign up for Bailian ▸"**) |
+| Second row | `Output:` checkboxes for `chatbox` / `wrist display` / `audio output`, plus the `Fine-tune ▸` button; on the far right the API key status (plain text `API key configured` when set, **otherwise a clickable "⚠ No API key · sign up for Qwen Cloud ▸"**) |
 | Chat area | Blue bubbles on the right = what I said, gray bubbles on the left = what others said; two lines per bubble — **original in small text on top, translation in large text below**; scrollable history (cap 500 entries) |
 | Status bar | Left: colored dot + latest status message; right: stats (`Running` / `N translated` / `first delta Xms`); the two never overlap |
 | Bottom bar | **Typing input**: `Type:` box + `Send`, **Enter sends** (`Esc` clears). Enabled only when the direction includes "I speak", greyed out otherwise |

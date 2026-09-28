@@ -117,8 +117,8 @@ STRINGS: dict[str, str] = {
     "译音输出:": "Voice Output:",
     # ---- 译音音源 A/B（设置弹窗，热切换）----
     "译音音源": "Voice Source",
-    "A 实时模型音色（延迟最低；音色限 Tina / Ethan / Jennifer / Serena）":
-        "A Real-time model voice (lowest latency; only Tina / Ethan / Jennifer / Serena)",
+    "A 实时模型音色（延迟最低；音色在下方「说话译音」下拉里选）":
+        "A Real-time model voice (lowest latency; pick one in the “Spoken voice” dropdown below)",
     "B 打字腿同款音色（与打字一致；每句约 +0.5s）":
         "B Same voice as typed input (matches typing; ~+0.5 s per sentence)",
     "A 实时模型音色": "A Real-time model voice",
@@ -134,6 +134,31 @@ STRINGS: dict[str, str] = {
         "⚠️ “Voice Output” is not checked: this setting has no effect yet "
         "(no virtual mic, so VRChat can't hear it).",
     "设备选择自动保存到 config.yaml": "Device selection is saved to config.yaml automatically",
+    # ---- 设置弹窗：音色 ----
+    "音色": "Voice Timbre",
+    "说话译音:": "Spoken voice:",
+    "打字译音:": "Typed voice:",
+    "说话译音跟随「译音输出」开关（改完下次开始翻译生效）；打字译音立刻生效":
+        "The spoken voice follows the \"Voice Output\" toggle and takes effect "
+        "when you start translating again; the typed voice applies immediately",
+    "（正在翻译：下次开始翻译生效）": " (translating now — applies when you start again)",
+    "（已同步方向级音色 directions.mine.voice）":
+        " (direction-level directions.mine.voice synced)",
+    "（下次开始翻译生效）": " (applies when you start translating)",
+    "说话译音音色已保存：{v}": "Spoken voice saved: {v}",
+    "打字译音音色已保存：{v}（下一条打字即生效）":
+        "Typed voice saved: {v} (applies to the next typed message)",
+    # ---- 设置弹窗：音色试听 ----
+    "试听": "Preview",
+    "试听中…": "Previewing…",
+    "正在试听「{v}」…": "Previewing \"{v}\"…",
+    "试听完成：{v}": "Preview done: {v}",
+    "试听失败：{msg}": "Preview failed: {msg}",
+    "此音色暂不支持试听（服务端拒收该音色 id）":
+        "This voice can't be previewed (the server rejected this voice id)",
+    "还没配置 API key，无法试听（见右上角「设置」）":
+        "No API key configured — can't preview (see \"Settings\" at the top right)",
+    "请先选择或填写音色": "Please pick or type a voice first",
     "日志": "Logs",
     "导出日志压缩包…": "Export Log Archive…",
     "导出日志压缩包": "Export Log Archive",
@@ -157,7 +182,7 @@ STRINGS: dict[str, str] = {
     "⚠️ 未配置 API key —— 在上面粘贴后点「保存」":
         "⚠️ No API key configured — paste it above and click \"Save\"",
     "API key 已配置": "API key configured",
-    "⚠ 未配置 API key · 点此开通百炼 ▸": "⚠ No API Key · Set Up Bailian ▸",
+    "⚠ 未配置 API key · 点此开通千问云 ▸": "⚠ No API Key · Set Up Qwen Cloud ▸",
     "❌ 没保存：{msg}": "❌ Not saved: {msg}",
     "API key 保存失败：{msg}": "Failed to save API key: {msg}",
     "API key 已保存（{shown}）": "API key saved ({shown})",
