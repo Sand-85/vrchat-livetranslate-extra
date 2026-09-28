@@ -27,9 +27,9 @@ from .config_io import _fmt_scalar, _write_config_text, _yaml_set_in_text
 from .i18n import t
 from .paths import is_frozen
 
-RELEASES_LATEST_API = "https://api.github.com/repos/nixi-agent/vrchat-livetranslate/releases/latest"
+RELEASES_LATEST_API = "https://api.github.com/repos/Sand-85/vrchat-livetranslate-extra/releases/latest"
 # Release 页面基址（与上面的 API 同仓库）：拼 tag 页 = f"{RELEASES_HTML}/tag/vX.Y.Z"
-RELEASES_HTML = "https://github.com/nixi-agent/vrchat-livetranslate/releases"
+RELEASES_HTML = "https://github.com/Sand-85/vrchat-livetranslate-extra/releases"
 DEFAULT_TIMEOUT_S = 10.0
 DOWNLOAD_TIMEOUT_S = 120.0
 EXE_ASSET_NAME = "VRChatLiveTranslate.exe"

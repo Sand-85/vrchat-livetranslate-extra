@@ -91,7 +91,7 @@ jobs:
 
             ### 用它之前需要什么
             - Windows 10/11
-            - **一个阿里云百炼 API key**（自备，按量计费）：界面「⚙ 设置」粘贴保存，或设环境变量 `DASHSCOPE_API_KEY`
+            - **一个千问云 API key**（自备，按量计费）：界面「⚙ 设置」粘贴保存，或设环境变量 `DASHSCOPE_API_KEY`
             - VRChat 设置里打开 **OSC**（`OSC enabled: True`）、chat bubble visibility 设为 **Everyone**
 
             ### 这版有什么
@@ -104,9 +104,9 @@ jobs:
             - 我说 → **chatbox 气泡**：麦克风 → 实时语音翻译 → 气泡里逐字刷新，句末刷最终版
             - 别人说 → **VR 手腕屏**：采集 VRChat 播放输出 → 译文渲染到 SteamVR overlay，有更新立刻上屏
             - 打字 → 不想开麦时用键盘代替麦克风，译文照常进聊天气泡 / 手腕屏 / chatbox
-            - 未配置 API key 时，主界面右上角会变成「一键开通百炼」的入口
+            - 未配置 API key 时，主界面右上角会变成「一键开通千问云」的入口
 
-            完整说明见仓库 [README](https://github.com/nixi-agent/vrchat-livetranslate#readme)（中文 / English / 日本語 / 한국어 / Русский）。
+            完整说明见仓库 [README](https://github.com/Sand-85/vrchat-livetranslate-extra#readme)（中文 / English / 日本語 / 한국어 / Русский）。
           files: |
             dist/VRChatLiveTranslate.exe
             dist/SHA256SUMS.txt

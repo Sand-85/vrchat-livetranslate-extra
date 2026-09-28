@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 TAG = sys.argv[1] if len(sys.argv) > 1 else "v0.0.2"
 NEEDLE = sys.argv[2] if len(sys.argv) > 2 else "俄语"      # 本版新功能里必定出现的字符串
 ROOT = Path(__file__).resolve().parents[1]
-REPO_SLUG = "nixi-agent/vrchat-livetranslate"
+REPO_SLUG = "Sand-85/vrchat-livetranslate-extra"
 WORK = Path(tempfile.mkdtemp(prefix="verify_release_"))
 
 ok: list[str] = []
