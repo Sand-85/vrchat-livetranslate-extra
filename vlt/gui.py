@@ -44,6 +44,9 @@ from .devices import (
     format_device_display,
 )
 from .engine import Engine, EngineEvents
+from .room.client import RoomClient
+from .room.model import ConnectionState, RoomConfig, RoomMessage
+from .room.publisher import SourcePublisher, should_publish
 from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
 
 from .paths import APP_DIR, BUNDLE_DIR
@@ -93,6 +96,34 @@ SPONSOR_QR_SIZE = 240          # 收款码等比缩放的目标边长（严禁�
 # ---- 千问云开通页（未配置 API key 时，状态按钮点击跳转）----
 # 链接逐字符照抄，不做任何 URL 解码/重组。
 QIANWEN_SIGNUP_URL = "https://www.qianwenai.com/"
+
+# 老用户的 config.yaml（旧模板生成）没有 room 段，而 config_io 的就地改文本
+# 「找不到路径就原样返回」→ 表现为静默不保存。勾选房间时若发现缺段，就用这段补建
+# （逐字段对齐 config.example.yaml，含已部署的 server_url，补出来即可用）。
+_ROOM_SECTION_TEMPLATE = (
+    "# ---- 房间：多人各自跑 VLT 时互相看字幕（默认关，不影响现有单机用法）----\n"
+    "room:\n"
+    "  enabled: false\n"
+    '  server_url: "wss://vlt-room.kcm-nixi.cn/ws"\n'
+    '  room_code: ""            # 8 位，两端必须一致（不含 I/L/O/U）\n'
+    '  nickname: ""             # 空 = 用系统用户名\n'
+    '  token: ""                # 服务端开了门禁才需要\n'
+    "  broadcast_source: true   # 把「我」说的话发到房间\n"
+    "  show_remote: true        # 把别人说的话显示在手腕屏\n"
+    "  max_peers: 8\n"
+    "  reconnect_backoff: [2, 5, 10, 30]\n"
+    "  heartbeat_s: 20\n"
+)
+
+
+def _yaml_quote(s) -> str:  # noqa: ANN001, ANN202
+    """把字符串安全地写成 YAML 双引号标量。
+
+    昵称可能含空格 / 冒号 / `#`，裸写会破坏 YAML（`_write_config_text` 会校验并拒写，
+    表现为「保存没生效」）；房间码是 Crockford Base32 但也一并引号化，口径统一。
+    """
+    txt = "" if s is None else str(s)
+    return '"' + txt.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _sponsor_qr_specs() -> list[tuple[str, Path]]:
@@ -211,6 +242,7 @@ class _Bubble:
     y: int = 0
     h: int = 0
     items: list = field(default_factory=list)
+    label: str = ""   # 远端成员昵称：作为小字显示在气泡上方（本机气泡为空）
 
 
 class _DownloadCancelled(Exception):
@@ -341,6 +373,14 @@ class TranslationGUI:
             "target": (mine.target_lang if mine else "en") or "en",
         }
 
+        # 房间文本中继（旁路功能）：由**界面**持有全进程唯一的 RoomClient（与手腕屏同理——
+        # 「全进程唯一」的资源只能有一个持有者，而持有者应是能看到所有腿的聚合层）。
+        # 默认关：这些对象存在但一行收发都不跑，对现有单机链路零影响。
+        self._room: RoomClient | None = None
+        self._room_cfg = RoomConfig.from_dict(self._cfg.room)
+        self._publisher = SourcePublisher()
+        self._room_status_next = 0.0      # 房间行状态文案的刷新节流（monotonic 秒）
+
         if not headless:
             self._build_ui()
 
@@ -361,6 +401,7 @@ class TranslationGUI:
         # 低频设置（API key、音频设备）收进「⚙ 设置」弹窗 —— 见 _build_settings_dialog。
         self._build_controls()       # 第一行：开/停 + 方向 + 语言对（会话控制）
         self._build_output_row()     # 第二行：输出勾选 + 手腕屏微调 + key 状态入口
+        self._build_room_row()       # 第三行：房间文本中继（多人互相看字幕，默认关；独立一行防裁切）
         self._divider()
         self._build_chat()
         self._divider()
@@ -670,6 +711,203 @@ class TranslationGUI:
         return dict(bg=PANEL, fg=TEXT, activebackground=PANEL,
                     activeforeground="#ffffff", selectcolor=SURFACE,
                     highlightthickness=0, bd=0, font=FONT_UI)
+
+    # ================================================================ 房间文本中继
+
+    def _build_room_row(self) -> None:
+        """独立一行：`[☐ 房间] 房间码[___] 昵称[___] 状态：未连接 · 0 人`。
+
+        ⚠️ 必须**单独一行**：Tk 空间不足时从最后打包的控件开始裁，塞进已经拥挤的
+        输出行会让「房间」勾选框在小屏上凭空消失（用户实测过的坑）。
+        控件一律左对齐、不给标签写死宽度；窗口宽度由 `_fit_window_width` 统一实测。
+        """
+        row = ttk.Frame(self._root, padding=(14, 0, 14, 10))
+        row.pack(fill=tk.X)
+        self._room_row = row
+
+        self._room_var = tk.BooleanVar(value=bool(self._room_cfg.enabled))
+        tk.Checkbutton(row, text=t("房间"), variable=self._room_var,
+                       command=self._on_room_toggle,
+                       **self._indicator_kw()).pack(side=tk.LEFT)
+
+        ttk.Label(row, text=t("房间码:"), style="Dim.TLabel").pack(side=tk.LEFT, padx=(12, 4))
+        self._room_code_var = tk.StringVar(value=self._room_cfg.room_code)
+        code_entry = ttk.Entry(row, textvariable=self._room_code_var, width=12,
+                               style="Key.TEntry", font=FONT_UI)
+        code_entry.pack(side=tk.LEFT)
+        code_entry.bind("<Return>", lambda _e: self._on_room_field_change())
+        code_entry.bind("<FocusOut>", lambda _e: self._on_room_field_change())
+
+        ttk.Label(row, text=t("昵称:"), style="Dim.TLabel").pack(side=tk.LEFT, padx=(12, 4))
+        self._room_nick_var = tk.StringVar(value=self._room_cfg.nickname)
+        nick_entry = ttk.Entry(row, textvariable=self._room_nick_var, width=12,
+                               style="Key.TEntry", font=FONT_UI)
+        nick_entry.pack(side=tk.LEFT)
+        nick_entry.bind("<Return>", lambda _e: self._on_room_field_change())
+        nick_entry.bind("<FocusOut>", lambda _e: self._on_room_field_change())
+
+        self._room_status = ttk.Label(row, text=self._room_status_text(), style="Muted.TLabel")
+        self._room_status.pack(side=tk.LEFT, padx=(14, 0))
+
+    def _room_status_text(self) -> str:
+        """房间行右侧的状态文案：连接态 + 在线人数，全部走 t()（界面禁技术词）。"""
+        room = self._room
+        if room is None:
+            return t("状态：{state} · {n} 人", state=t("未连接"), n=0)
+        try:
+            st = room.state()
+        except Exception:                       # noqa: BLE001  取快照失败就退回「未连接」
+            return t("状态：{state} · {n} 人", state=t("未连接"), n=0)
+        state_zh = {
+            ConnectionState.IDLE: "未连接",
+            ConnectionState.CONNECTING: "连接中",
+            ConnectionState.ONLINE: "已连接",
+            ConnectionState.RECONNECTING: "重连中",
+            ConnectionState.STOPPED: "已停止",
+            ConnectionState.ERROR: "错误",
+        }.get(st.conn, "未连接")
+        return t("状态：{state} · {n} 人", state=t(state_zh), n=st.peer_count)
+
+    def _refresh_room_status_label(self) -> None:
+        """刷新房间行状态文案（**只在主线程调用**；无头/控件未建时静默跳过）。"""
+        if not hasattr(self, "_room_status"):
+            return
+        try:
+            self._room_status.configure(text=self._room_status_text())
+        except Exception:                       # noqa: BLE001  文案刷新失败不值得惊动用户
+            pass
+
+    def _on_room_toggle(self) -> None:
+        """勾选/取消房间：即时写回 config.yaml，并起停 RoomClient。"""
+        self._sync_room_cfg_from_fields()
+        self._save_room_cfg()
+        if self._room_var.get():
+            self._start_room()
+        else:
+            self._stop_room()
+        self._refresh_room_status_label()
+
+    def _on_room_field_change(self) -> None:
+        """改房间码/昵称：即时写回 config.yaml；房间正开着就重连以套用新值。"""
+        was_on = self._room is not None
+        self._sync_room_cfg_from_fields()
+        self._save_room_cfg()
+        if was_on and self._room_var.get():
+            # 连接参数在建链时就定死了，换房间码/昵称必须重连才生效
+            self._stop_room()
+            self._start_room()
+        self._refresh_room_status_label()
+
+    def _sync_room_cfg_from_fields(self) -> None:
+        """把界面上的勾选/房间码/昵称同步进 `self._room_cfg`（只改内存，不落盘）。"""
+        code = self._room_cfg.room_code
+        nick = self._room_cfg.nickname
+        enabled = self._room_cfg.enabled
+        if hasattr(self, "_room_code_var"):
+            code = (self._room_code_var.get() or "").strip()
+        if hasattr(self, "_room_nick_var"):
+            nick = (self._room_nick_var.get() or "").strip()
+        if hasattr(self, "_room_var"):
+            enabled = bool(self._room_var.get())
+        self._room_cfg = self._room_cfg.with_overrides(
+            enabled=enabled, room_code=code, nickname=nick)
+
+    def _save_room_cfg(self) -> None:
+        """把房间三项（enabled/room_code/nickname）就地写回 config.yaml 的 room 段。
+
+        ⚠️ room 段不存在时**补建**：老用户的 config.yaml（旧模板生成）没有这个段，
+        而就地改文本「找不到路径就原样返回」→ 不补建就表现为静默不保存。
+        """
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            return
+        try:
+            text = p.read_text(encoding="utf-8")
+            if not re.search(r"^room:", text, re.M):
+                text = text.rstrip("\n") + "\n\n" + _ROOM_SECTION_TEMPLATE
+            text = _yaml_set_in_text(text, ["room", "enabled"],
+                                     _fmt_scalar(bool(self._room_cfg.enabled)))
+            text = _yaml_set_in_text(text, ["room", "room_code"],
+                                     _yaml_quote(self._room_cfg.room_code))
+            text = _yaml_set_in_text(text, ["room", "nickname"],
+                                     _yaml_quote(self._room_cfg.nickname))
+            _write_config_text(p, text)
+            print(f"[gui] 房间设置已保存：enabled={_fmt_scalar(bool(self._room_cfg.enabled))} "
+                  f"room_code={self._room_cfg.room_code!r} nickname={self._room_cfg.nickname!r}",
+                  flush=True)
+        except Exception as exc:                # noqa: BLE001  存盘失败只留痕，不影响使用
+            print(f"[gui] 保存房间设置失败：{exc}", flush=True)
+
+    def _start_room(self) -> None:
+        """建 RoomClient 并启动（**幂等**）。任何异常只留痕 + 状态栏，绝不影响翻译。"""
+        if self._room is not None:
+            return
+        self._sync_room_cfg_from_fields()
+        try:
+            self._publisher.reset()             # 起新连接前先封掉半句旧文本
+            self._room = RoomClient(self._room_cfg,
+                                    on_message=self._on_room_message,
+                                    on_status=self._on_room_status)
+            self._room.start()
+        except Exception as exc:                # noqa: BLE001
+            self._room = None
+            print(f"[room] ⚠️ 启动失败（翻译不受影响）：{type(exc).__name__}: {exc}", flush=True)
+            self._set_status("warn", t("房间出错（翻译不受影响）：{msg}",
+                                       msg=f"{type(exc).__name__}: {exc}"))
+
+    def _stop_room(self) -> None:
+        """停掉 RoomClient（**幂等、≤5s**）。任何异常只留痕。"""
+        room = self._room
+        self._room = None
+        if room is None:
+            return
+        try:
+            room.stop(timeout=5.0)
+        except Exception as exc:                # noqa: BLE001
+            print(f"[room] ⚠️ 停止时出错（忽略）：{type(exc).__name__}: {exc}", flush=True)
+        finally:
+            self._publisher.reset()
+
+    def _on_room_message(self, msg: RoomMessage) -> None:
+        """（**房间线程**）收到远端成员的一句话 → 只塞队列，绝不碰 Tk。"""
+        try:
+            if not self._room_cfg.show_remote:
+                return
+            self._q.put(("room", msg.nick, msg.peer_id, msg.text, msg.is_final))
+        except Exception as exc:                # noqa: BLE001
+            print(f"[room] ⚠️ 入队远端消息失败（忽略）：{type(exc).__name__}: {exc}", flush=True)
+
+    def _on_room_status(self, text: str) -> None:
+        """（**房间线程**）房间链路状态 → 只塞队列，由 _poll 在主线程落到状态栏。"""
+        try:
+            self._q.put(("room_status", str(text)))
+        except Exception as exc:                # noqa: BLE001
+            print(f"[room] ⚠️ 入队房间状态失败（忽略）：{type(exc).__name__}: {exc}", flush=True)
+
+    def _on_engine_text(self, who: str, source_id: str, src_text: str,
+                        tgt_text: str, is_final: bool) -> None:
+        """引擎每来一条文本：照常进界面队列，再顺带尝试上行到房间（房间没开就零开销）。"""
+        self._q.put(("text", who, src_text, tgt_text, is_final))
+        self._publish_to_room(source_id, src_text, is_final)
+
+    def _publish_to_room(self, source_id: str, src_text: str, is_final: bool) -> None:
+        """把「我自己说的话」的源文切成房间上行帧发出去（loopback 那条腿永不发）。
+
+        铁律：房间链路的任何异常都不能拖垮翻译 / chatbox / 手腕屏 —— 全程包 try，
+        出错只在日志留一行。只有 `should_publish` 放行（=mic/pcm 且开关都开）才动发布器。
+        """
+        room = self._room
+        if room is None:
+            return                              # 房间没开：一行都不跑
+        try:
+            if not should_publish(source_id, self._room_cfg.enabled,
+                                  self._room_cfg.broadcast_source):
+                return
+            for item in self._publisher.feed(src_text, is_final):
+                room.publish(item.utt, item.rev, item.text, item.is_final)
+        except Exception as exc:                # noqa: BLE001
+            print(f"[room] ⚠️ 上行发布失败（翻译不受影响）：{type(exc).__name__}: {exc}",
+                  flush=True)
 
     # ---------------------------------------------------------------- 手腕屏微调
     def _toggle_tune_panel(self) -> None:
@@ -2172,6 +2410,7 @@ class TranslationGUI:
                                target=_lang_label(_target_name(self._lang_pair["target"]))))
         self._save_lang_config()
         self._push_lang_to_engines()
+        self._publisher.reset()      # 切语言：封掉半句旧文本，别把上一语言的残句发进房间
         self._update_direction_langs()
 
     def _save_lang_config(self) -> None:
@@ -2546,6 +2785,9 @@ class TranslationGUI:
         self._pending_starts = len(specs)
         # 手腕屏由界面持有，内容镜像聊天区（两个方向都进同一块屏）
         self._start_overlay()
+        # 房间勾着就确保它在跑（_stop() 会连房间一起停；_start_room 幂等，已在跑则无操作）
+        if getattr(self, "_room_var", None) is not None and self._room_var.get():
+            self._start_room()
         self._start_engine(0)
         self._start_btn.configure(state=tk.DISABLED)
         self._stop_btn.configure(state=tk.NORMAL)
@@ -2572,7 +2814,11 @@ class TranslationGUI:
         if direction == "theirs":
             own_sinks.discard("chatbox")
         events = EngineEvents(
-            on_text=lambda src, txt, final, who=who: self._q.put(("text", who, src, txt, final)),
+            # 上行挂在界面这一层（不改 engine.py）：_on_engine_text 照常把文本塞进界面队列，
+            # 再顺带把「我自己说的话」的源文发进房间。_srcid 绑定这条腿的真实来源
+            # （mic/loopback）—— should_publish 靠它把 loopback 那条腿排除掉（防二次广播/回环）。
+            on_text=lambda src, txt, final, who=who, _srcid=source:
+                self._on_engine_text(who, _srcid, src, txt, final),
             on_status=lambda lvl, msg, who=who: self._on_engine_status(lvl, msg, who),
             on_stats=lambda s: self._q.put(("stats", s)),
         )
@@ -2662,7 +2908,7 @@ class TranslationGUI:
         if self._overlay_out is None:
             return
         try:
-            entries = [(b.who, b.source, b.text) for b in self._bubbles[-8:]]
+            entries = [(b.who, b.source, b.text, b.label) for b in self._bubbles[-8:]]
             self._overlay_out.update_entries(entries, force=force)
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] 手腕屏刷新失败：{type(exc).__name__}: {exc}", flush=True)
@@ -2679,6 +2925,8 @@ class TranslationGUI:
         for eng in self._engines:
             eng.stop()
         self._stop_overlay()
+        self._stop_room()          # 关窗 / 停止都连房间一起停（幂等、≤5s，绝不拖住退出）
+        self._refresh_room_status_label()
         self._engines = []
         self._engine_dirs = []
         self._start_btn.configure(state=tk.NORMAL)
@@ -2882,6 +3130,17 @@ class TranslationGUI:
                     self._on_download_done(item[1])
                 elif kind == "update_download_error":
                     self._on_download_error(item[1])
+                elif kind == "room":
+                    # 远端成员的一句话：进聊天气泡（who=peer:<id> 天然区分不同人），再上手腕屏。
+                    # item = ("room", nick, peer_id, text, is_final)
+                    self._add_text("", item[3], item[4], who=f"peer:{item[2]}", label=item[1])
+                    self._push_overlay()
+                elif kind == "room_status":
+                    # 房间链路状态（来自房间线程，已入队）：按行首符号定状态栏颜色级别
+                    txt = str(item[1])
+                    level = "error" if txt.startswith("❌") else (
+                        "warn" if txt.startswith("⚠️") else "info")
+                    self._set_status(level, txt)
                 elif kind == "voice_preview":
                     self._on_voice_preview_done(item[1], item[2], item[3])
         except queue.Empty:
@@ -2897,17 +3156,25 @@ class TranslationGUI:
             self._engine_dirs = []
         if self._overlay_out is not None:
             self._overlay_out.tick()      # 手腕屏的热重载 / 淡出
+        # 房间行状态（连接态 + 在线人数）每 0.5s 刷一次：人数变化不经 on_status，只能轮询快照
+        _now = time.monotonic()
+        if _now >= self._room_status_next:
+            self._room_status_next = _now + 0.5
+            self._refresh_room_status_label()
         self._root.after(50, self._poll)
 
     # ================================================================ 聊天气泡
 
-    def _add_text(self, source: str, text: str, is_final: bool, who: str = "mine") -> None:
+    def _add_text(self, source: str, text: str, is_final: bool, who: str = "mine",
+                  label: str = "") -> None:
         now_str = datetime.now().strftime("%H:%M:%S")
         cur = self._current.get(who)
         if cur is not None:
             # 流式增量：就地重画同一条气泡（终版只做"封口"，绝不新插第二条）
             cur.source = source
             cur.text = text
+            if label:
+                cur.label = label      # 远端昵称：partial 就地刷新时也带上（谁在说不能丢）
             if is_final:
                 cur.final = True
                 self._current.pop(who, None)
@@ -2917,7 +3184,7 @@ class TranslationGUI:
                 self._canvas.yview_moveto(1.0)
             return
         # 没有正在刷新的气泡 → 新建（一句话的第一条就是终版时走这里）
-        b = _Bubble(who=who, source=source, text=text, ts=now_str, final=is_final)
+        b = _Bubble(who=who, source=source, text=text, ts=now_str, final=is_final, label=label)
         if not is_final:
             self._current[who] = b
         b.y = (self._bubbles[-1].y + self._bubbles[-1].h + 8) if self._bubbles else 8
@@ -2948,9 +3215,12 @@ class TranslationGUI:
 
         tid_small = None
         small_w = small_h = 0
-        src = (b.source or "").strip()
-        if src and src != (b.text or "").strip():   # 原文为空或与译文相同时不画小字行
-            tid_small = cv.create_text(0, 0, text=b.source, width=maxw, anchor="nw",
+        # 小字行：远端成员优先显示**昵称**（谁在说），本机气泡仍是原文。
+        # 为空、或与大字译文相同时不画（省一行空白）。
+        small_raw = b.label if (b.label or "").strip() else b.source
+        small_key = (small_raw or "").strip()
+        if small_key and small_key != (b.text or "").strip():
+            tid_small = cv.create_text(0, 0, text=small_raw, width=maxw, anchor="nw",
                                        font=FONT_SMALL,
                                        fill=COLOR_SRC_MINE if b.who == "mine" else COLOR_SRC_THEIRS)
             sx1, sy1, sx2, sy2 = cv.bbox(tid_small)

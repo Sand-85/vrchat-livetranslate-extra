@@ -12,6 +12,7 @@ from __future__ import annotations
 import ctypes
 import math
 import time
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -225,10 +226,65 @@ def render_panel(text: str, source: str = "", cfg: OverlayConfig | None = None) 
     return img
 
 
+# 多人房间的固定调色板：按 peer_id 稳定哈希选色，同一个人任何时候都是同一种颜色。
+# 颜色都取得比较饱和、彼此区分度高，且都明显不同于底板色(12,14,20)、
+# mine 蓝(47,111,208) 与 theirs 灰(110,116,128)，方便「谁在说」一眼分辨、也方便整列扫描断言。
+PEER_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (224, 122, 91),    # 砖红
+    (96, 165, 250),    # 蓝
+    (74, 158, 116),    # 绿
+    (240, 173, 78),    # 琥珀
+    (167, 139, 250),   # 紫
+    (45, 152, 168),    # 青
+    (236, 72, 153),    # 洋红
+    (132, 169, 87),    # 橄榄
+    (250, 204, 21),    # 黄
+    (56, 189, 248),    # 天蓝
+)
+
+
+def peer_color(peer_id: str) -> tuple[int, int, int]:
+    """按 `peer_id` 稳定哈希到调色板里的一种颜色。
+
+    ⚠️ 必须用 `zlib.crc32` 这类**确定性**哈希，绝不能用内置 `hash()` —— 后者每个进程
+    随机化（PYTHONHASHSEED），重连/重启一次同一个人就换了颜色，正是 BRIEF 明令禁止的。
+    也绝不按出现顺序分配：顺序会随谁先说话而变。
+    """
+    pid = (peer_id or "").strip()
+    if not pid:
+        return PEER_PALETTE[0]
+    return PEER_PALETTE[zlib.crc32(pid.encode("utf-8")) % len(PEER_PALETTE)]
+
+
+def _peer_id_of(who) -> str | None:  # noqa: ANN001
+    """`who == "peer:<id>"` → 返回 `<id>`；其它形态（mine/theirs）返回 None。"""
+    if isinstance(who, str) and who.startswith("peer:"):
+        return who[len("peer:"):]
+    return None
+
+
+def _unpack_entry(raw) -> tuple[str, str, str, str]:  # noqa: ANN001
+    """把一条 entry 拆成 `(who, source, text, label)`，兼容旧的 3 元组（label 视作空）。
+
+    3 元组是现有形态，必须继续支持；4 元组多出来的第 4 项是说话人昵称（小字）。
+    """
+    if isinstance(raw, (list, tuple)):
+        if len(raw) >= 4:
+            return raw[0], raw[1], raw[2], raw[3]
+        if len(raw) == 3:
+            return raw[0], raw[1], raw[2], ""
+    return "", "", "", ""
+
+
 def render_conversation(entries, cfg: OverlayConfig | None = None) -> Image.Image:
     """把「最近的对话」渲染成**一块**面板 —— 镜像 GUI 的聊天区（别人在左、我在右）。
 
-    entries: [(who, source, translation), ...]，who ∈ {"mine","theirs"}，**最后一条最新**。
+    entries: 每条是 3 元组 `(who, source, translation)`（现有形态）或
+    4 元组 `(who, source, translation, label)`，`label` = 说话人昵称（小字）。
+    `who ∈ {"mine","theirs"}` 或 `"peer:<peer_id>"`（房间里 N 个不同的人）。**最后一条最新**。
+
+    `peer:<id>` 按 theirs 那样靠左，但外缘竖条的颜色取自固定调色板、按 peer_id 稳定哈希
+    （同一个人任何时候都同色，重连也不变）；昵称画成小字（沿用原文小字的字号/颜色体系）。
 
     尺寸固定为 cfg.size_px（不改物理宽高比，避免手腕上的面板忽大忽小）；
     从最新往回塞，塞不下的更早条目直接不画 —— 永远优先显示最新内容。
@@ -257,13 +313,21 @@ def render_conversation(entries, cfg: OverlayConfig | None = None) -> Image.Imag
 
     shown: list[tuple[str, list[str], list[str], int]] = []
     used = 0
-    for who, source, text in reversed(list(entries or [])):
+    for raw in reversed(list(entries or [])):
+        who, source, text, label = _unpack_entry(raw)
         t = (text or "").strip()
         if not t:
             continue
         tl = wrap_text(d, t, tf, inner_w - 24)
+        # 小字区：昵称（标明谁在说，始终画）+ 原文（受 show_source 控制）。
+        # mine/theirs 没有 label → 这一段与改版前逐像素一致。
+        sl: list[str] = []
+        lab = (label or "").strip()
+        if lab:
+            sl += wrap_text(d, lab, sf, inner_w - 24)
         src = (source or "").strip()
-        sl = wrap_text(d, src, sf, inner_w - 24) if (cfg.show_source and src) else []
+        if cfg.show_source and src:
+            sl += wrap_text(d, src, sf, inner_w - 24)
         blk_h = len(sl) * asc_s + (4 if sl else 0) + len(tl) * asc_t + 14
         if shown and used + blk_h > budget:      # 塞不下更早的就停（保留最新）
             break
@@ -273,22 +337,23 @@ def render_conversation(entries, cfg: OverlayConfig | None = None) -> Image.Imag
 
     y = h - pad * 2 - used
     for who, sl, tl, blk_h in shown:
-        mine = who == "mine"
-        if mine:                                 # 外缘竖条 + 右对齐
+        pid = _peer_id_of(who)
+        if who == "mine":                        # 外缘竖条 + 右对齐
             d.rounded_rectangle([w - pad * 2 - 5, y + 2, w - pad * 2, y + blk_h - 8],
                                 radius=2, fill=(*cfg.color_mine, 230))
             tx, anchor = w - pad * 2 - 16, "ra"
-        else:
+        else:                                    # theirs / peer:<id> 都靠左
+            col = peer_color(pid) if pid is not None else cfg.color_theirs
             d.rounded_rectangle([pad * 2, y + 2, pad * 2 + 5, y + blk_h - 8],
-                                radius=2, fill=(*cfg.color_theirs, 230))
+                                radius=2, fill=(*col, 230))
             tx, anchor = pad * 2 + 16, "la"
         yy = y
-        for ln in sl:                            # 原文小字在上
+        for ln in sl:                            # 昵称 / 原文小字在上
             d.text((tx, yy), ln, font=sf, fill=(*cfg.color_source, cfg.source_alpha), anchor=anchor)
             yy += asc_s
         if sl:
             yy += 4
-        for ln in tl:                            # 译文大字在下
+        for ln in tl:                            # 译文（房间里=源文）大字在下
             d.text((tx, yy), ln, font=tf, fill=(*cfg.color_translation, 255), anchor=anchor)
             yy += asc_t
         y += blk_h
@@ -472,12 +537,14 @@ class WristOverlay:
         self._upload(img)
 
     def update_entries(self, entries, force: bool = False) -> None:
-        """刷新成**对话视图**（GUI 用这个）：entries = [(who, source, translation), ...]。
+        """刷新成**对话视图**（GUI 用这个）：entries = [(who, source, translation), ...]
+        或 4 元组 [(who, source, translation, label), ...]（label = 说话人昵称）。
 
         与 `update()` 的区别：`update()` 是"当前这一句"（CLI 单腿场景够用），
         `update_entries()` 是"最近几句对话"——手腕上只有一块屏，内容应该像 GUI 的聊天区。
         """
-        key = tuple((w, (s or "").strip(), (t or "").strip()) for w, s, t in (entries or []))
+        key = tuple((w, (s or "").strip(), (t or "").strip(), (lab or "").strip())
+                    for w, s, t, lab in (_unpack_entry(e) for e in (entries or [])))
         if key == self._last_entries and not force:
             return
         self._last_entries = key

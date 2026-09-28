@@ -1,0 +1,11 @@
+# wrangler 本地开发产物（SQLite 状态、缓存）—— 里面可能有本机跑的房间数据，不该进仓库
+.wrangler/
+.dev.vars
+.dev.vars.*
+
+# 依赖
+node_modules/
+
+# 日志与构建产物
+*.log
+dist/

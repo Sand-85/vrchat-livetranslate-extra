@@ -1,0 +1,14 @@
+{
+  "name": "vlt-room-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VRChat 同传 · 房间文本中继（Cloudflare Worker + Durable Object）",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

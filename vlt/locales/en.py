@@ -33,6 +33,18 @@ STRINGS: dict[str, str] = {
     "就绪": "Ready",
     "状态：{msg}": "Status: {msg}",
 
+    # ---- 房间文本中继 ----
+    "房间": "Room",
+    "房间码:": "Room code:",
+    "昵称:": "Nickname:",
+    "状态：{state} · {n} 人": "Status: {state} · {n} online",
+    "未连接": "Not connected",
+    "连接中": "Connecting",
+    "已连接": "Connected",
+    "重连中": "Reconnecting",
+    "错误": "Error",
+    "房间出错（翻译不受影响）：{msg}": "Room error (translation unaffected): {msg}",
+
     # ---- 手腕屏微调面板 ----
     "锚点:": "Anchor:",
     "tracker 序号:": "Tracker #:",

@@ -161,6 +161,22 @@ text_input:
     speech_rate: 1.0         # 语速（仅 qwen3-tts 生效）：1 = 默认；0.85 约慢 20%，1.2 约快 20%
     timeout_s: 30
 
+# ---- 房间：多人各自跑 VLT 时互相看字幕（默认关，不影响现有单机用法）----
+# 场景：几个都装了 VLT 的人一起玩，语音通道被本地玩家占掉时，房间内改用文字互通。
+# 广播的是**各自的 ASR 源文**（本期不做翻译）；房间链路出任何问题只报状态，
+# 绝不拖垮现有的翻译 / chatbox / 手腕屏。
+room:
+  enabled: false
+  server_url: "wss://vlt-room.kcm-nixi.cn/ws"
+  room_code: ""            # 8 位，两端必须一致（不含 I/L/O/U）
+  nickname: ""             # 空 = 用系统用户名
+  token: ""                # 服务端开了门禁才需要
+  broadcast_source: true   # 把「我」说的话发到房间
+  show_remote: true        # 把别人说的话显示在手腕屏
+  max_peers: 8
+  reconnect_backoff: [2, 5, 10, 30]
+  heartbeat_s: 20
+
 # 界面（图形界面上次的选择，**启动时自动恢复**；手改也有效）
 ui:
   direction: mine          # mine=我说的话 | theirs=别人说 | dual=双向同时

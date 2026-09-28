@@ -1,0 +1,32 @@
+# VRChat 同传 · 房间文本中继（Cloudflare Worker + Durable Object）
+#
+# 本期只做骨架 + 本地起得来；真机部署是批次 3（见 README.md）。
+# ⚠️ `account_id` 故意留空：`wrangler dev --local` 不需要它，部署时再用
+#    `wrangler deploy`（wrangler 已登录，会自己挑账号）或在此填上。
+name = "vlt-room-relay"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# 每房间一个 DO：房间码 → idFromName(code)
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+# 新类必须走 migration；`new_sqlite_classes` = 新版 SQLite 存储 DO
+# （本 DO 只用 setAlarm/deleteAll，不碰 storage.sql，但类声明方式必须在这里定死）
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+# DO 落点偏好（best-effort，只对**首次创建**生效）。
+# 可选：wnam / enam / sam / weur / eeur / apac / apac-ne / apac-se / oc / afr / me
+# 本机 A/B 实测见 README「落点 A/B」：大陆出口被 anycast 固定到 LAX 时，
+# DO 放与入口同一侧（wnam）比放 apac 少两跳。
+[vars]
+ROOM_LOCATION_HINT = "wnam"
+
+# 部署时建议绑自定义域（workers.dev 在大陆基本不可达）。
+# `custom_domain = true` 让 wrangler 自己建 DNS 记录 + 证书，比手写 zone route 少一步。
+[[routes]]
+pattern = "vlt-room.kcm-nixi.cn"
+custom_domain = true

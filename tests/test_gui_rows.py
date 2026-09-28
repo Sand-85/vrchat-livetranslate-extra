@@ -85,6 +85,50 @@ def test_growing_bubble_shifts_later_bubbles() -> bool:
         gui._root.destroy()
 
 
+def test_room_row_present_and_not_clipped() -> bool:
+    """★ 房间行（批次 2b）：独立成行、控件齐全，且没被窗口裁掉。
+
+    真实坑（BRIEF 反复强调）：Tk 空间不足时**从最后打包的控件开始裁**，把新勾选框
+    塞进已经拥挤的行 → 用户报「我没看到那个勾选框」。所以房间必须**独立成行**，
+    并按既有方式断言 `winfo_reqwidth() <= winfo_width()`（装得下、没被裁）。
+    """
+    from vlt.gui import TranslationGUI
+
+    gui = TranslationGUI()
+    try:
+        gui._root.update_idletasks()
+        gui._root.update()
+
+        # ① 行与控件都在，且确实被 pack 进了布局
+        row = getattr(gui, "_room_row", None)
+        assert row is not None, "没有房间行（_room_row 不存在）"
+        assert row.winfo_manager() == "pack", \
+            f"房间行没有被 pack（manager={row.winfo_manager()!r}）"
+        for attr in ("_room_var", "_room_code_var", "_room_nick_var", "_room_status"):
+            assert hasattr(gui, attr), f"房间行缺控件/变量：{attr}"
+        classes = {w.winfo_class() for w in row.winfo_children()}
+        assert "Checkbutton" in classes, f"房间行里没有「房间」勾选框：{classes}"
+        assert "TEntry" in classes, f"房间行里没有输入框（房间码/昵称）：{classes}"
+        assert "TLabel" in classes, f"房间行里没有标签：{classes}"
+        assert str(gui._room_status.cget("text")).strip(), "房间状态标签是空的"
+
+        # ② 没被裁：需求宽度 <= 实际宽度（屏幕本身更窄时属物理限制，放行——与 test_i18n 同口径）
+        need, have = row.winfo_reqwidth(), row.winfo_width()
+        screen = int(gui._root.winfo_screenwidth() or 0)
+        win_have = gui._root.winfo_width()
+        fits = need <= have + 1 or (screen and win_have >= screen - 32)
+        assert fits, (f"房间行被裁：需求 {need}px，实际只有 {have}px"
+                      f"（窗口 {win_have}px / 屏宽 {screen}px）")
+        print(f"  ✓ 房间行独立存在、控件齐全、未被裁（req {need} <= width {have}；"
+              f"状态文案 {str(gui._room_status.cget('text'))!r}）")
+        return True
+    finally:
+        try:
+            gui._root.destroy()
+        except Exception:
+            pass
+
+
 def main() -> int:
     cases = [
         # 一句话：增量 → 增量 → 终版，应只占 1 条气泡
@@ -117,6 +161,11 @@ def main() -> int:
         all_ok &= test_growing_bubble_shifts_later_bubbles()
     except AssertionError as exc:
         print(f"  ❌ 气泡长高时下移失败：{exc}")
+        all_ok = False
+    try:
+        all_ok &= test_room_row_present_and_not_clipped()
+    except AssertionError as exc:
+        print(f"  ❌ 房间行检查失败：{exc}")
         all_ok = False
     for i, (events, expect) in enumerate(cases, 1):
         print(f"用例 {i}:")
