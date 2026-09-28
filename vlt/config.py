@@ -112,6 +112,26 @@ class AppConfig:
         return self.directions[name]
 
 
+def _opt_int(value) -> int | None:
+    """可选整数字段：None/空串 → None（= 不传该参数）；非法值也回 None（不因此启动失败）。"""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_float(value) -> float | None:
+    """可选浮点字段：None/空串 → None（= 不传该参数）；非法值也回 None。"""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _resolve_api_key(api_key: str | None, require_key: bool) -> str:
     """取 key；`require_key=False` 时"还没有 key"不抛错，而是返回空串。
 
@@ -192,6 +212,10 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
     output = {
         "audio": {
             "enabled": bool(raw_audio.get("enabled", False)),
+            # 译音**音源**（A/B 热切换）：realtime = 实时模型自带音频；tts = 本地流式 TTS
+            # （音色与打字腿一致）。开关在界面「设置」里，改完立即生效。
+            "mode": ("tts" if str(raw_audio.get("mode") or "realtime").strip().lower()
+                     in ("tts", "b", "typing", "same") else "realtime"),
             "device": raw_audio.get("device") or ["voicemeeter input", "voicemeeter aux input", "cable input", "vb-audio"],
             "device_name": str(raw_audio.get("device_name") or ""),
             "sample_rate": int(raw_audio.get("sample_rate", 48000)),
@@ -220,8 +244,17 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
             # 打字也要出声：文本翻译不回音频，这一步单独用 TTS 合成后喂虚拟声卡
             "tts": {
                 "enabled": bool((raw_textin.get("tts") or {}).get("enabled", True)),
+                # qwen3-tts-*（内置/设计音色，不可复现）或 cosyvoice-*（seed 可复现）
                 "model": str((raw_textin.get("tts") or {}).get("model") or "qwen3-tts-flash"),
                 "voice": str((raw_textin.get("tts") or {}).get("voice") or "Cherry"),
+                # 仅 cosyvoice 生效：固定 seed → 同一句两次合成逐字节一致；写 null 则不传（随机）
+                "seed": _opt_int((raw_textin.get("tts") or {}).get("seed", 1234)),
+                # 可选语气/风格提示（如「请用四川话说」）；空则不传
+                "instruction": str((raw_textin.get("tts") or {}).get("instruction") or ""),
+                # 流式合成（SSE）：首包 ~0.4s 就能起播，整段要等 1.6~1.9s → 默认开
+                "stream": bool((raw_textin.get("tts") or {}).get("stream", True)),
+                # 语速（仅 qwen3-tts 生效）：1 = 默认；0.8 约慢 20%，1.2 约快 20%（实测单调）
+                "speech_rate": _opt_float((raw_textin.get("tts") or {}).get("speech_rate")),
                 "timeout_s": float((raw_textin.get("tts") or {}).get("timeout_s", 30.0)),
             },
         },
