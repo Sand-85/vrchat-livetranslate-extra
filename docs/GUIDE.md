@@ -276,6 +276,11 @@ overlay:
   split_labels: ["别人（附近）", "房间（远端）"]   # 每栏顶部小标题（空 = 不画）
   split_divider: true         # 栏间竖分隔线
   split_gap_px: 10            # 栏间空隙（像素）
+  # 三栏：**独立开关**（与上面的两栏互不影响；开了就用这组三栏自己的配置）
+  split_three: false          # true = 三栏
+  split3_panes: [0.34, 0.33, 0.33]              # 三栏各自的宽度（同样支持像素写法）
+  split3_content: ["theirs", "room", "mine"]    # 左=别人（附近） 中=房间（远端） 右=我
+  split3_labels: ["别人（附近）", "房间（远端）", "我"]
 
 output:
   audio:

@@ -80,7 +80,7 @@ class OverlayConfig:
     show_source: bool = True
     fade_after_s: float = 0.0           # >0 则最后一条文本显示 fade_after_s 秒后淡出
     overlay_key: str = "vlt.wrist.panel"
-    # ---- 分栏（方案 A：一块面板里并排两个「窗口」，各自宽度可自定义）----
+    # ---- 分栏（一块面板里并排 N 个「窗口」，各自宽度可自定义）----
     # split=true → 走 render_split()：仍是**同一块 overlay、同一张贴图**，只在画面里分区。
     split: bool = False
     # 每栏宽度：全 ≤1 视为**比例**（[0.3, 0.7]）；有 >1 的视为**像素/份数**（[300, 700]）——
@@ -90,6 +90,11 @@ class OverlayConfig:
     split_divider: bool = True                       # 栏间竖分隔线
     split_content: tuple[str, ...] = ("theirs", "mine")   # 每栏放谁的内容：mine / theirs(=local) / peer(=room) / all
     split_labels: tuple[str, ...] = ("", "")         # 每栏顶部小标题（空 = 不画）
+    # ---- 三栏：**独立开关**，与两栏互不影响（开了就用下面这组三栏自己的配置）----
+    split_three: bool = False
+    split3_panes: tuple[float, ...] = (0.34, 0.33, 0.33)
+    split3_content: tuple[str, ...] = ("theirs", "room", "mine")
+    split3_labels: tuple[str, ...] = ("别人（附近）", "房间（远端）", "我")
 
     @staticmethod
     def from_dict(d: dict) -> "OverlayConfig":
@@ -126,6 +131,10 @@ class OverlayConfig:
             split_divider=bool(d.get("split_divider", True)),
             split_content=_as_str_tuple(d.get("split_content"), ("theirs", "mine")),
             split_labels=_as_str_tuple(d.get("split_labels"), ("", "")),
+            split_three=bool(d.get("split_three", False)),
+            split3_panes=_as_float_tuple(d.get("split3_panes"), (0.34, 0.33, 0.33)),
+            split3_content=_as_str_tuple(d.get("split3_content"), ("theirs", "room", "mine")),
+            split3_labels=_as_str_tuple(d.get("split3_labels"), ("别人（附近）", "房间（远端）", "我")),
         )
 
 
@@ -445,6 +454,18 @@ def _filter_entries(entries, sel: str) -> list:  # noqa: ANN001
     return out
 
 
+def _active_panes(cfg: OverlayConfig) -> tuple[tuple[float, ...], tuple[str, ...], tuple[str, ...]]:
+    """当前生效的 `(栏宽, 每栏内容, 每栏标题)` —— **三栏开关优先**（它有自己的那组配置）。"""
+    if cfg.split_three:
+        return cfg.split3_panes, cfg.split3_content, cfg.split3_labels
+    return cfg.split_panes, cfg.split_content, cfg.split_labels
+
+
+def split_enabled(cfg: OverlayConfig) -> bool:
+    """分栏总开关：**两栏 `split` 与三栏 `split_three` 是两个独立开关**，任一为真即分栏。"""
+    return bool(cfg.split or cfg.split_three)
+
+
 def render_split(entries, cfg: OverlayConfig | None = None) -> Image.Image:
     """**一块面板、左右两栏**（方案 A）：每栏宽度可自定义，内容按栏筛选。
 
@@ -469,8 +490,9 @@ def render_split(entries, cfg: OverlayConfig | None = None) -> Image.Image:
             return ImageFont.load_default()
 
     tf, sf = _f(cfg.font_size), _f(cfg.source_font_size)
-    boxes = _pane_boxes(pad * 2, w - pad * 2, cfg.split_panes, cfg.split_gap_px)
-    has_label = any(str(s).strip() for s in (cfg.split_labels or ()))
+    panes, contents, labels = _active_panes(cfg)
+    boxes = _pane_boxes(pad * 2, w - pad * 2, panes, cfg.split_gap_px)
+    has_label = any(str(s).strip() for s in (labels or ()))
     label_h = (cfg.source_font_size + 10) if has_label else 0
 
     for i, (x0, x1) in enumerate(boxes):
@@ -478,11 +500,11 @@ def render_split(entries, cfg: OverlayConfig | None = None) -> Image.Image:
             gx = (boxes[i - 1][1] + x0) // 2
             d.line([gx, pad * 2 + 4, gx, h - pad * 2 - 4],
                    fill=(*cfg.color_border, max(40, cfg.border_alpha // 2)), width=2)
-        lab = _content_at(cfg.split_labels, i, "").strip()
+        lab = _content_at(labels, i, "").strip()
         if lab:
             d.text(((x0 + x1) // 2, pad * 2), lab, font=sf,
                    fill=(*cfg.color_source, cfg.source_alpha), anchor="ma")
-        _draw_entries(d, _filter_entries(entries, _content_at(cfg.split_content, i, "all")),
+        _draw_entries(d, _filter_entries(entries, _content_at(contents, i, "all")),
                       cfg, x0=x0, x1=x1, y_bottom=h - pad * 2,
                       budget=(h - 3 * pad) - label_h, tf=tf, sf=sf)
     return img
@@ -712,7 +734,7 @@ class WristOverlay:
             return
         self._last_entries = key
         self._last_text_at = time.monotonic()
-        img = render_split(entries, self.cfg) if self.cfg.split else render_conversation(entries, self.cfg)
+        img = render_split(entries, self.cfg) if split_enabled(self.cfg) else render_conversation(entries, self.cfg)
         if self.dry_run:
             self.frames_updated += 1
             self._frames_dir.mkdir(parents=True, exist_ok=True)

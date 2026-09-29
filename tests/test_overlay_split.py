@@ -24,6 +24,7 @@ from vlt.output.overlay import (  # noqa: E402
     peer_color,
     render_conversation,
     render_split,
+    split_enabled,
 )
 
 PAD = 12
@@ -48,8 +49,8 @@ def _col_ys(img, x: int, col, tol: int = 12) -> list[int]:
     return out
 
 
-def _divider_x(img, cfg: OverlayConfig) -> int | None:
-    """找栏间竖分隔线：颜色 = 边框色、透明度减半，跨大部分面板高度。
+def _divider_xs(img, cfg: OverlayConfig) -> list[int]:
+    """找**所有**栏间竖分隔线，返回每条线的中心 x（三栏时应有 2 条）。
 
     ⚠️ 分隔线的 alpha 就是 border_alpha//2（默认 60），**不能**用 `_is_color`（它要求
     alpha > 60）—— 第一版探针就栽在这儿：线明明画了却扫不到。
@@ -67,7 +68,19 @@ def _divider_x(img, cfg: OverlayConfig) -> int | None:
                 n += 1
         if n > (H - 4 * PAD) * 0.9:
             hits.append(x)
-    return (hits[0] + hits[-1]) // 2 if hits else None
+    # 把连续区间并成一个中心点
+    groups: list[list[int]] = []
+    for x in hits:
+        if groups and x - groups[-1][-1] <= 2:
+            groups[-1].append(x)
+        else:
+            groups.append([x])
+    return [(g[0] + g[-1]) // 2 for g in groups]
+
+
+def _divider_x(img, cfg: OverlayConfig) -> int | None:
+    xs = _divider_xs(img, cfg)
+    return xs[0] if xs else None
 
 
 def _ratio_of_first_pane(div_x: int, gap: int) -> float:
@@ -214,14 +227,17 @@ def test_no_split_keeps_old_path() -> bool:
     om.render_split = lambda e, c=None: (calls.append("split"), real_s(e, c))[1]
     try:
         with tempfile.TemporaryDirectory() as td:
-            for split, expect in ((False, "conv"), (True, "split")):
+            for split, three, expect in ((False, False, "conv"), (True, False, "split"),
+                                         (False, True, "split")):
                 calls.clear()
-                cfg = om.OverlayConfig.from_dict({"split": split, "size_px": [W, H]})
+                cfg = om.OverlayConfig.from_dict({"split": split, "split_three": three,
+                                                 "size_px": [W, H]})
                 ov = om.WristOverlay(cfg, dry_run=True)
                 ov._frames_dir = Path(td)          # dry-run 只写图，不碰 SteamVR
                 ov.update_entries(entries, force=True)
                 good = calls == [expect]
-                print(f"  split={split} → 调用 {calls}（期望 ['{expect}']）  {'OK' if good else '✗'}")
+                print(f"  split={split} split_three={three} → 调用 {calls}"
+                      f"（期望 ['{expect}']）  {'OK' if good else '✗'}")
                 ok &= good
     finally:
         om.render_conversation, om.render_split = real_c, real_s
@@ -263,6 +279,74 @@ def test_room_local_aliases() -> bool:
     return ok
 
 
+def test_three_pane_switch() -> bool:
+    """★ 三栏**独立开关**：开了三栏（用三栏自己的宽度/内容/标题），关了回两栏，两者互不依赖。
+
+    开关矩阵：`split`(两栏) 与 `split_three`(三栏) 任一为真即分栏；同时为真时**三栏优先**。
+    """
+    ok = True
+    mixed = [
+        ("theirs", "近くの人が話している", "旁边的人在说话"),
+        ("peer:p_ru", "Я из России", "房间里的俄罗斯人", "逆袭"),
+        ("mine", "我说的", "what I said"),
+    ]
+    gap = 10
+
+    # ① 只开三栏（split=False）→ 必须分栏，且是 3 栏（2 条分隔线）
+    c3 = OverlayConfig.from_dict({"split": False, "split_three": True, "size_px": [W, H]})
+    img3 = render_split(mixed, c3)
+    divs = _divider_xs(img3, c3)
+    cond = split_enabled(c3) and len(divs) == 2
+    print(f"  只开三栏：分栏={split_enabled(c3)}，分隔线 {len(divs)} 条（期望 2）  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ② 三栏用自己的宽度：分隔线位置要和 split3_panes 算出来的一致
+    c3w = OverlayConfig.from_dict({"split_three": True, "size_px": [W, H],
+                                   "split3_panes": [600, 200, 200]})
+    iw = render_split(mixed, c3w)
+    exp = _pane_boxes(LEFT_X, RIGHT_X + 1, c3w.split3_panes, gap)
+    exp_mid = [(exp[i][1] + exp[i + 1][0]) // 2 for i in range(len(exp) - 1)]
+    got = _divider_xs(iw, c3w)
+    good = len(got) == len(exp_mid) == 2 and all(abs(a - b) <= 2 for a, b in zip(got, exp_mid))
+    print(f"  三栏宽度 [600,200,200]：分隔线 {got} vs 期望 {exp_mid}  {'OK' if good else '✗'}")
+    ok &= good
+
+    # ③ 三栏自己的内容/标题默认值：第1栏 their(本地)、第2栏 room(房间)、第3栏 mine
+    boxes = _pane_boxes(LEFT_X, RIGHT_X + 1, c3.split3_panes, gap)
+    (x0a, _), (x0b, _), (_, x1c) = boxes
+    bars = (bool(_col_ys(img3, x0a, c3.color_theirs)),
+            bool(_col_ys(img3, x0b, peer_color("p_ru"))),
+            bool(_col_ys(img3, x1c - 1, c3.color_mine)))
+    cond = all(bars)
+    print(f"  三栏默认内容：本地条/房间条/我的条 = {bars}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ④ 两栏配置不受影响：关掉三栏 → 回到两栏（1 条分隔线），且用 split_panes 的宽度
+    c2 = OverlayConfig.from_dict({"split": True, "split_three": False, "size_px": [W, H],
+                                  "split_panes": [0.3, 0.7]})
+    img2 = render_split(mixed, c2)
+    divs2 = _divider_xs(img2, c2)
+    ratio = _ratio_of_first_pane(divs2[0], gap) if divs2 else -1
+    cond = len(divs2) == 1 and abs(ratio - 0.30) <= 0.02
+    print(f"  关掉三栏：分隔线 {len(divs2)} 条、第一栏占比 {ratio:.3f}（期望 0.30）  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ⑤ 两个开关同时开 → 三栏优先
+    both = OverlayConfig.from_dict({"split": True, "split_three": True, "size_px": [W, H]})
+    cond = len(_divider_xs(render_split(mixed, both), both)) == 2
+    print(f"  两个开关同时开：{len(_divider_xs(render_split(mixed, both), both))} 条分隔线（三栏优先）  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ⑥ 脏的三栏配置回落默认
+    dirty = OverlayConfig.from_dict({"split3_panes": "xx", "split3_content": None})
+    good = dirty.split3_panes == (0.34, 0.33, 0.33) and dirty.split3_content == ("theirs", "room", "mine")
+    print(f"  脏三栏配置 → panes={dirty.split3_panes}, content={dirty.split3_content}  "
+          f"{'OK' if good else '✗'}")
+    ok &= good
+    return ok
+
+
 def main() -> int:
     print("手腕屏分栏（方案 A）测试：")
     results = [
@@ -270,6 +354,7 @@ def main() -> int:
         ("像素写法等价", test_pixel_weights_equivalent()),
         ("内容不串栏", test_content_filtering()),
         ("别人/房间可分开", test_room_local_aliases()),
+        ("三栏独立开关", test_three_pane_switch()),
         ("标题与分隔线", test_labels_and_divider()),
         ("脏配置回落", test_dirty_config_falls_back()),
         ("分派正确", test_no_split_keeps_old_path()),
