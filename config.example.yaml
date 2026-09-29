@@ -113,6 +113,14 @@ overlay:
   color_bg: [12, 14, 20]
   bg_alpha: 205
   separator: true            # 原文/译文之间的细分隔线
+  # ---- 分栏：一块面板里并排两个「窗口」，**各自宽度可自定义** ----
+  # 仍是同一块 overlay（只把画面分区，不新增窗口句柄 → 不引入新的失败面）。
+  split: false               # true = 启用分栏
+  split_panes: [0.5, 0.5]    # 每栏宽度：全 ≤1 视为比例；有 >1 视为像素/份数（[300,700] ≡ [0.3,0.7]）
+  split_gap_px: 10           # 栏间空隙（像素）
+  split_divider: true        # 栏间竖分隔线
+  split_content: ["theirs", "mine"]   # 每栏放谁的内容：mine / theirs / peer（房间里别人）/ all
+  split_labels: ["", ""]     # 每栏顶部小标题（空 = 不画；例如 ["别人", "我"]）
 
 # 第三条腿：译音输出（模型译音 → 虚拟声卡 → VRChat 麦克风 → 对方听到）
 output:

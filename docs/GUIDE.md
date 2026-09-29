@@ -267,6 +267,13 @@ overlay:
   font_size: 42               # 译文字号
   source_font_size: 30        # 原文小字号
   show_source: true           # 双行显示（3.8 默认就返回源文识别结果，零额外成本）
+  # 分栏：一块面板里并排两个「窗口」，各自宽度可自定义（仍是同一块 overlay，不新增窗口句柄）
+  split: false                # true = 启用；内容与换行按**该栏**宽度算
+  split_panes: [0.5, 0.5]     # 每栏宽度：全 ≤1 = 比例；有 >1 = 像素/份数（[300,700] ≡ [0.3,0.7]）
+  split_content: ["theirs", "mine"]   # 每栏放谁的内容：mine / theirs / peer（房间里别人）/ all
+  split_labels: ["别人", "我"]         # 每栏顶部小标题（空 = 不画）
+  split_divider: true         # 栏间竖分隔线
+  split_gap_px: 10            # 栏间空隙（像素）
 
 output:
   audio:
