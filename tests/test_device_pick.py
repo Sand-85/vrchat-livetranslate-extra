@@ -101,43 +101,79 @@ def test_strip_loopback_suffix() -> None:
 
 
 def test_fallback_path_logs_warning() -> None:
-    """调用方回落时必须留痕：用假 PyAudio 走一遍 pick_loopback_device 的回落分支。"""
+    """调用方回落时必须留痕：注入假后端，走一遍 pick_loopback_target 的回落分支。
+
+    回退链关键词全不中、默认输出设备也匹配不上 → 必须回落到第一个可采集端点，
+    并且**留痕说明用了回退**（绝不静默选错 —— 选错会让对方听不到译音）。
+    """
     import contextlib
     import io
 
     import vlt.engine as E
+    from vlt import platform
 
-    class _FakePA:
-        def __init__(self) -> None:
-            self.terminated = False
+    class _FakeBackend:
+        @staticmethod
+        def query_loopback_devices():
+            return [_loop(3, "Some Random Device [Loopback]"),
+                    _loop(4, "Another Device [Loopback]")]
 
-        def get_loopback_device_info_generator(self):
-            return iter([_loop(3, "Some Random Device [Loopback]"),
-                         _loop(4, "Another Device [Loopback]")])
+        @staticmethod
+        def default_output_index() -> int:
+            return 7
 
-        def get_host_api_info_by_type(self, _api):
-            return {"defaultOutputDevice": 7}
-
-        def get_device_info_by_index(self, _idx):
+        @staticmethod
+        def device_info_by_index(_idx: int) -> dict:
             return {"name": "Missing Default Out"}
 
-        def terminate(self) -> None:
-            self.terminated = True
-
-    import pyaudiowpatch as pyaudio
-    original = pyaudio.PyAudio
-    pyaudio.PyAudio = _FakePA
+    orig = platform.device_backend
+    platform.device_backend = lambda: _FakeBackend      # type: ignore[assignment]
     try:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            picked, p = E.pick_loopback_device(["不存在的关键词zzz"])
-        # 回退链不中 + 默认设备也不中 → 回落到第一个 loopback，并且**留痕说明用了回退**
-        assert picked is not None and picked[0] == 3, f"回落结果不对：{picked}"
+            target = E.pick_loopback_target(["不存在的关键词zzz"])
         out = buf.getvalue()
-        assert "回退到第一个 loopback" in out, f"用了回退却没留痕：{out!r}"
     finally:
-        pyaudio.PyAudio = original
-    print("  全不匹配 → 回落第一个 loopback + 留痕 OK")
+        platform.device_backend = orig                  # type: ignore[assignment]
+
+    # 回退链不中 + 默认设备也不中 → 回落到第一个，并且**留痕**
+    assert target is not None and target.name == "Some Random Device [Loopback]", \
+        f"回落结果不对：{target}"
+    assert "回退" in out, f"回落时没有留痕说明用了回退，日志：{out!r}"
+    print("  回落分支留痕 OK")
+
+
+def test_pick_target_by_name_wins() -> None:
+    """用户在界面上按名选的设备要优先于回退链（哪怕回退链关键词也能命中）。"""
+    import vlt.engine as E
+    from vlt import platform
+
+    class _FakeBackend:
+        @staticmethod
+        def query_loopback_devices():
+            return [{"index": 10, "name": "A [Loopback]", "defaultSampleRate": 48000,
+                     "maxInputChannels": 2},
+                    {"index": 11, "name": "B [Loopback]", "defaultSampleRate": 48000,
+                     "maxInputChannels": 2}]
+
+        @staticmethod
+        def default_output_index() -> int:
+            return 10
+
+        @staticmethod
+        def device_info_by_index(_idx: int) -> dict:
+            return {"name": "A [Loopback]"}
+
+    orig = platform.device_backend
+    platform.device_backend = lambda: _FakeBackend      # type: ignore[assignment]
+    try:
+        picked = E.pick_loopback_target(["b [loopback]"], device_name="A [Loopback]")
+    finally:
+        platform.device_backend = orig                  # type: ignore[assignment]
+
+    assert picked is not None and picked.name == "A [Loopback]", \
+        f"按名选择没压过回退链：{picked}"
+    print("  按名优先 OK")
 
 
 if __name__ == "__main__":
@@ -148,4 +184,5 @@ if __name__ == "__main__":
     test_no_match_returns_none()
     test_strip_loopback_suffix()
     test_fallback_path_logs_warning()
+    test_pick_target_by_name_wins()
     print("ALL PASSED")

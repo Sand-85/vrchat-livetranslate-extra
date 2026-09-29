@@ -1,0 +1,16 @@
+# VRChat 实时同传 —— Windows 独占依赖
+#
+# 用法：pip install -r requirements-windows.txt
+-r requirements.txt
+
+PyAudioWPatch>=0.2.12.8   # WASAPI loopback 采集（听别人说话）—— 必须是这个分支，不是 pyaudio
+openvr>=1.26.701          # SteamVR overlay（手腕屏）
+#
+# ⚠️ 这两个都是 Windows 独占，**不要**加进公共 requirements.txt：
+#   - PyAudioWPatch 在 Linux 上没有 wheel
+#   - openvr 的 Linux 用法另说：Linux 侧手腕屏走**自建 OpenXR**
+#     （vlt/output/openxr_overlay.py + requirements-linux.txt 的 pyopenxr），
+#     不需要 Python 的 openvr 绑定
+#
+# 历史：这里曾经还有 pycaw（音频端点信息 / 默认设备）。设备枚举改走
+# sounddevice 之后 `vlt/` 里已经没有它的引用，故移除（连同它拖进来的 comtypes）。

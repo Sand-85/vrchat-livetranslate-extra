@@ -13,8 +13,9 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vlt.output.overlay import CLOSING_PUNCT, render_panel, wrap_text  # noqa: E402
+from vlt.platform import find_cjk_font  # noqa: E402
 
-FONT = "C:/Windows/Fonts/msyh.ttc"
+FONT = find_cjk_font() or "C:/Windows/Fonts/msyh.ttc"   # 按平台解析，别写死 Windows 路径
 MAX_W = 900
 # 以字母开头的连续词（Unicode：西里尔/希腊/拉丁都算），CJK 词会被 _is_word_char 过滤掉
 _WORD_RE = re.compile(r"[^\W\d_][\w'\-_/]*", re.UNICODE)

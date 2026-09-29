@@ -3,6 +3,7 @@
 > **中文** | [English](docs/README.en.md) | [日本語](docs/README.ja.md) | [한국어](docs/README.ko.md) | [Русский](docs/README.ru.md)
 
 [![CI](https://github.com/Sand-85/vrchat-livetranslate-extra/actions/workflows/ci.yml/badge.svg)](https://github.com/Sand-85/vrchat-livetranslate-extra/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Sand-85/vrchat-livetranslate-extra?label=release)](https://github.com/Sand-85/vrchat-livetranslate-extra/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](docs/GUIDE.md#一前置条件)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](docs/GUIDE.md#一前置条件)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -16,16 +17,17 @@
 [@Sand-85](https://github.com/Sand-85) 维护 —— 上游保持原样，这里维护的是一组「让译音真正可用」和 增加更多激进改动 的增强，和上游同步更新且大部分功能互通
 **基础全部来自上游原作者 [nixi-agent](https://github.com/nixi-agent)，协议沿用 MIT（见 `LICENSE`，版权归原作者）。**
 
+**上游代码同时支持 Windows 10/11 与 Linux**（同一份 `config.yaml`、配置语义一致）；
+本仓库发布的是 **Windows 版**（exe），Linux 侧请按上游文档自行安装。
+
 相对上游多出来的部分：
 
 | 能力 | 说明 |
 |---|---|
-| **打字替代说话** | 底栏输入框，回车即发，译文走聊天气泡 / 手腕屏 / chatbox（上游已合并 ✅） |
-| **打字也出声** | 译文经 TTS 合成后写进虚拟声卡，对方能听到（上游已合并 ✅） |
-| **流式合成（SSE）** | 打字腿「开口」从 ~1.7s 降到 **~0.52s**；源语言=目标语言时直接跳过翻译请求 |
+| **流式合成（SSE）** | 打字腿「开口」从 ~1.7s 降到 **~0.52s**；源语言=目标语言时直接跳过翻译请求| 已合并上游
 | **语音腿译音音源 A/B** | 设置「译音：音源与音色」里热切换：**A** 实时模型自带音色（延迟最低）/ **B** 本地流式 TTS（音色与打字腿**完全一致**） |
 | **语速可调** | `text_input.tts.speech_rate`（实测单调可控），音色语言锁定、cosyvoice 后端等细节见 `docs/GUIDE.md` |
-| **修复：整段反复重念** | 多路流式 TTS 并发写同一虚拟声卡导致分片交错 —— 改为单飞队列 + 合并 |
+| **修复：整段反复重念** | 多路流式 TTS 并发写同一虚拟声卡导致分片交错 —— 改为单飞队列 + 合并 |已合并上游✅
 | **修复：房间首次勾选不生效** | 补建 `room:` 段只写了文件、内存里的配置没刷新 → 表现为「勾了房间没反应、重启一次才好」（已回馈上游） |
 
 > **预编译 exe 在 [Releases](https://github.com/Sand-85/vrchat-livetranslate-extra/releases)**（单文件、免安装）；
@@ -33,16 +35,19 @@
 
 > **随上游同步**：当前基线 = 上游 **v0.4.0-beta.1 的内容**（多人房间 · 文字中继）+ v0.3.1 的 44100Hz 重采样修复。
 > 本仓库把它作为 **0.4.0 正式版**发布；房间**默认关闭**，不用它完全不受影响。
+**Windows 10/11 与 Linux 都支持。** 两边共用同一份 `config.yaml`，配置语义一致。
 
 ![界面](assets/gui.png)
 
 ---
 
-> 🧭 **这份文档有两种读者**
+> 🧭 **这份文档有三种读者**
 >
-> - **直接下 exe 的**：不需要 Python、不需要命令行。凡是出现 `.venv\Scripts\python.exe`、
+> - **Windows 直接下 exe 的**：不需要 Python、不需要命令行。凡是出现 `.venv\Scripts\python.exe`、
 >   `run_*.bat`、`--xxx` 的地方都是**源码安装专用**，跳过即可——你要的功能界面上都有。
-> - **从源码跑的**：下面全部适用。
+> - **Windows 从源码跑的**：下面全部适用。
+> - **Linux 用户**：看 **[GUIDE.linux.md](docs/GUIDE.linux.md)**（安装、依赖、虚拟声卡、
+>   手腕屏、排障都是 Linux 专用的）；本文下面的 Windows 细节可以跳过。
 
 ## 它能做什么
 
@@ -53,15 +58,29 @@
 | ③ 我说 → **译音进对方耳朵** | ✅ 已实现，默认关闭 | 模型直出译音 → 重采样 48kHz → 写进虚拟声卡 → VRChat 麦克风拾取。需自备虚拟声卡（VoiceMeeter / VB-Cable 等） |
 | ④ 我说 → **打字替代说话** | ✅ 已实现，默认开启 | 界面底栏输入框，**回车即发**：不想开麦时用键盘代替麦克风，译文走的是和①**完全相同**的下游（气泡 / 手腕屏）；勾了「译音输出」时还会用 **TTS 把译文念出来**送进虚拟声卡（对方能听到） |
 
+### 平台支持
+
+| 功能 | Windows | Linux |
+|---|---|---|
+| ① chatbox 气泡 | ✅ | ✅ |
+| ② VR 手腕屏 | ✅ SteamVR overlay | ✅ 自建 OpenXR overlay（Monado / WiVRn） |
+| ③ 译音进对方耳朵 | ✅ 需自备虚拟声卡（VoiceMeeter / VB-Cable） | ✅ **不需要自备**，程序运行时自己声明虚拟麦克风 |
+| ④ 打字替代说话（含 TTS） | ✅ | ✅ |
+
+Linux 的安装与用法：**[GUIDE.linux.md](docs/GUIDE.linux.md)** ·
+设计依据与「哪些路试过不通」：**[docs/平台约束记录.md](docs/平台约束记录.md)**
+
 ---
 
 ---
 
 ## 📖 使用指南
 
-从**快速上手**到**已知限制**的完整内容（安装、API key、用法、配置、排障、项目结构、开发）都在单独一份文档里：
+从**快速上手**到**已知限制**的完整内容（安装、API key、用法、配置、排障、项目结构、开发）都在单独文档里：
 
-**➡️ [使用指南（GUIDE.md）](docs/GUIDE.md)**
+- **Windows** → **[使用指南（docs/GUIDE.md）](docs/GUIDE.md)**
+- **Linux** → **[Linux 使用指南（docs/GUIDE.linux.md）](docs/GUIDE.linux.md)**
+  （安装用 `./setup.sh`，启动用 `./run_gui.sh`）
 
 ---
 
@@ -95,7 +114,7 @@
 
 ## ☕ 赞助原作者
 
-**请给我报销 token** 🙏
+**请给我报销 token** 🙏 
 
 - ☕ **Ko-fi**（海外 / 信用卡 / PayPal）：
 

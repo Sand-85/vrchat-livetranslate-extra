@@ -24,7 +24,7 @@ from .config import load_config
 from .engine import (
     Engine, EngineEvents,
     run_mic, run_loopback, to_16k_mono,
-    pick_input_device, pick_loopback_device, list_devices,
+    list_devices,
 )
 
 from .paths import APP_DIR

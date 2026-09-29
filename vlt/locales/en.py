@@ -109,11 +109,18 @@ STRINGS: dict[str, str] = {
         "No devices found (an empty list is normal in a remote session)",
     "已扫描到 {m} 个麦克风 / {l} 个 loopback / {o} 个输出":
         "Found {m} mic(s) / {l} loopback / {o} output(s)",
+    "已扫描到 {m} 个麦克风（VRChat 音频与译音输出自动处理）":
+        "Found {m} mic(s) (VRChat audio and voice output are automatic)",
     "已选设备：{names}": "Selected devices: {names}",
     "设备：全部自动检测": "Devices: all Auto-Detect",
 
     # ---- 设置弹窗 ----
     "设置": "Settings",
+    # 分页标签（Notebook tab）
+    "常规": "General",
+    "音频": "Audio",
+    "词库": "Glossary",
+    "关于": "About",
     "界面语言": "Interface Language",
     "界面语言在重启程序后生效": "Takes effect after restarting the app",
     "已保存：重启程序后界面将切换为 {lang}":
@@ -147,6 +154,19 @@ STRINGS: dict[str, str] = {
         "⚠️ “Voice Output” is not checked: this setting has no effect yet "
         "(no virtual mic, so VRChat can't hear it).",
     "设备选择自动保存到 config.yaml": "Device selection is saved to config.yaml automatically",
+    "Linux：VRChat 音频与译音输出已自动处理":
+        "Linux: VRChat audio and voice output are handled automatically",
+    # ---- 设置弹窗：输入门限（只作用于 VRChat 输出 /「别人说话」）----
+    "输入门限": "Input Gate",
+    "启用 —— 低于门限的声音不翻译（滤掉远处说话小声的玩家）":
+        "Enable — audio below the threshold is not translated "
+        "(filters out players talking softly in the distance)",
+    "当前电平:": "Level:",
+    "门限:": "Threshold:",
+    "只有响度超过门限的声音才会被翻译；改完立刻生效（开始翻译后这里显示实时电平）":
+        "Only audio louder than the threshold gets translated; changes apply at once "
+        "(the live level appears here while translation is running)",
+    "输入门限已保存：{db} dB": "Input gate saved: {db} dB",
     # ---- 设置弹窗：音色 ----
     "音色": "Voice Timbre",
     "说话译音:": "Spoken voice:",
@@ -172,11 +192,30 @@ STRINGS: dict[str, str] = {
     "还没配置 API key，无法试听（见右上角「设置」）":
         "No API key configured — can't preview (see \"Settings\" at the top right)",
     "请先选择或填写音色": "Please pick or type a voice first",
+
+    # ---- 设置弹窗：专有词库 ----
+    "专有词库": "Glossary",
+    "作用方向:": "Scope:",
+    "全局": "Global",
+    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；作用于两个方向 —— 两个方向都要同一个译名时才放这里":
+        "One per line as source=target (club names, player names, jargon); applies to BOTH "
+        "directions — only put entries here when both directions want the same name",
+    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；只对「{dir}」这条腿生效，同名词条会覆盖全局":
+        "One per line as source=target (club names, player names, jargon); only affects the "
+        "\"{dir}\" leg, and entries here override the global table",
+    "保存词库": "Save Glossary",
+    "已保存 {n} 条词条到「{scope}」（正在翻译时会重建会话生效）":
+        "Saved {n} entries to \"{scope}\" (takes effect after the session is rebuilt while translating)",
+    "已保存 {n} 条词条到「{scope}」；{bad} 行看不懂已忽略（要写成 原文=译名）":
+        "Saved {n} entries to \"{scope}\"; {bad} unreadable line(s) ignored (use source=target)",
+    "保存失败：{err}": "Save failed: {err}",
     "日志": "Logs",
     "导出日志压缩包…": "Export Log Archive…",
     "导出日志压缩包": "Export Log Archive",
     "ZIP 压缩包": "ZIP Archive",
     "所有文件": "All Files",
+    "开发者": "Developer",
+    "由可爱的赛博巫师和他的朋友们 开发": "Made by the lovely Cyber Wizard and friends",
     "软件更新": "Software Update",
     "检查更新": "Check for Updates",
     "当前版本 v{ver} · 启动时会自动检查一次":
@@ -328,8 +367,9 @@ STRINGS: dict[str, str] = {
     "响应不是合法 JSON：{msg}": "Response is not valid JSON: {msg}",
     "最新 Release 的 tag 不是版本号：{tag}":
         "The latest release tag is not a version number: {tag}",
-    "Release 附件不全：缺少 {exe} 或校验值":
-        "Release assets incomplete: {exe} or its checksum is missing",
+    "Release 附件不全：缺少 {name} 或校验值":
+        "Release assets incomplete: {name} or its checksum is missing",
+    "替换 AppImage 失败：{msg}": "Failed to replace the AppImage: {msg}",
     "不是合法版本号，无法写入忽略列表：{version}":
         "Not a valid version number; can't add it to the ignore list: {version}",
     "config.yaml 不是合法 YAML，已放弃写入：{msg}":

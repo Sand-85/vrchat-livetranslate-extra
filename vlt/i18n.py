@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import ctypes
 import importlib
 
 # (语言代码, 母语写法)。语言名永远用各自的母语写法，不随界面语言变化；
@@ -22,10 +21,6 @@ _LANGS: list[tuple[str, str]] = [
     ("ko", "한국어"),
     ("ru", "Русский"),
 ]
-
-# Windows 主语言 ID → 界面语言。表里没有的（德语/法语等已知但未支持的语言）按 en 接待；
-# 详见 detect_system_language 的注释。
-_PRIMARY_LANG: dict[int, str] = {0x04: "zh", 0x09: "en", 0x11: "ja", 0x12: "ko", 0x19: "ru"}
 
 # None = 尚未设置过（此时 t() 按基准语言 zh 处理）。启动时由界面解析后 set_language。
 _current: str | None = None
@@ -55,22 +50,19 @@ def normalize_language(code: str | None) -> str:
 
 
 def detect_system_language() -> str:
-    """读 Windows 用户默认 UI 语言（`GetUserDefaultUILanguage`）。
+    """探测系统界面语言 —— **委派给平台层**，返回 zh/en/ja/ko/ru（不认识一律 "en"）。
 
-    返回 LANGID（如 0x0804=zh-CN、0x0409=en-US），低 10 位是主语言 ID。
-    两条分界（都写死在 `_PRIMARY_LANG` 与下面的注释里，别改口径）：
+    为什么要委派而不是在这里自己读：读系统语言是**平台专有**的事
+    （Windows 走 Win32 的 `GetUserDefaultUILanguage`，Linux 读 `LC_ALL`/`LC_MESSAGES`/`LANG`），
+    按本项目的边界约定，这类实现只该待在 `vlt/platform/{win,linux}.py` 里。
+    历史上这里自己调过一次 Win32 API，后果是 **Linux 上恒定落到 "en"** ——
+    用户没显式选过界面语言时，中文用户的 Linux 界面会莫名其妙变成英文。
 
-    - **支持的语言**：0x04→zh、0x09→en、0x11→ja、0x12→ko、0x19→ru；
-    - **其它一切情况**（0x07 德语、0x0c 法语、0x0a 西班牙语… 以及**取不到值/异常/非 Windows**）
-      → **"en"**：用户口径「不是支持的语言就显示英文」—— 外国用户按英文接待远比按中文合理；
-      中文环境的 LANGID 恒为 0x04，检测正常时绝不会掉进这条兜底。
+    口径与 `vlt/platform/__init__.py: detect_ui_language()` 完全一致：
+    **探测不到 / 不支持的语言一律 "en"**（外国用户按英文接待远比按中文合理）。
     """
-    try:
-        langid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
-        primary = int(langid) & 0x3FF
-    except Exception:  # noqa: BLE001 — 非 Windows / 任何意外：不认识 → 英文
-        return "en"
-    return _PRIMARY_LANG.get(primary, "en")
+    from . import platform
+    return platform.detect_ui_language()
 
 
 def set_language(code: str | None) -> None:

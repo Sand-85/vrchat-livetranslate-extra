@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import shutil
 import sys
 import traceback
 from contextlib import redirect_stdout
@@ -24,8 +26,14 @@ from vlt import update_check as uc                  # noqa: E402
 
 OUT = ROOT / "out" / "update_check"
 EXE_NAME = "VRChatLiveTranslate.exe"
+APPIMAGE_NAME = "VRChatLiveTranslate-x86_64.AppImage"
 SUMS_NAME = "SHA256SUMS.txt"
 DL_BASE = "https://github.com/nixi-agent/vrchat-livetranslate/releases/download"
+
+# 附件名是**与 release.yml 的发布契约**（那边 `files:` 里写的名字）：写死在这里，
+# 常量被改名而工作流没跟着改的话，这里立刻红。
+assert EXE_NAME == uc.EXE_ASSET_NAME, "exe 附件名与发布契约不一致"
+assert APPIMAGE_NAME == uc.APPIMAGE_ASSET_NAME, "AppImage 附件名与发布契约不一致"
 
 
 # ---------------------------------------------------------------- 测试替身
@@ -83,18 +91,19 @@ class MapOpener:
         return item
 
 
-def payload(tag: str = "v9.9.9", *, exe_size: int | None = 12345678, drop: str = "",
-            digest: str | None = "sha256:" + "a" * 64) -> bytes:
+def payload(tag: str = "v9.9.9", *, asset: str = EXE_NAME, asset_size: int | None = 12345678,
+            drop: str = "", digest: str | None = "sha256:" + "a" * 64) -> bytes:
     """造一份 GitHub /releases/latest 的 JSON。
 
-    drop='exe'/'sums' 让附件缺一个；digest=None 模拟「GitHub 没给 digest」的老形态
+    `asset` 决定「我们要的那份附件」叫什么（exe / AppImage，两者只有一个在）；
+    drop='asset'/'sums' 让附件缺一个；digest=None 模拟「GitHub 没给 digest」的老形态
     （2026-09 起官方 Release 不再上传 SHA256SUMS.txt，校验值改为取 assets[].digest）。
     """
     assets = []
-    if drop != "exe":
-        a = {"name": EXE_NAME, "browser_download_url": f"{DL_BASE}/{tag}/{EXE_NAME}"}
-        if exe_size is not None:
-            a["size"] = exe_size
+    if drop != "asset":
+        a = {"name": asset, "browser_download_url": f"{DL_BASE}/{tag}/{asset}"}
+        if asset_size is not None:
+            a["size"] = asset_size
         if digest:
             a["digest"] = digest
         assets.append(a)
@@ -142,27 +151,48 @@ def test_fetch_latest_release() -> None:
         uc._opener = op
         info = uc.fetch_latest_release()
         assert info.version == "9.9.9" and info.tag == "v9.9.9"
-        assert info.exe_url.endswith("/" + EXE_NAME)
+        assert info.asset_name == EXE_NAME, f"默认要的应该是 exe：{info.asset_name}"
+        assert info.asset_url.endswith("/" + EXE_NAME)
         assert info.sums_url.endswith("/" + SUMS_NAME)
-        assert info.exe_size == 12345678, f"exe_size 没带上：{info.exe_size}"
-        assert info.exe_digest == "a" * 64, f"没取到 GitHub 的 digest：{info.exe_digest!r}"
+        assert info.asset_size == 12345678, f"asset_size 没带上：{info.asset_size}"
+        assert info.asset_digest == "a" * 64, f"没取到 GitHub 的 digest：{info.asset_digest!r}"
         # GitHub 对无 User-Agent 的请求直接 403 —— UA 必须带
         ua = op.reqs[0].headers.get("User-agent", "")
         assert ua.startswith("vrchat-livetranslate/"), f"缺 User-Agent：{ua!r}"
 
-        # assets[].size 缺省 → exe_size 为 None（进度条改走 Content-Length / indeterminate）
-        uc._opener = FakeOpener([FakeResp(payload("v9.9.9", exe_size=None))])
-        assert uc.fetch_latest_release().exe_size is None
+        # ★ AppImage 形态：要的就是 AppImage 那个附件（Windows 的 exe 在不在都无所谓）
+        uc._opener = FakeOpener([FakeResp(payload("v9.9.9", asset=APPIMAGE_NAME))])
+        img = uc.fetch_latest_release(asset_name=APPIMAGE_NAME)
+        assert img.asset_name == APPIMAGE_NAME and img.asset_url.endswith("/" + APPIMAGE_NAME), \
+            f"没按 asset_name 取附件：{img}"
+        # ★ 缺 AppImage 附件（比如只带了 exe 的 Release）→ 报错，绝不悄悄拿别的附件顶上
+        uc._opener = FakeOpener([FakeResp(payload("v9.9.9"))])
+        try:
+            uc.fetch_latest_release(asset_name=APPIMAGE_NAME)
+            raise AssertionError("Release 里没有 AppImage 居然没报错")
+        except uc.UpdateCheckError as e:
+            assert "附件" in str(e) and APPIMAGE_NAME in str(e), f"提示不对：{e}"
+        # ★ AppImage 没有 SHA256SUMS.txt 兜底（那个文件里只有 exe 一行）→ 必须自带 digest
+        uc._opener = FakeOpener([FakeResp(payload("v9.9.9", asset=APPIMAGE_NAME, digest=None))])
+        try:
+            uc.fetch_latest_release(asset_name=APPIMAGE_NAME)
+            raise AssertionError("AppImage 没有 digest 居然放行（没法校验）")
+        except uc.UpdateCheckError as e:
+            assert "附件" in str(e)
+
+        # assets[].size 缺省 → asset_size 为 None（进度条改走 Content-Length / indeterminate）
+        uc._opener = FakeOpener([FakeResp(payload("v9.9.9", asset_size=None))])
+        assert uc.fetch_latest_release().asset_size is None
 
         # ★ 没有 SHA256SUMS.txt（2026-09 起官方 Release 就不带这个文件）→ 靠 digest 照样能更新。
         #   这就是实测踩到的那个 bug：旧逻辑硬要求两个附件，删掉 sums 后更新检查直接静默失败。
         uc._opener = FakeOpener([FakeResp(payload("v9.9.9", drop="sums"))])
         _nosum = uc.fetch_latest_release()
-        assert _nosum.exe_digest and not _nosum.sums_url, \
-            f"缺 sums 时应当用 digest 顶上：digest={_nosum.exe_digest!r} sums={_nosum.sums_url!r}"
+        assert _nosum.asset_digest and not _nosum.sums_url, \
+            f"缺 sums 时应当用 digest 顶上：digest={_nosum.asset_digest!r} sums={_nosum.sums_url!r}"
 
         # exe 缺了 → UpdateCheckError
-        uc._opener = FakeOpener([FakeResp(payload("v9.9.9", drop="exe"))])
+        uc._opener = FakeOpener([FakeResp(payload("v9.9.9", drop="asset"))])
         try:
             uc.fetch_latest_release()
             raise AssertionError("缺 exe 居然没报错")
@@ -265,7 +295,8 @@ def test_ignore_list_roundtrip() -> None:
 
 
 def test_should_prompt_and_check() -> None:
-    info = uc.ReleaseInfo(tag="v0.2.0", version="0.2.0", html_url="h", exe_url="e", sums_url="s")
+    info = uc.ReleaseInfo(tag="v0.2.0", version="0.2.0", html_url="h",
+                          asset_url="e", sums_url="s")
     assert uc.should_prompt(info, "0.1.1", [])
     assert not uc.should_prompt(info, "0.1.1", ["0.2.0"])
     assert not uc.should_prompt(info, "0.2.0", [])
@@ -315,7 +346,7 @@ def test_download_and_verify() -> None:
     exe_url = f"{DL_BASE}/v9.9.9/{EXE_NAME}"
     sums_url = f"{DL_BASE}/v9.9.9/{SUMS_NAME}"
     info = uc.ReleaseInfo(tag="v9.9.9", version="9.9.9", html_url="h",
-                          exe_url=exe_url, sums_url=sums_url, exe_size=len(exe_bytes))
+                          asset_url=exe_url, sums_url=sums_url, asset_size=len(exe_bytes))
     tmp = OUT / "download"
     tmp.mkdir(parents=True, exist_ok=True)
     dest = tmp / (EXE_NAME + ".new")
@@ -399,6 +430,24 @@ def test_download_and_verify() -> None:
         except uc.UpdateCheckError:
             pass
         assert not dest.exists(), "中途失败后残留没被清理"
+
+        # ★ AppImage：同一个下载器，落点跟着 asset_name 走（不写死 exe 名字）
+        img_bytes = b"fake-appimage-" * 1000
+        img_sha = hashlib.sha256(img_bytes).hexdigest()
+        img_url = f"{DL_BASE}/v9.9.9/{APPIMAGE_NAME}"
+        img_info = uc.ReleaseInfo(tag="v9.9.9", version="9.9.9", html_url="h",
+                                  asset_url=img_url, asset_name=APPIMAGE_NAME,
+                                  asset_digest=img_sha, asset_size=len(img_bytes))
+        # 映射里只有 AppImage 一个地址：校验值取 digest 就够，**一次网络都不该多走**
+        uc._opener = MapOpener({img_url: FakeResp(img_bytes, url=img_url)})
+        img_dest = tmp / (APPIMAGE_NAME + ".new")
+        img_dest.unlink(missing_ok=True)
+        out = uc.download_and_verify(img_info, tmp)
+        assert out == img_dest and out.read_bytes() == img_bytes, \
+            f"AppImage 没下到 {img_dest}：{out}"
+        meta = json.loads((tmp / uc.PENDING_JSON).read_text(encoding="utf-8"))
+        assert meta == {"version": "9.9.9", "sha256": img_sha}, f"pending json 不对：{meta}"
+        out.unlink()
         print("  download_and_verify OK")
     finally:
         uc._opener = old
@@ -432,12 +481,114 @@ def test_redirect_guard() -> None:
 # ---------------------------------------------------------------- Task 6：运行形态判定
 
 
-def test_update_mode() -> None:
-    mode = uc.update_mode()
-    assert mode in ("frozen", "source")
+def test_update_mode_and_target() -> None:
+    """运行形态判定：源码 / 单文件 exe / AppImage —— 以及「该换哪个文件」。"""
+    assert uc.update_mode() in ("frozen", "appimage", "source")
     # 本测试在源码 checkout 里跑 → 必然是 source
-    assert mode == "source", f"源码运行却判定成 {mode}"
-    print("  update_mode OK")
+    assert uc.update_mode() == "source", f"源码运行却判定成 {uc.update_mode()}"
+    assert uc.update_target_path() is None, "源码运行没有可替换的单文件"
+    assert not uc.can_self_update(), "源码运行不该被判成能自更新"
+    assert uc.asset_name_for() == EXE_NAME
+
+    tmp = OUT / "mode"
+    tmp.mkdir(parents=True, exist_ok=True)
+    img = tmp / APPIMAGE_NAME
+    img.write_bytes(b"appimage")
+    old_env = os.environ.get("APPIMAGE")
+    try:
+        # ★ 有 $APPIMAGE 且文件在 → appimage（能自更新）。以前这里被判成 source，
+        #   界面于是告诉 AppImage 用户「在仓库目录跑 git pull 就是最新版」——他没有仓库。
+        os.environ["APPIMAGE"] = str(img)
+        assert uc.update_mode() == "appimage", "AppImage 形态没认出来"
+        assert uc.can_self_update(), "AppImage 应当能自更新"
+        assert uc.update_target_path() == img, f"该换的文件不是那个 AppImage：{uc.update_target_path()}"
+        assert uc.asset_name_for() == APPIMAGE_NAME, "没按形态选附件"
+
+        # 只有 APPDIR（--appimage-extract-and-run）：没有单文件可换 → 仍是 source
+        os.environ.pop("APPIMAGE")
+        os.environ["APPDIR"] = str(tmp)
+        assert uc.update_mode() == "source", "解包运行不该被当成能自更新的 AppImage"
+
+        # APPIMAGE 指向一个已经不存在的文件（用户挪走/删了）→ 也不能假装能替换
+        os.environ["APPIMAGE"] = str(tmp / "gone.AppImage")
+        assert uc.update_mode() == "source"
+        assert uc.update_target_path() is None
+    finally:
+        os.environ.pop("APPDIR", None)
+        if old_env is None:
+            os.environ.pop("APPIMAGE", None)
+        else:
+            os.environ["APPIMAGE"] = old_env
+    print("  update_mode / update_target_path / asset_name_for OK")
+
+
+def test_install_appimage() -> None:
+    """AppImage 就地替换：补可执行位、内容换成新版，**运行中的旧文件不受影响**。
+
+    「运行中能换」是 Linux 自更新的根据：`os.replace` 只换目录项，旧 inode 仍被运行中的
+    进程（和它的 squashfs 挂载）引用着 —— 这里用「打开着的旧文件句柄仍读到旧内容」
+    直接把它钉住。Windows 恰好相反（目标被打开时 `os.replace` 直接 Access denied），
+    所以那边才需要那个「等 PID 退出的更新器 bat」——这条差异也一并钉在这里，
+    免得哪天有人把 Windows 也改成「直接换」还以为两端一样。
+    """
+    tmp = OUT / "install"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True, exist_ok=True)
+    current = tmp / APPIMAGE_NAME
+    new = tmp / (APPIMAGE_NAME + ".new")
+    current.write_bytes(b"old-version")
+    new.write_bytes(b"new-version")
+    new.chmod(0o644)                        # 下载来的文件没有可执行位
+
+    if os.name == "posix":
+        with open(current, "rb") as running:    # 模拟「正在运行的 AppImage」
+            uc.install_appimage(new, current)
+            assert running.read() == b"old-version", \
+                "运行中的旧文件内容被改了 —— 旧 inode 必须还活着（不然更新会砸掉当前会话）"
+    else:
+        # Windows：打开着的文件换不动。必须**失败得干干净净**（旧文件原样、下载物还在），
+        # 而不是换一半 —— 这正是 Windows 侧要写 .bat 等 PID 退出的原因。
+        with open(current, "rb") as running:
+            try:
+                uc.install_appimage(new, current)
+                raise AssertionError("Windows 上居然把打开着的文件换掉了 —— 语义变了？")
+            except uc.UpdateCheckError as e:
+                assert "替换" in str(e), f"错误提示没提替换：{e}"
+            assert running.read() == b"old-version"
+            assert current.read_bytes() == b"old-version", "失败时旧文件必须原样不动"
+            assert new.exists(), "失败时下载物该留着（用户还能重试）"
+        # 文件关掉之后就能正常换（Windows 的「等 PID 退出」就是在等这个时刻）
+        uc.install_appimage(new, current)
+
+    assert not new.exists(), "新版文件应当被 rename 顶替（不再存在）"
+    assert current.read_bytes() == b"new-version", "当前文件没换成新版"
+    if os.name == "posix":
+        assert current.stat().st_mode & 0o111, "换过去的 AppImage 必须可执行"
+
+    # 目录不可写（比如装在 /opt、或放在只读挂载上）→ 明确的错，界面据此转手动下载。
+    # ⚠️ Windows 上 chmod 不产生只读目录、root 又能无视权限位，所以只在「posix 非 root」下判。
+    if os.name == "posix" and os.geteuid() != 0:
+        ro = tmp / "ro"
+        ro.mkdir()
+        target = ro / APPIMAGE_NAME
+        target.write_bytes(b"old")
+        src = tmp / "src.new"
+        src.write_bytes(b"new")
+        ro.chmod(0o555)
+        try:
+            try:
+                uc.install_appimage(src, target)
+                raise AssertionError("只读目录居然替换成功了")
+            except uc.UpdateCheckError as e:
+                assert "替换" in str(e), f"错误提示没提替换：{e}"
+            assert target.read_bytes() == b"old", "失败时旧文件必须原样不动"
+            assert src.exists(), "失败时下载物不该被吃掉（用户还能重试）"
+        finally:
+            ro.chmod(0o755)
+    else:
+        print("  （跳过只读目录用例：Windows / root 下权限位不生效）")
+    print("  install_appimage OK")
 
 
 # ---------------------------------------------------------------- Task 7：更新器 bat 生成
@@ -584,6 +735,21 @@ def test_pending_download() -> None:
     new_exe.unlink()
     pending.unlink()
 
+    # ★ 同一套残留逻辑对 AppImage 同样成立：.new 的名字从**安装文件**推出来
+    #   （VRChatLiveTranslate-x86_64.AppImage.new），不写死 exe 那一套。
+    img = tmp / APPIMAGE_NAME
+    img.write_bytes(b"old-img")
+    img_new = tmp / (APPIMAGE_NAME + ".new")
+    img_new.write_bytes(body)
+    uc.write_pending(tmp, "9.9.9", sha)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        hit = uc.check_pending_download(img, current_version="0.1.1")
+    assert hit == ("9.9.9", sha), f"AppImage 残留没命中：{hit}"
+    assert "复核通过" in buf.getvalue()
+    img_new.unlink()
+    pending.unlink()
+
     print("  write_pending / check_pending_download OK")
 
 
@@ -615,12 +781,12 @@ def test_expected_sha256_prefers_github_digest() -> None:
     old = uc._opener
     try:
         info = uc.ReleaseInfo(tag="v1.0.0", version="1.0.0", html_url="h",
-                              exe_url=f"{DL_BASE}/v1.0.0/{EXE_NAME}", exe_digest="b" * 64)
+                              asset_url=f"{DL_BASE}/v1.0.0/{EXE_NAME}", asset_digest="b" * 64)
         uc._opener = MapOpener({})          # 空映射：有 digest 时**一次网络都不该走**
         assert uc._expected_sha256(info, 1.0) == "b" * 64, "有 digest 时不该再去拉文件"
 
         legacy = uc.ReleaseInfo(tag="v1.0.0", version="1.0.0", html_url="h",
-                                exe_url=f"{DL_BASE}/v1.0.0/{EXE_NAME}",
+                                asset_url=f"{DL_BASE}/v1.0.0/{EXE_NAME}",
                                 sums_url=f"{DL_BASE}/v1.0.0/{SUMS_NAME}")
         uc._opener = MapOpener({f"{DL_BASE}/v1.0.0/{SUMS_NAME}":
                                 FakeResp(f"{'c' * 64}  {EXE_NAME}\n".encode(),
@@ -643,7 +809,8 @@ def main() -> int:
         test_download_and_verify,
         test_expected_sha256_prefers_github_digest,
         test_redirect_guard,
-        test_update_mode,
+        test_update_mode_and_target,
+        test_install_appimage,
         test_build_updater_bat,
         test_build_updater_bat_relaunch,
         test_pending_download,

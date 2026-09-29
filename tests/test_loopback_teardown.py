@@ -1,29 +1,27 @@
-"""回归测试：loopback 采集收尾时的**关闭顺序**——读线程必须先退出，才能关流。
+#!/usr/bin/env python
+"""loopback 采集收尾顺序的回归测试：**关流之前，喂数据的线程必须已经退出**。
 
 ## 真实事故（用户实测闪退，faulthandler 抓到现场）
 
-    [loopback] 采集结束，共 681600 bytes ≈ 21s
-    Windows fatal exception: access violation
+    File "...\\pyaudiowpatch\\__init__.py", line 640 in read     ← 崩在阻塞读里
 
-    Current thread 0x0000c570 (most recent call first):
-      File "...\\pyaudiowpatch\\__init__.py", line 640 in read     ← 崩在阻塞读里
-      File "vlt\\engine.py", line 590 in reader                    ← 我们的读线程
+一个线程卡在阻塞的 `stream.read()` 里，另一个线程把流 stop/close、把 PortAudio
+terminate 掉 → 访问违规（用户点「停止翻译」时闪退，退出码 139）。
 
-    Thread 0x00007f8c (most recent call first):
-      File "vlt\\engine.py", line 109 in stop                      ← 同时收尾线程在跑
-      File "vlt\\gui.py", line 565 in _stop                        ← 用户点的「停止翻译」
+## 这个测试怎么钉住它
 
-根因：`reader()` 是 `while True` **死循环没有退出条件**，而主流程 finally 里直接
-`stream.stop_stream() / close() / p.terminate()` —— 一个线程卡在阻塞的 `read()` 里，
-另一个线程把流和 PortAudio 销毁了 → 访问违规。
+用假的 pyaudiowpatch 记录**调用顺序**，断言：一旦关了流，就不能再出现 `read()`；
+且关流的那一刻，喂数据线程不能还活着。
 
-（麦克风那条腿用 sounddevice 回调 API，由 PortAudio 自己管线程，所以只有 loopback 会崩；
-而且要在**双向同时**下才会走到，正好是用户的用法。）
+## 为什么改成直接测平台后端
 
-## 本测试怎么保证不再犯
+原来这里是 `E.run_loopback` + 打桩 `E.pick_loopback_device`，那套接口在
+「平台抽象层」重构后没了（`run_loopback` 现在从 `CaptureBackend` 拿 `AudioSource`）。
+不变式本身没变，只是**归属**变清楚了：收尾顺序是 `PyaudioLoopbackSource` 的实现细节，
+所以直接测它。
 
-用假的 pyaudiowpatch 记录**调用顺序**，断言：一旦关了流，就不能再出现 `read()`。
-另外断言读线程真的退出了（不是靠 daemon 被进程结束带走）。
+好处：注入的是**假模块**而不是真的 `pyaudiowpatch`，于是在 Linux 上也能跑
+（真模块只有 Windows 有 wheel），这条回归在两端都不会失守。
 """
 from __future__ import annotations
 
@@ -31,15 +29,15 @@ import asyncio
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 EVENTS: list[str] = []
-# 关闭流的那一刻，如果读线程还活着，就把它标记出来 ——
-# 这是本测试的核心不变式，且与调度时序无关（确定性抓到）。
-READER_NAME = "vlt-loopback-reader"
+# 喂数据线程的名字由 QueueAudioSource 生成：f"vlt-{label}-pump"
+READER_NAME = "vlt-loopback-pump"
 
 
 def _reader_alive() -> bool:
@@ -61,7 +59,7 @@ class _FakeStream:
         self._polls += 1
         return 4800 if self._polls <= self._with_audio_calls else 0
 
-    def read(self, n, exception_on_overflow=False):   # noqa: ANN001
+    def read(self, n, exception_on_overflow=False):   # noqa: ANN001, ARG002
         EVENTS.append("read")
         time.sleep(0.02)                              # 模拟一次读
         return b"\x00" * (n * 2 * 2)                  # 立体声 16bit 静音
@@ -83,61 +81,84 @@ class _FakePyAudio:
         EVENTS.append("terminate_WITH_READER_ALIVE" if _reader_alive() else "terminate")
 
 
-class _FakeSession:
-    def __init__(self) -> None:
-        self.sent = 0
+def _install_fake_pyaudiowpatch() -> None:
+    mod = types.ModuleType("pyaudiowpatch")
+    mod.PyAudio = _FakePyAudio          # type: ignore[attr-defined]
+    mod.paInt16 = 8                     # type: ignore[attr-defined]
+    sys.modules["pyaudiowpatch"] = mod
 
-    async def send_audio(self, pcm: bytes) -> None:
-        self.sent += len(pcm)
+
+def _drive(src, seconds: float) -> None:
+    """跑一段「读 → 关」，模拟引擎的采集循环 + finally 收尾。"""
+
+    async def go() -> None:
+        end = time.perf_counter() + seconds
+        while time.perf_counter() < end:
+            await src.read(timeout=0.1)
+        src.close()
+
+    asyncio.run(go())
+
+
+def _make_source():
+    from vlt.platform.win import PyaudioLoopbackSource
+    loop = asyncio.new_event_loop()
+    try:
+        src = PyaudioLoopbackSource(loop, device_index=63, name="Fake Loopback",
+                                    rate=48000, channels=2)
+    finally:
+        loop.close()
+    return src
 
 
 def test_reader_joins_before_stream_close() -> None:
-    import vlt.engine as E
-
     EVENTS.clear()
-    fake_p = _FakePyAudio()
-    orig_pick = E.pick_loopback_device
-    E.pick_loopback_device = lambda patterns=None: ((63, "Fake Loopback", 48000, 2), fake_p)
-    try:
-        session = _FakeSession()
-        asyncio.run(E.run_loopback(session, None, seconds=0.4))
-    finally:
-        E.pick_loopback_device = orig_pick
+    src = _make_source()
+    src.start()
+    _drive(src, 0.4)
 
     assert "stop_stream" in EVENTS or "stop_stream_WITH_READER_ALIVE" in EVENTS, \
         f"没有关闭流，采集可能没跑起来：{EVENTS}"
 
-    # 核心不变式：关流/释放 PortAudio 时，读线程必须已经退出
+    # 核心不变式：关流/释放 PortAudio 时，喂数据线程必须已经退出
     bad = [e for e in EVENTS if e.endswith("_WITH_READER_ALIVE")]
     assert not bad, (
-        f"关闭流/释放 PortAudio 时读线程还活着（{bad}）—— 这正是访问违规的原因："
+        f"关闭流/释放 PortAudio 时喂数据线程还活着（{bad}）—— 这正是访问违规的原因："
         f"一个线程卡在阻塞 read() 里，另一个线程把流销毁了。调用序列：{EVENTS}"
     )
-    print(f"  teardown order OK（{len(EVENTS)} 次调用，关流前读线程已退出）")
+    print(f"  teardown order OK（{len(EVENTS)} 次调用，关流前线程已退出）")
 
 
 def test_reader_thread_exits() -> None:
-    import vlt.engine as E
-
     EVENTS.clear()
-    fake_p = _FakePyAudio()
-    orig_pick = E.pick_loopback_device
-    E.pick_loopback_device = lambda patterns=None: ((63, "Fake Loopback", 48000, 2), fake_p)
-    try:
-        asyncio.run(E.run_loopback(_FakeSession(), None, seconds=0.3))
-    finally:
-        E.pick_loopback_device = orig_pick
+    src = _make_source()
+    src.start()
+    _drive(src, 0.3)
 
     alive = [t.name for t in threading.enumerate() if t.name == READER_NAME]
     assert not alive, (
-        "采集返回后读线程还活着 —— 它必须在关闭流之前被 join 掉，"
+        "采集返回后喂数据线程还活着 —— 它必须在关闭流之前被 join 掉，"
         "否则线程会在别人销毁流的同时继续 read()"
     )
-    print("  reader thread joined OK（采集返回时读线程已退出）")
+    print("  reader thread joined OK（采集返回时线程已退出）")
+
+
+def test_close_is_idempotent() -> None:
+    """close() 必须幂等：引擎的 finally 与 Engine.stop() 都可能调它。"""
+    EVENTS.clear()
+    src = _make_source()
+    src.start()
+    src.close()
+    src.close()
+    stops = [e for e in EVENTS if e.startswith("stop_stream")]
+    assert len(stops) == 1, f"close() 被调了两次，底层流被关了 {len(stops)} 次：{EVENTS}"
+    print("  close() 幂等 OK（重复调用只关一次流）")
 
 
 if __name__ == "__main__":
+    _install_fake_pyaudiowpatch()
     print("test_loopback_teardown:")
     test_reader_joins_before_stream_close()
     test_reader_thread_exits()
+    test_close_is_idempotent()
     print("ALL PASSED")

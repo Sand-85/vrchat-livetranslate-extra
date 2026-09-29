@@ -25,3 +25,6 @@ config.local.yaml
 .vscode/
 .idea/
 *.swp
+
+# 打包产物：仓库根目录直接 build 出来的 exe 不入库（要发的是 Release 附件）
+/*.exe

@@ -129,7 +129,7 @@ def _names() -> list[str]:
 def test_start_takes_over_steamvr() -> None:
     CALLS.clear()
     _install_fake_openvr()
-    from vlt.output.overlay import WristOverlay
+    from vlt.output.openvr_overlay import WristOverlay
 
     ov = WristOverlay(_cfg(Path(".")))
     ok = ov.start()
@@ -164,7 +164,7 @@ def test_overlay_failure_degrades_without_raising() -> None:
     """IVROverlay() 抛异常时：start() 返回 False 且**不抛**（否则会打死翻译腿）。"""
     CALLS.clear()
     _install_fake_openvr(overlay_factory=lambda: _FakeIVROverlay(fail=True))
-    from vlt.output.overlay import WristOverlay
+    from vlt.output.openvr_overlay import WristOverlay
 
     ov = WristOverlay(_cfg(Path(".")))
     try:
@@ -179,7 +179,7 @@ def test_overlay_failure_degrades_without_raising() -> None:
 def test_update_uploads_texture() -> None:
     CALLS.clear()
     _install_fake_openvr()
-    from vlt.output.overlay import WristOverlay
+    from vlt.output.openvr_overlay import WristOverlay
 
     ov = WristOverlay(_cfg(Path(".")))
     ov.start()
@@ -195,7 +195,7 @@ def test_update_uploads_texture() -> None:
 def test_hot_reload_reapplies_geometry(tmp: Path | None = None) -> None:
     CALLS.clear()
     _install_fake_openvr()
-    from vlt.output.overlay import WristOverlay
+    from vlt.output.openvr_overlay import WristOverlay
 
     cfgdir = ROOT / "out" / "overlay_cfg_test"
     cfgdir.mkdir(parents=True, exist_ok=True)
@@ -234,7 +234,7 @@ def test_hot_reload_font_rerenders() -> None:
     """
     CALLS.clear()
     _install_fake_openvr()
-    from vlt.output.overlay import WristOverlay
+    from vlt.output.openvr_overlay import WristOverlay
 
     d = ROOT / "out" / "overlay_cfg_font"
     d.mkdir(parents=True, exist_ok=True)
@@ -275,7 +275,7 @@ def test_upload_failure_recovers_and_logs_quietly() -> None:
     CALLS.clear()
     RAW_FAIL_PLAN["remaining"] = 0
     _install_fake_openvr()
-    from vlt.output.overlay import WristOverlay
+    from vlt.output.openvr_overlay import WristOverlay
 
     ov = WristOverlay(_cfg(Path(".")))
     ov.start()
@@ -315,7 +315,7 @@ def test_upload_failure_keeps_retrying_rebuild() -> None:
     CALLS.clear()
     RAW_FAIL_PLAN["remaining"] = 10 ** 9          # 一直失败
     _install_fake_openvr()
-    from vlt.output.overlay import WristOverlay
+    from vlt.output.openvr_overlay import WristOverlay
 
     ov = WristOverlay(_cfg(Path(".")))
     ov.start()
@@ -354,7 +354,7 @@ def test_upload_failure_escalates_to_openvr_reinit() -> None:
     OVERLAY_GONE["gone"] = False
     RAW_FAIL_PLAN["remaining"] = 10 ** 9          # 永久失败
     _install_fake_openvr()
-    from vlt.output.overlay import WristOverlay
+    from vlt.output.openvr_overlay import WristOverlay
 
     ov = WristOverlay(_cfg(Path(".")))
     ov.start()
@@ -388,7 +388,7 @@ def test_heartbeat_reports_state_and_rebuilds_when_overlay_lost() -> None:
     RAW_FAIL_PLAN["remaining"] = 0
     OVERLAY_GONE["gone"] = False
     _install_fake_openvr()
-    from vlt.output.overlay import WristOverlay
+    from vlt.output.openvr_overlay import WristOverlay
 
     ov = WristOverlay(_cfg(Path(".")))
     ov.start()
@@ -431,7 +431,7 @@ def test_heartbeat_reshows_hidden_overlay() -> None:
     OVERLAY_GONE["gone"] = False
     OVERLAY_VISIBLE["on"] = False               # 对象在，但不可见
     _install_fake_openvr()
-    from vlt.output.overlay import WristOverlay
+    from vlt.output.openvr_overlay import WristOverlay
 
     ov = WristOverlay(_cfg(Path(".")))
     ov.start()

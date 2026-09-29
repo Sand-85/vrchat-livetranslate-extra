@@ -27,11 +27,18 @@ sys.path.insert(0, str(ROOT))
 
 
 def _reload(executable: Path, meipass: Path, appdata: Path, frozen: bool = True):
-    """把 sys.frozen / sys.executable / sys._MEIPASS / APPDATA 摆成目标形态后重载模块。"""
+    """把 sys.frozen / sys.executable / sys._MEIPASS / 数据目录 摆成目标形态后重载模块。
+
+    ⚠️ `APPDATA`（Windows 惯例）与 `XDG_DATA_HOME`（Linux 惯例）**都**指向同一个临时目录 ——
+    这样同一组断言在两个平台上都成立，不必写两套期望值。
+    """
     import vlt.paths as p
 
-    saved = {k: os.environ.get("APPDATA") for k in ("APPDATA",)}
+    saved = {k: os.environ.get(k) for k in ("APPDATA", "XDG_DATA_HOME", "APPIMAGE", "APPDIR")}
     os.environ["APPDATA"] = str(appdata)
+    os.environ["XDG_DATA_HOME"] = str(appdata)
+    for k in ("APPIMAGE", "APPDIR"):
+        os.environ.pop(k, None)
     old = (getattr(sys, "frozen", None), sys.executable, getattr(sys, "_MEIPASS", None))
     if frozen:
         sys.frozen = True          # type: ignore[attr-defined]
@@ -110,6 +117,34 @@ def test_portable_marker_overrides() -> None:
         _restore(saved, old)
 
 
+def test_appimage_writes_to_user_data_dir() -> None:
+    """★ AppImage 形态：源码在**只读挂载**里，绝不能往那儿写配置/日志。
+
+    判据是 `APPIMAGE` / `APPDIR` 环境变量（AppRun 会设）。漏了这条的话，
+    用户在 AppImage 里会看到「配置存不住、日志什么都没有」，而且很难自己判断。
+    """
+    exe_dir = Path(tempfile.mkdtemp(prefix="vlt-appimg-"))
+    meipass = Path(tempfile.mkdtemp(prefix="vlt-appimg-mp-"))
+    appdata = Path(tempfile.mkdtemp(prefix="vlt-appimg-data-"))
+    mod, saved, old = _reload(exe_dir / "app.exe", meipass, appdata, frozen=False)
+    try:
+        os.environ["APPIMAGE"] = str(exe_dir / "VRChatLiveTranslate.AppImage")
+        os.environ["APPDIR"] = str(exe_dir)
+        mod = importlib.reload(mod)
+        try:
+            assert mod.is_appimage(), "设了 APPIMAGE 却没识别成 AppImage"
+            want = appdata / "vrchat-livetranslate"
+            assert mod.app_dir() == want, f"AppImage 的 APP_DIR 应为 {want}，实际 {mod.app_dir()}"
+            # BUNDLE_DIR 仍是 AppDir 里的源码目录（只读，放 assets / config.example.yaml）
+            assert mod.bundle_dir() == ROOT, f"AppImage 的 BUNDLE_DIR 应为源码目录，实际 {mod.bundle_dir()}"
+            print("  AppImage 形态 OK（可写目录走用户数据目录，资源仍读只读目录）")
+        finally:
+            for k in ("APPIMAGE", "APPDIR"):
+                os.environ.pop(k, None)
+    finally:
+        _restore(saved, old)
+
+
 def test_legacy_config_migrated_once() -> None:
     """老版本放在 exe 旁边的 config.yaml 必须搬到 %APPDATA%，且不覆盖新位置已有文件。"""
     exe_dir = Path(tempfile.mkdtemp(prefix="vlt-legacy-"))
@@ -143,5 +178,6 @@ if __name__ == "__main__":
     test_source_mode_uses_repo_root()
     test_frozen_uses_appdata()
     test_portable_marker_overrides()
+    test_appimage_writes_to_user_data_dir()
     test_legacy_config_migrated_once()
     print("ALL PASSED")

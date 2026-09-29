@@ -63,6 +63,24 @@ def _extract(resp: dict) -> str:
     return text
 
 
+def terms_from_mapping(mapping: dict[str, str] | None) -> list[dict[str, str]]:
+    """把「专有词库」的映射表转成 Qwen-MT 要的 `terms` 数组（纯函数，离线可测）。
+
+    `translation_options.terms` 的格式是 `[{"source": "术语", "target": "译名"}]`，
+    与实时会话那条腿的 `translation.corpus.phrases`（一个映射表）**形状不同** ——
+    配置里只维护一份映射，两条腿各自在边界上转，避免两处各存一份词库走样。
+
+    纪律：空 key / 空 value 一律丢掉（服务端收到空串会报参数错，且空词条没有意义）；
+    保持插入顺序 —— 用户按重要性排的词库不该被程序重排。
+    """
+    out: list[dict[str, str]] = []
+    for src, tgt in (mapping or {}).items():
+        s, t = str(src or "").strip(), str(tgt or "").strip()
+        if s and t:
+            out.append({"source": s, "target": t})
+    return out
+
+
 def translate_text(
     text: str,
     *,
@@ -71,10 +89,15 @@ def translate_text(
     model: str = DEFAULT_MODEL,
     api_key: str = "",
     timeout: float = DEFAULT_TIMEOUT_S,
+    terms: list[dict[str, str]] | None = None,
 ) -> str:
     """同步翻译一段文本（调用方放在线程里跑，别阻塞事件循环）。
 
     source_lang 为 None/空 → 不传该字段，服务端自动识别（实测 mt 系列支持）。
+
+    terms 非空 → 作为**术语干预**下发（`translation_options.terms`），让专有名词
+    （社团名 / 人名 / 术语）保持用户指定的译法；空/None 时**完全不传**该字段，
+    免得服务端把空数组当成非法参数。
     """
     text = (text or "").strip()
     if not text:
@@ -84,10 +107,12 @@ def translate_text(
     if not (api_key or "").strip():
         raise TextTranslateError("还没配置 API key（见界面右上角「设置」）")
 
-    options: dict[str, str] = {}
+    options: dict[str, object] = {}
     if source_lang:
         options["source_lang"] = str(source_lang)
     options["target_lang"] = str(target_lang)
+    if terms:
+        options["terms"] = terms
 
     payload = {
         "model": model or DEFAULT_MODEL,

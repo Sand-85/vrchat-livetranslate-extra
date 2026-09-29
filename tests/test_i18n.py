@@ -197,14 +197,46 @@ def test_normalize_language() -> None:
 
 
 def test_detect_system_language_stubbed() -> None:
-    """detect_system_language 打桩：支持的五种语言各归各的；
-    **其它一律 en**（德语/法语等已知但未支持的语言，以及检测失败/异常）——
-    用户口径「不是支持的语言就显示英文」。"""
-    from vlt import i18n
+    """detect_system_language **委派**给平台层（自己不再实现平台专有逻辑）。
+
+    历史坑：这里曾自己调 Win32 的 `GetUserDefaultUILanguage`，后果是
+    **Linux 上恒定返回 "en"** —— 中文用户没显式选过界面语言时界面会变英文，
+    而 `platform.detect_ui_language()` 里的 Linux 实现（读 LC_ALL/LANG）从没被用上。
+    现在只有一条口径，钉住「必须委派、不许再自己实现」。
+    """
+    from vlt import i18n, platform
+
+    seen: list[int] = []
+    orig = platform.detect_ui_language
+
+    def _fake() -> str:
+        seen.append(1)
+        return "ja"
+
+    platform.detect_ui_language = _fake            # type: ignore[assignment]
+    try:
+        got = i18n.detect_system_language()
+    finally:
+        platform.detect_ui_language = orig         # type: ignore[assignment]
+
+    assert got == "ja", f"应原样返回平台层的探测结果：{got!r}"
+    assert seen, "i18n 必须委派给 platform.detect_ui_language（不许自己实现）"
+    print("  ✓ detect_system_language 委派给平台层（口径只有一处）")
+
+
+def test_windows_langid_mapping() -> None:
+    """Windows 侧 LANGID → 界面语言：支持的五种各归各的；de/fr 与异常一律 en。
+
+    `vlt/platform/win.py` 在 Linux 上也 import 得动（平台库都是函数内惰性导入），
+    所以这条 Windows 口径在两端都能被钉住，不会只在 CI 的 Windows runner 上才验证。
+    """
+    import types
+
+    from vlt.platform import win
 
     class _K:
         langid = 0x0409
-        boom = None
+        boom: Exception | None = None
 
         @staticmethod
         def GetUserDefaultUILanguage():
@@ -212,11 +244,9 @@ def test_detect_system_language_stubbed() -> None:
                 raise _K.boom
             return _K.langid
 
-    class _W:
-        kernel32 = _K
-
-    orig = getattr(i18n.ctypes, "windll", None)
-    i18n.ctypes.windll = _W()
+    orig = win.ctypes
+    win.ctypes = types.SimpleNamespace(                 # type: ignore[assignment]
+        windll=types.SimpleNamespace(kernel32=_K))
     try:
         for langid, want in ((0x0804, "zh"),   # zh-CN
                              (0x0404, "zh"),   # zh-TW：主语言也是 0x04
@@ -227,15 +257,14 @@ def test_detect_system_language_stubbed() -> None:
                              (0x0407, "en"),   # de-DE：已知但未支持 → 按英文接待
                              (0x040c, "en")):  # fr-FR：同上
             _K.langid = langid
-            got = i18n.detect_system_language()
+            got = win.detect_ui_language()
             assert got == want, f"langid={langid:#06x} → {got!r}，期望 {want!r}"
         _K.boom = OSError("no such api")
-        assert i18n.detect_system_language() == "en", "异常时必须回落 en（不认识 → 英文）"
+        assert win.detect_ui_language() == "en", "异常时必须回落 en（不认识 → 英文）"
         _K.boom = None
     finally:
-        if orig is not None:
-            i18n.ctypes.windll = orig
-    print("  ✓ detect_system_language：zh/en/ja/ko/ru 各归各的；"
+        win.ctypes = orig                              # type: ignore[assignment]
+    print("  ✓ Windows LANGID：zh/en/ja/ko/ru 各归各的；"
           "de/fr 与异常一律 → en（已打桩）")
 
 
@@ -340,7 +369,10 @@ def test_all_ui_languages_window_guard() -> None:
             # ② 方向下拉的候选项 + 当前选中项（不在 text 属性里，单独扫）
             combo_vals: list[str] = []
             for combo in (gui._source_combo, gui._target_combo, gui._anchor_combo):
-                combo_vals += [str(v) for v in combo.cget("values")] + [str(combo.get())]
+                # cget("values") 返回类型依平台而变（Windows: tuple / Linux: Tcl_Obj），
+                # 用 Tk 的 splitlist 归一化后再扫
+                combo_vals += [str(v) for v in combo.tk.splitlist(combo.cget("values"))]
+                combo_vals += [str(combo.get())]
             bad_vals: list[str] = []
             for x in combo_vals:
                 if x not in texts:      # 界面语言下拉的母语名不在其中，这里的都是待翻译项
@@ -363,7 +395,8 @@ def test_all_ui_languages_window_guard() -> None:
 
             def _font_spec_of(w):
                 try:
-                    return w.cget("font") or FONT_UI
+                    # cget("font") 在 Linux 上可能返回 Tcl_Obj，统一成字符串
+                    return str(w.cget("font")) or FONT_UI
                 except Exception:      # ttk 控件的字体在 style 里，取不到就用应用字体
                     return FONT_UI
 
@@ -555,6 +588,7 @@ def main() -> int:
         test_format_and_fallback,
         test_normalize_language,
         test_detect_system_language_stubbed,
+        test_windows_langid_mapping,
         test_available_languages_order,
         test_english_ui_has_no_cjk,
         test_all_ui_languages_window_guard,

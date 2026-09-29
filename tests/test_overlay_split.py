@@ -19,13 +19,13 @@ sys.path.insert(0, str(ROOT))
 
 from vlt.output.overlay import (  # noqa: E402
     OverlayConfig,
-    WristOverlay,
     _pane_boxes,
     peer_color,
     render_conversation,
     render_split,
     split_enabled,
 )
+from vlt.output.openvr_overlay import WristOverlay  # noqa: E402  （上游把实现搬到了后端模块）
 
 PAD = 12
 W, H = 1024, 440
@@ -217,14 +217,20 @@ def test_no_split_keeps_old_path() -> bool:
     老路径的像素回归：本仓库 `out/overlay_baseline/*.png` 是重构前的基线，
     重构前后 sha256 逐字节一致（普通对话 e04674ac… / 长句 686cad0f…）。
     """
+    import vlt.output.openvr_overlay as ovm
     import vlt.output.overlay as om
 
     ok = True
     entries = [("theirs", "别人说的", "translated"), ("mine", "我说的", "what I said")]
     real_c, real_s = om.render_conversation, om.render_split
+    real_c2, real_s2 = ovm.render_conversation, ovm.render_split
     calls: list[str] = []
-    om.render_conversation = lambda e, c=None: (calls.append("conv"), real_c(e, c))[1]
-    om.render_split = lambda e, c=None: (calls.append("split"), real_s(e, c))[1]
+    # ⚠️ 上游把后端实现搬到了 vlt/output/openvr_overlay.py：它是 `from .overlay import ...`
+    # 在导入时绑定的，所以**必须同时改后端模块里的名字**，只改 overlay 模块拦不住调用。
+    om.render_conversation = ovm.render_conversation = (
+        lambda e, c=None: (calls.append("conv"), real_c(e, c))[1])
+    om.render_split = ovm.render_split = (
+        lambda e, c=None: (calls.append("split"), real_s(e, c))[1])
     try:
         with tempfile.TemporaryDirectory() as td:
             for split, three, expect in ((False, False, "conv"), (True, False, "split"),
@@ -232,7 +238,7 @@ def test_no_split_keeps_old_path() -> bool:
                 calls.clear()
                 cfg = om.OverlayConfig.from_dict({"split": split, "split_three": three,
                                                  "size_px": [W, H]})
-                ov = om.WristOverlay(cfg, dry_run=True)
+                ov = WristOverlay(cfg, dry_run=True)
                 ov._frames_dir = Path(td)          # dry-run 只写图，不碰 SteamVR
                 ov.update_entries(entries, force=True)
                 good = calls == [expect]
@@ -241,6 +247,7 @@ def test_no_split_keeps_old_path() -> bool:
                 ok &= good
     finally:
         om.render_conversation, om.render_split = real_c, real_s
+        ovm.render_conversation, ovm.render_split = real_c2, real_s2
     return ok
 
 

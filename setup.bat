@@ -27,7 +27,9 @@ echo [2/3] 升级 pip...
 .venv\Scripts\python.exe -m pip install --upgrade pip --quiet
 
 echo [3/3] 安装依赖 ^(约 1-2 分钟^)...
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+rem 用 Windows 独占清单：它 -r requirements.txt 已经带了公共依赖，
+rem 另外补上 PyAudioWPatch（WASAPI loopback）与 openvr（SteamVR 手腕屏）。
+.venv\Scripts\python.exe -m pip install -r requirements-windows.txt
 
 echo.
 echo ============================================

@@ -25,6 +25,18 @@ from pathlib import Path
 APP_NAME = "vrchat-livetranslate"
 PORTABLE_MARKER = "portable.txt"
 
+# 直接看 sys.platform，不 import vlt.platform —— 那会绕成环（platform 依赖 output，output 依赖 paths）
+_IS_WINDOWS = sys.platform == "win32"
+
+
+def is_appimage() -> bool:
+    """是否跑在 AppImage 里（AppRun 会设 `APPIMAGE` / `APPDIR`）。
+
+    ⚠️ AppImage 下**源码目录是只读的** squashfs 挂载 —— 把 config.yaml / logs 往那儿写
+    会直接失败，而且用户会看到「配置存不住、日志没有」。所以这种情况必须走用户数据目录。
+    """
+    return bool(os.environ.get("APPIMAGE") or os.environ.get("APPDIR"))
+
 
 def is_frozen() -> bool:
     """是否跑在 PyInstaller 打包出来的 exe 里。"""
@@ -40,22 +52,33 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _roaming_dir() -> Path:
-    """`%APPDATA%`；读不到就退回家目录下的约定位置。"""
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        return Path(appdata) / APP_NAME
-    return Path.home() / "AppData" / "Roaming" / APP_NAME
+def _user_data_dir() -> Path:
+    """平台惯例的「用户数据目录」。
+
+    - Windows：`%APPDATA%\vrchat-livetranslate`（读不到就退回家目录下的约定位置）
+    - Linux  ：`$XDG_DATA_HOME/vrchat-livetranslate`，缺省 `~/.local/share/vrchat-livetranslate`
+    """
+    if _IS_WINDOWS:
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / APP_NAME
+        return Path.home() / "AppData" / "Roaming" / APP_NAME
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / APP_NAME
 
 
 def app_dir() -> Path:
     """可写目录（详见模块说明）。"""
+    if is_appimage():
+        # AppImage：源码在只读挂载里，必须写用户数据目录
+        return _user_data_dir()
     if not is_frozen():
         return _repo_root()
     exe_dir = Path(sys.executable).resolve().parent
     if (exe_dir / PORTABLE_MARKER).exists():
         return exe_dir
-    return _roaming_dir()
+    return _user_data_dir()
 
 
 def bundle_dir() -> Path:

@@ -1,6 +1,6 @@
 # vrchat-livetranslate · Руководство
 
-> [中文](GUIDE.md) | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | **Русский**
+> [中文](../GUIDE.md) | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | **Русский**
 
 [← Вернуться к README](README.ru.md)
 
@@ -56,7 +56,7 @@
 ```bat
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements-windows.txt
 ```
 
 ## 3. Настройка API-ключа
@@ -269,7 +269,7 @@ output:
 | Ползунок | Диапазон / шаг | Ползунок | Диапазон / шаг |
 |---|---|---|---|
 | Позиция X / Y / Z | −0.30 ~ 0.30 м, 0.005 | Размер | 0.05 ~ 0.80 м, 0.01 |
-| Наклон / Поворот / Крен | −90 ~ 90°, 1 | Изгиб | 0.0 ~ 0.50, 0.01 |
+| Наклон / Поворот / Крен | −180 ~ 180°, 1 | Изгиб | 0.0 ~ 0.50, 0.01 |
 | Прозрачность | 0.10 ~ 1.00, 0.05 | Размер перевода | 20 ~ 64, 1 |
 | Размер оригинала | 14 ~ 48, 1 | Высота панели | 240 ~ 560 px, 10 |
 

@@ -1,28 +1,30 @@
 """音频设备枚举与名称解析。
 
 三类设备，三种枚举来源：
-  - 麦克风（输入）：sounddevice.query_devices() 中 max_input_channels > 0
-  - VRChat 音频（loopback）：pyaudiowpatch 的 get_loopback_device_info_generator()
-  - 译音输出（输出）：sounddevice.query_devices() 中 max_output_channels > 0
+  - 麦克风（输入）：sounddevice / PipeWire 的 `Audio/Source`
+  - VRChat 音频（loopback）：Windows = WASAPI loopback；Linux = PipeWire 的 `Audio/Sink`
+  - 译音输出（输出）：sounddevice / PipeWire 的 `Audio/Sink`
+
+**真实设备从 `vlt/platform/` 取，本模块只负责「解释」**：
+（⚠️ 必须写 `platform.device_backend()` 而不是 `from .platform import device_backend` ——
+后者把函数对象**绑死**在导入那一刻，测试里打桩 `vlt.platform.device_backend` 就失效了，
+`tests/test_device_pick.py` 就是这么发现问题的。）
+  - 平台模块返回与 sounddevice / pyaudiowpatch 同形状的原始 dict
+  - 本模块把 dict 转成 `DeviceInfo`、做名称解析、排回退链
+  - 测试通过 `devices=` 参数注入假列表，于是**全部逻辑离线可测、不碰硬件**
+    （见 `tests/test_devices.py`）——这条不许破坏：它是换平台时唯一的安全网。
 
 名称解析顺序：全名精确匹配 → 不区分大小写 → 去重后的子串匹配 → 解析不到返回 None。
-配置里只存纯设备名字符串，绝不存设备索引（索引会随插拔变化）。
+配置里只存纯设备名字符串，绝不存设备索引（索引会随插拔/重启变化）。
+
+> PortAudio 的串行锁（`PA_LOCK`）搬到了 `vlt/platform/base.py` —— 它现在是
+> 「两个平台的麦克风枚举共用同一把锁」的问题，不再属于本模块。
 """
 from __future__ import annotations
 
-import re
-import threading
 from dataclasses import dataclass
 
-# ⚠️ PortAudio 的初始化/销毁是**进程级且线程绑定**的资源（WASAPI 走 COM 单元）。
-# 历史教训（都是实测出来的）：
-#   1) 用后台线程做枚举 → sounddevice 在扫描线程 Pa_Initialize、却在主线程
-#      Pa_Terminate（atexit 钩子）→ 退出时报
-#      `Tcl_AsyncDelete: async handler deleted by the wrong thread`，更早的写法直接段错误
-#   2) 多个线程并发 PyAudio()/terminate() → 进程退出时段错误
-# 所以：**设备枚举一律在主线程同步做**（实测冷启动 348ms、预热后 23ms，完全可接受），
-# 这个锁只是防止将来有人又把它挪回线程里。
-_PA_LOCK = threading.Lock()
+from . import platform
 
 
 @dataclass
@@ -37,9 +39,7 @@ class DeviceInfo:
 def enumerate_mic_devices(devices: list[dict] | None = None) -> list[DeviceInfo]:
     """枚举麦克风（输入）设备。devices 参数用于测试注入。"""
     try:
-        import sounddevice as sd
-        with _PA_LOCK:                      # PortAudio 串行（并发 init/destroy 会段错误）
-            devs = devices if devices is not None else list(sd.query_devices())
+        devs = devices if devices is not None else platform.device_backend().query_devices()
         result = []
         for i, d in enumerate(devs):
             if d.get("max_input_channels", 0) > 0:
@@ -56,10 +56,14 @@ def enumerate_mic_devices(devices: list[dict] | None = None) -> list[DeviceInfo]
 
 
 def enumerate_loopback_devices(devices: list[dict] | None = None) -> list[DeviceInfo]:
-    """枚举 VRChat 音频（WASAPI loopback）设备。devices 参数用于测试注入。"""
-    if devices is not None:
+    """枚举「VRChat 音频」——Windows 是 WASAPI loopback，Linux 是 PipeWire 的输出节点。
+
+    devices 参数用于测试注入（形状同 pyaudiowpatch 的 loopback 设备）。
+    """
+    try:
+        devs = devices if devices is not None else platform.device_backend().query_loopback_devices()
         result = []
-        for d in devices:
+        for d in devs:
             result.append(DeviceInfo(
                 index=int(d.get("index", 0)),
                 name=str(d.get("name", "")),
@@ -68,23 +72,6 @@ def enumerate_loopback_devices(devices: list[dict] | None = None) -> list[Device
                 kind="loopback",
             ))
         return result
-    try:
-        import pyaudiowpatch as pyaudio
-        with _PA_LOCK:                      # PortAudio 串行（并发 init/destroy 会段错误）
-            p = pyaudio.PyAudio()
-            try:
-                result = []
-                for d in p.get_loopback_device_info_generator():
-                    result.append(DeviceInfo(
-                        index=int(d.get("index", 0)),
-                        name=str(d.get("name", "")),
-                        sample_rate=int(d.get("defaultSampleRate", 0)),
-                        channels=int(d.get("maxInputChannels", 0)),
-                        kind="loopback",
-                    ))
-                return result
-            finally:
-                p.terminate()
     except Exception:
         return []
 
@@ -92,9 +79,7 @@ def enumerate_loopback_devices(devices: list[dict] | None = None) -> list[Device
 def enumerate_audio_out_devices(devices: list[dict] | None = None) -> list[DeviceInfo]:
     """枚举译音输出（输出）设备。devices 参数用于测试注入。"""
     try:
-        import sounddevice as sd
-        with _PA_LOCK:                      # PortAudio 串行（并发 init/destroy 会段错误）
-            devs = devices if devices is not None else list(sd.query_devices())
+        devs = devices if devices is not None else platform.device_backend().query_devices()
         result = []
         for i, d in enumerate(devs):
             if d.get("max_output_channels", 0) > 0:

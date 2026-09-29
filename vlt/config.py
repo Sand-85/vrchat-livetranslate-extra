@@ -21,6 +21,31 @@ DEFAULT_CONFIG = APP_DIR / "config.yaml"           # 可写：用户配置
 EXAMPLE_CONFIG = BUNDLE_DIR / "config.example.yaml"  # 只读：随程序分发的模板
 
 
+def _as_str_map(raw: Any, what: str) -> dict[str, str]:
+    """把配置里的「映射表」（专有词库 / 方向级热词）规范成 `dict[str, str]`。
+
+    配置是手写的，写错形状的概率不为零：写成列表、写成标量、或者哪条只有键没有值。
+    这些都必须**留痕后丢掉**，绝不能原样下发给服务端 —— 服务端收到非映射的 phrases
+    会整条会话被拒（`session.update` 是整体校验，坏一个字段就全军覆没），
+    而用户看到的只是「翻译不工作」，根本联想不到是自己那行 YAML 写错了。
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        print(f"[config] ⚠️ {what} 不是映射表（读到 {type(raw).__name__}），已忽略该段；"
+              f"正确写法：\n{what}:\n  \"原文\": \"译名\"", flush=True)
+        return {}
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        key, val = str(k or "").strip(), str(v or "").strip()
+        if key and val:
+            out[key] = val
+        else:
+            print(f"[config] ⚠️ {what} 里有一条空条目（键或值为空），已跳过：{k!r} → {v!r}",
+                  flush=True)
+    return out
+
+
 def ensure_config(path: Path | None = None) -> Path:
     """确保配置文件存在：不存在就从 config.example.yaml 复制一份。
 
@@ -69,6 +94,20 @@ def load_api_key(explicit: str | None = None) -> str:
     raise SystemExit("找不到 API key：设 DASHSCOPE_API_KEY，或先跑 `bl auth login --api-key <key>`")
 
 
+def merge_hotwords(glossary: dict[str, str] | None,
+                   hotwords: dict[str, str] | None) -> dict[str, str]:
+    """合并「全局专有词库」与「方向级热词」——**全项目唯一的口径**。
+
+    为什么要有这个函数：词库要同时喂给两条腿（实时会话的 `translation.corpus.phrases`
+    和打字翻译的 `translation_options.terms`）。若两处各写一遍合并逻辑，迟早会漂移
+    （改了一处忘了另一处）——于是「说话时对、打字时不对」这种最难查的 bug 就来了。
+
+    优先级：方向级覆盖全局（同名词条以 `directions.<X>.hotwords` 为准）。
+    这样「全局一份常用词库 + 某个方向临时特例」不用把词库复制两遍。
+    """
+    return {**(glossary or {}), **(hotwords or {})}
+
+
 @dataclass
 class Direction:
     source_lang: str | None = None
@@ -84,7 +123,8 @@ class Direction:
             source_lang=self.source_lang,
             output_audio=self.output_audio,
             voice=self.voice or base.get("voice") or "Tina",
-            hotwords=self.hotwords,
+            # 全局专有词库 + 本方向的覆盖，合并口径只有 merge_hotwords 一处
+            hotwords=merge_hotwords(base.get("glossary"), self.hotwords),
             turn_detection=base.get("turn_detection"),
             base_url=base["base_url"],
             workspace_id=base.get("workspace_id") or "",
@@ -114,6 +154,15 @@ class AppConfig:
         if name not in self.directions:
             raise SystemExit(f"配置里没有方向的 key：{name}（现有：{list(self.directions)}）")
         return self.directions[name]
+
+    def merged_hotwords(self, name: str) -> dict[str, str]:
+        """某个方向**实际生效**的专有词库（全局 + 方向级覆盖）。
+
+        引擎两条腿都从这里取值：实时会话走 `Direction.to_session_config`（内部调
+        `merge_hotwords`），打字翻译走这里 —— 同一个口径，不会一边有一套。
+        """
+        d = self.directions.get(name)
+        return merge_hotwords(self.session_base.get("glossary"), d.hotwords if d else None)
 
 
 def _opt_int(value) -> int | None:
@@ -196,6 +245,9 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         "repeat_guard_enabled": s.get("repeat_guard_enabled", True),
         "repeat_guard_hits": s.get("repeat_guard_hits", 3),
         "repeat_guard_ratio": s.get("repeat_guard_ratio", 0.9),
+        # 全局专有词库放在这个公共底座里：`to_session_config` 只有这一个入参，
+        # 而词库对两条腿（实时会话 / 打字翻译）是同一份 —— 放在这里两处都拿得到。
+        "glossary": _as_str_map(raw.get("glossary"), "glossary（专有词库）"),
         "api_key": _resolve_api_key(api_key, require_key),
     }
     directions = {}
@@ -204,7 +256,7 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
             source_lang=(d or {}).get("source_lang"),
             target_lang=(d or {}).get("target_lang", "en"),
             output_audio=bool((d or {}).get("output_audio", False)),
-            hotwords=(d or {}).get("hotwords") or {},
+            hotwords=_as_str_map((d or {}).get("hotwords"), f"directions.{name}.hotwords（方向级热词）"),
             voice=(d or {}).get("voice"),
         )
     if not directions:
@@ -234,6 +286,14 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         "capture": {
             "mic_device": str(raw_capture.get("mic_device") or ""),
             "loopback_device": str(raw_capture.get("loopback_device") or ""),
+            # 输入门限（只作用于 loopback = VRChat 输出「别人说话」那条腿）：
+            # 原样透传，取值校验在 engine.input_gate_settings 里做（非法值留痕 + 回落默认值）。
+            # ⚠️ 默认值必须与 engine 的 INPUT_GATE_DEFAULT_* 一致（这里不能 import engine：
+            #    engine 反向 import 本模块，会成环）。
+            "gate_enabled": raw_capture.get("gate_enabled", True),
+            "gate_db": raw_capture.get("gate_db", -45.0),
+            "gate_hold_ms": raw_capture.get("gate_hold_ms", 500),
+            "gate_preroll_ms": raw_capture.get("gate_preroll_ms", 250),
         },
     }
     return AppConfig(

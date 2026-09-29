@@ -1,0 +1,116 @@
+name: AppImage（可复用构建）
+
+# Linux AppImage：构建 + **独立验收**。**只被别的 workflow 调用**，没有自己的触发器。
+#
+# ## 为什么做成可复用 workflow
+#
+# 同一份构建要出现在两个地方：CI（每次 PR / push main 跑，防回归）和 Release（打 tag 时把
+# 产物当附件发出去）。抄一遍不行 —— 这个 job 里有几处**必须跟着变**的东西：
+#   * Tcl/Tk 版本要进 `actions/cache` 的 key（uv 升级了 Tcl/Tk 却命中旧缓存 = ABI 不匹配，
+#     在用户机器上崩而 CI 全绿，历史上踩过）；
+#   * 系统依赖清单（`xorgproto` 在 noble 上不存在，写错整个 job 红）；
+#   * 「构建 → 独立验收」两步必须一起走（验收脚本能单独对着任意 AppImage 跑）。
+# 两处各写一份，迟早只改一处 —— 这正是 #12（两条采集腿同一件事各写一遍、写漏一半）的教训。
+# 所以：构建口径只留这一份，CI 与 Release 都 `uses:` 它。
+#
+# ## 它保证什么
+#
+# 「Linux 上只用 OpenXR、Windows 上只用 SteamVR」不能只写在文档里，这里把它变成红灯门禁：
+#   * 构建脚本反向删掉 Windows 独占实现（vlt/platform/win.py、openvr 手腕屏后端）；
+#   * scripts/verify_appimage.py 断言它们**真的不在**产物里，并跑包内导入（-P，防误读
+#     仓库源码）+ 离线渲染；
+#   * 字体检查挂在 xvfb 下**真跑**（无显示器时脚本会自己标「跳过 = 未验证」，不硬红）。
+#
+# 产出物：artifact `VRChatLiveTranslate-AppImage`（内含 dist/VRChatLiveTranslate-x86_64.AppImage）。
+# 调用方若要随 Release 一起发，把这份 artifact 取回去即可（见 release.yml）。
+#
+# 调用示例：
+#     jobs:
+#       appimage:
+#         uses: ./.github/workflows/appimage.yml
+on:
+  workflow_call:
+
+# 只是构建 + 上传 artifact，不需要写仓库。显式声明成最小权限：
+# 调用方（release.yml 顶层是 contents: write）不会把写权限顺过来。
+permissions:
+  contents: read
+
+# ⚠️ 与 ci.yml 一致：脚本里带 emoji/中文的 print，stdout 不是 UTF-8 时会 UnicodeEncodeError。
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  appimage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: 装系统依赖（构建 AppImage + 验收）
+        run: |
+          sudo apt-get update
+          # xvfb / fonts-noto-cjk  —— 验收里的字体检查与打包字体
+          # gcc make + Xft/freetype/fontconfig/X11 头文件 —— 构建脚本要现编 Xft 版 Tk
+          # libportaudio2 / libegl1 / libwayland-client0 —— 包内依赖的运行时
+          #
+          # ⚠️ 不要写 `xorgproto`：Ubuntu 24.04(noble) 起这个包名已不存在（apt 报
+          #    E: Unable to locate package xorgproto → 整个 job 红）。X11 协议头在
+          #    noble 由 `x11proto-dev` 提供，而它本来就是 `libx11-dev` 的依赖，会随下面
+          #    这条自动装上 —— 不需要（也不能）单独列出来。
+          sudo apt-get install -y --no-install-recommends \
+            xvfb fonts-noto-cjk tk libportaudio2 libegl1 libwayland-client0 \
+            gcc make libxft-dev libfreetype6-dev libfontconfig1-dev \
+            libx11-dev libxext-dev
+
+      - name: 装 uv 并拉独立 Python 3.11（构建脚本要求可搬运的解释器）
+        run: |
+          python -m pip install --upgrade pip uv
+          uv python install 3.11
+
+      - name: 建 .venv 并装 Linux 依赖
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements-linux.txt
+
+      - name: 读 uv 自带 Tcl/Tk 的版本（做缓存 key 用）
+        id: tcltk
+        run: |
+          # 打包脚本的缓存目录按这个版本分（避免 uv 升级 Tcl/Tk 后复用到旧版 .so，
+          # ABI 不匹配会在用户机器上崩、CI 却看不出来）。这里把它读出来放进 cache key。
+          TKB="$(find "$HOME/.local/share/uv/python" -maxdepth 4 \
+                   -name 'libtcl9tk9.0.so' -path '*cpython-3.11*' | sort -r | head -1)"
+          if [ -n "$TKB" ]; then
+            VER="$(strings -a "$TKB" | grep -oE '^9\.[0-9]+\.[0-9]+' | head -1)"
+          fi
+          echo "ver=${VER:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "Tcl/Tk 版本：${VER:-未知}"
+
+      # 缓存构建工具（appimagetool + 编好的 Xft 版 Tk）。cache key 里带 Tcl/Tk 版本 +
+      # 构建脚本哈希：脚本改了或 Tk 版本变了就自动重建，不会拿旧缓存糊上去。
+      # （打 tag 的 run 能命中 main 上建的缓存 —— GitHub 的默认分支缓存对 tag 可见；
+      #   万一没命中只是慢一次：要现编 Tcl/Tk，~10 分钟，产物不受影响。）
+      - name: 缓存构建工具（appimagetool + 编好的 Xft 版 Tk）
+        uses: actions/cache@v4
+        with:
+          path: build/tools
+          key: appimage-tools-${{ runner.os }}-tk${{ steps.tcltk.outputs.ver }}-${{ hashFiles('scripts/build_appimage.sh') }}
+
+      - name: 构建 AppImage
+        run: ./scripts/build_appimage.sh
+
+      - name: ★ 独立验收（xvfb 下让字体检查真跑）
+        run: |
+          xvfb-run -a .venv/bin/python scripts/verify_appimage.py \
+            dist/VRChatLiveTranslate-x86_64.AppImage
+
+      - name: 上传产物（方便人工复验；release.yml 会把它取回去当附件发）
+        uses: actions/upload-artifact@v4
+        with:
+          name: VRChatLiveTranslate-AppImage
+          path: dist/VRChatLiveTranslate-x86_64.AppImage
+          retention-days: 7

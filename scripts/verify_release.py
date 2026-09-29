@@ -1,6 +1,6 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.4.0-beta.1 "vlt-room.kcm-nixi.cn"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.4.2 "vlt-room.kcm-nixi.cn"
 
 第二个参数 = 本版新增功能里必定出现的字符串（默认「俄语」）。判据是「在解包出来的
 字节码里搜得到」——不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
@@ -11,7 +11,7 @@
   3. 真跑一次 `--self-test`（退出码 + GUI_SELFTEST_OK）
   4. 启动日志里的版本行 = 本次 tag（且标明「打包 exe」）
   5. exe 里确实含本版新增的字符串（新功能真在产物里，不是只进了仓库）
-  6. exe 图标资源 vs assets/app.ico（32/16 档像素比对）
+  6. exe 图标资源 vs assets/app.ico（32/16 档像素比对；取图标句柄带重试，见该段注释）
 
 ⚠️ 复核以 **GitHub 服务端算的 asset digest** 为准，不看我们自己传的 `SHA256SUMS.txt`：
 前者是对收到的字节算的，才是能证明「发布出去的确实是我们构建的那个」的独立凭据。
@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from ctypes import wintypes
 from pathlib import Path
 
@@ -151,9 +152,9 @@ else:
               f"含 {TAG.lstrip('v')}：{want in blob}；仍含 0.0.1：{b'0.0.1' in blob}")
 
 # 图标资源比对（SHGetFileInfoW 取图标 → 画到 DIB → 与 assets/app.ico 同尺寸帧比像素）
-shell32 = ctypes.windll.shell32
-user32 = ctypes.windll.user32
-gdi32 = ctypes.windll.gdi32
+shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+user32 = ctypes.WinDLL("user32")
+gdi32 = ctypes.WinDLL("gdi32")
 
 
 class SHFILEINFOW(ctypes.Structure):
@@ -190,24 +191,53 @@ def hicon_to_rgba(hicon, size: int) -> Image.Image:
     return Image.frombuffer("RGBA", (size, size), buf, "raw", "BGRA", 0, 1).convert("RGBA")
 
 
-shfi = SHFILEINFOW()
-flags = 0x100  # SHGFI_ICON
-got = shell32.SHGetFileInfoW(str(exe), 0, ctypes.byref(shfi), ctypes.sizeof(shfi), flags)
+shell32.SHGetFileInfoW.restype = ctypes.c_void_p
+shell32.SHGetFileInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                   ctypes.POINTER(SHFILEINFOW), wintypes.UINT, wintypes.UINT]
+user32.DestroyIcon.argtypes = [wintypes.HICON]
+
+
+def grab_exe_icon(exe_path: str, attempts: int = 5, delay: float = 1.0):
+    """取 exe 的图标句柄，失败就重试。
+
+    ⚠️ 这一步会**瞬时**失败：`--self-test` 刚把 exe 加载过，紧接着调 SHGetFileInfoW 会
+    「返回成功但 hIcon 为空」。这跟产物好坏无关 —— v0.4.1 发版时就因此误报过一次，
+    白查了一轮，所以这里必须重试，别把瞬时失败当成「包坏了」。
+    返回 (hIcon 或 None, 尝试次数, 最后一次的返回值)。
+    """
+    shfi = SHFILEINFOW()
+    got = 0
+    for i in range(attempts):
+        got = shell32.SHGetFileInfoW(exe_path, 0, ctypes.byref(shfi),
+                                     ctypes.sizeof(shfi), 0x100)  # SHGFI_ICON
+        if got and shfi.hIcon:
+            return shfi.hIcon, i + 1, got
+        time.sleep(delay)
+    return None, attempts, got
+
+
+# 路径必须是 Windows 原生形式（反斜杠）：正斜杠同样取不到图标。
+exe_native = os.path.normpath(os.path.abspath(str(exe)))
+hicon, icon_tries, icon_got = grab_exe_icon(exe_native)
 ico_path = ROOT / "assets" / "app.ico"
-if got and shfi.hIcon and ico_path.exists():
+if hicon and ico_path.exists():
     diffs = []
     for size in (32, 16):
-        img = hicon_to_rgba(shfi.hIcon, size)
+        img = hicon_to_rgba(hicon, size)
         ref = Image.open(ico_path)
         ref.size = (size, size)
         ref = ref.convert("RGBA")
         box = [sum(abs(a - b) for a, b in zip(img.getpixel((x, y)), ref.getpixel((x, y))))
                for x in range(size) for y in range(size)]
         diffs.append((size, sum(box) / len(box) / 4))
+    user32.DestroyIcon(hicon)
     detail = "；".join(f"{s}px 平均差 {d:.2f}/255" for s, d in diffs)
+    if icon_tries > 1:
+        detail += f"（第 {icon_tries} 次才取到图标，前 {icon_tries - 1} 次是瞬时失败）"
     check("exe 图标 == assets/app.ico", all(d < 40 for _, d in diffs), detail)
 else:
-    check("exe 图标 == assets/app.ico", False, f"取不到图标（got={got}）")
+    check("exe 图标 == assets/app.ico", False,
+          f"重试 {icon_tries} 次仍取不到图标（got={icon_got}；exe={exe_native}）")
 
 print("\n" + "=" * 64)
 print(f"通过 {len(ok)} 项，失败 {len(bad)} 项")

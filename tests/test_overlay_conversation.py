@@ -21,6 +21,19 @@ for p in (str(ROOT), str(TESTS)):
 import test_overlay_steamvr as fakeov  # noqa: E402  复用假 openvr 与调用记录
 from vlt.config import DEFAULT_CONFIG  # noqa: E402
 
+# ⚠️ 必须把**平台工厂**也换掉：
+#   `gui._start()` 现在走 `platform.create_wrist_overlay()`；在 Linux 上它返回
+#   `OpenXrOverlay`，会真的去连 OpenXR 运行时并建 EGL context（实测有副作用：
+#   MESA 与 OpenXR loader 都被拉起来，日志里一堆 pci id / dri2 screen 警告），
+#   而且本机根本没有运行时 → available=False → 本用例假红。
+#   本用例验的是「手腕屏归**界面**独占持有」，用假 openvr 驱动的真 `WristOverlay` 才对症。
+from vlt import platform  # noqa: E402
+from vlt.output.openvr_overlay import WristOverlay as _RealWristOverlay  # noqa: E402
+
+platform.create_wrist_overlay = (  # type: ignore[assignment]
+    lambda cfg, config_path=None, dry_run=False:
+        _RealWristOverlay(cfg, config_path=config_path, dry_run=dry_run))
+
 
 def _ui_overlay_in_file() -> bool:
     """看**文件**里存了什么：_save_ui_state 只写盘、不回流内存里的 _cfg。"""
@@ -192,6 +205,7 @@ def test_overlay_starts_on_checkbox_immediately() -> None:
 def test_overlay_toggle_reverts_when_start_fails() -> None:
     """起不来就必须把勾**自动退回去**：不能界面显示已开启、实际什么都没有。"""
     from vlt import gui as guimod
+    from vlt import platform
 
     class _FailOverlay:
         def __init__(self, *a, **kw) -> None: ...
@@ -200,8 +214,10 @@ def test_overlay_toggle_reverts_when_start_fails() -> None:
         def close(self) -> None: ...
 
     backup = DEFAULT_CONFIG.read_bytes() if DEFAULT_CONFIG.exists() else None
-    real = guimod.WristOverlay
-    guimod.WristOverlay = _FailOverlay          # type: ignore[assignment]
+    # ⚠️ 桩在**平台工厂**上（gui 现在走 `platform.create_wrist_overlay()`）；
+    #    以前桩的是 `vlt.gui.WristOverlay`，那个名字已经不在 gui 里了。
+    real = platform.create_wrist_overlay
+    platform.create_wrist_overlay = lambda *a, **kw: _FailOverlay()  # type: ignore[assignment]
     got: dict = {}
     try:
         g = guimod.TranslationGUI()
@@ -218,7 +234,7 @@ def test_overlay_toggle_reverts_when_start_fails() -> None:
         g._root.after(400, step)
         g._root.mainloop()
     finally:
-        guimod.WristOverlay = real
+        platform.create_wrist_overlay = real  # type: ignore[assignment]
         if backup is not None:
             DEFAULT_CONFIG.write_bytes(backup)
         else:

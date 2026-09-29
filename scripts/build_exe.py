@@ -46,15 +46,37 @@ ICON = REPO / "assets" / "app.ico"        # exe 图标（16/24/32/48/64/128/256 
 
 # 按需导入的库（静态分析看不到）→ 显式声明
 HIDDEN = [
-    "pyaudiowpatch", "pycaw", "comtypes", "openvr", "sounddevice", "miniaudio",
+    "pyaudiowpatch", "openvr", "sounddevice", "miniaudio",
     "pythonosc", "websockets", "yaml", "PIL", "numpy",
     "vlt", "vlt.paths", "vlt.config", "vlt.credentials", "vlt.crashlog",
     "vlt.devices", "vlt.engine", "vlt.gui", "vlt.app",
     "vlt.session", "vlt.session.base", "vlt.session.qwen38", "vlt.session.qwen35",
     "vlt.output", "vlt.output.chatbox", "vlt.output.overlay", "vlt.output.virtualmic",
+    "vlt.output.openvr_overlay",        # Windows/SteamVR 手腕屏后端（Linux 产物里没有它）
+    "vlt.platform", "vlt.platform.base", "vlt.platform.win",
 ]
 # 带二进制/数据文件的库 → 连数据一起收
-COLLECT_ALL = ["pyaudiowpatch", "sounddevice", "comtypes", "openvr", "pythonosc", "pycaw"]
+COLLECT_ALL = ["pyaudiowpatch", "sounddevice", "openvr", "pythonosc"]
+
+# ⚠️ Windows 产物里**不允许**出现 Linux 独占实现 —— 这条要求不能靠人记，靠构建排除：
+#   * vlt.platform.linux       —— PipeWire 设备枚举（pw-dump）+ 采集/虚拟声卡
+#   * vlt.output.openxr_overlay —— 自建 OpenXR 手腕屏（pyopenxr + EGL/Wayland）
+#   * xr                        —— pyopenxr 本身（排掉它，顺带排掉它拖进来的 PyOpenGL/glfw）
+# 排除掉之后，exe 的字节码里连 "pipewire" / "XR_EXTX_overlay" 这些字样都不会有。
+# 自动断言见 scripts/check_platform_purity.py（CI 里跑，红灯门禁）。
+#
+# 注意：**只排除平台独占模块**。`vlt/output/overlay.py` 是**共享的**（只有
+# OverlayConfig + 渲染函数），两个平台都收；手腕屏后端各自独占一个模块：
+#   * Windows → vlt/output/openvr_overlay.py（SteamVR 接口；**必须**收进 Windows 产物）
+#   * Linux   → vlt/output/openxr_overlay.py（上面排掉）
+# Linux 产物则由 AppImage 构建脚本反向删掉 openvr_overlay.py，
+# 两边都由 scripts/check_platform_purity.py 断言。
+EXCLUDE_WIN = [
+    "vlt.platform.linux",
+    "vlt.output.openxr_overlay",
+    "xr",                      # pyopenxr
+]
+
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -110,6 +132,8 @@ def build() -> Path:
         cmd += ["--hidden-import", h]
     for c in COLLECT_ALL:
         cmd += ["--collect-all", c]
+    for e in EXCLUDE_WIN:
+        cmd += ["--exclude-module", e]
     cmd.append(str(ENTRY))
 
     res = run(cmd, text=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import subprocess
 import threading
 import time
 from typing import Callable
@@ -217,6 +218,29 @@ class VirtualMic:
         if self._buf_bytes >= need or idle >= PRIME_TIMEOUT_S:
             self._primed = True
 
+    def _drain(self, need_bytes: int) -> bytes:
+        """从队首排空 need_bytes 字节，不足的部分补静音。**调用者必须已持有 self._lock。**
+
+        抽出来是为了让两个平台共用同一段「排空 + 整句记账」逻辑：
+        Windows 由 PortAudio 回调驱动、Linux 由写管道线程驱动，但
+        「正在播的那句不能丢」「播完才允许整句丢弃」这些坑的记账必须只有一份。
+        """
+        out = bytearray()
+        while len(out) < need_bytes and self._buf:
+            chunk, ends = self._buf[0]
+            self._head_started = True
+            take = min(need_bytes - len(out), len(chunk))
+            out.extend(chunk[:take])
+            if take < len(chunk):
+                self._buf[0] = (chunk[take:], ends)
+            else:
+                self._buf.popleft()
+                if ends:
+                    self._head_started = False     # 这句播完了，下一句可以整句丢
+            self._buf_bytes -= take
+        if len(out) < need_bytes:
+            out.extend(b"\x00" * (need_bytes - len(out)))
+        return bytes(out)
     def _audio_callback(self, outdata: bytearray, frames: int, time_info, status) -> None:
         need_bytes = frames * 2 * 2
         if status:
@@ -226,19 +250,129 @@ class VirtualMic:
             if not self._primed or self._buf_bytes < need_bytes:
                 outdata[:] = b"\x00" * need_bytes
                 return
-            out = bytearray()
-            while len(out) < need_bytes and self._buf:
-                chunk, ends = self._buf[0]
-                self._head_started = True
-                take = min(need_bytes - len(out), len(chunk))
-                out.extend(chunk[:take])
-                if take < len(chunk):
-                    self._buf[0] = (chunk[take:], ends)
-                else:
-                    self._buf.popleft()
-                    if ends:
-                        self._head_started = False     # 这句播完了，下一句可以整句丢
-                self._buf_bytes -= take
-            if len(out) < need_bytes:
-                out.extend(b"\x00" * (need_bytes - len(out)))
-            outdata[:] = out
+            outdata[:] = self._drain(need_bytes)
+
+
+class PwCatVirtualMic(VirtualMic):
+    """Linux 译音输出：把缓冲里的 PCM 写进 `pw-cat` 管道，而不是 PortAudio 回调。
+
+    ## 为什么不走 PortAudio
+
+    Linux 上译音要写进一个**运行时声明出来的** PipeWire 节点
+    （`media.class=Audio/Sink/Internal`，见 `vlt/platform/linux.py`）——
+    它不是用户事先装好的声卡设备，按名字用 PortAudio 打开既不可靠也没必要。
+    `pw-cat --playback --target=<节点名>` 才是 PipeWire 原生的写法，
+    而且 `find-defined-target` 保证音频只会进我们自己的节点、不会落到用户的扬声器上。
+
+    ## 复用而不是重造
+
+    抖动缓冲、整句丢弃、起播兜时这些语义全在父类里（那是踩坑换来的），
+    这里只把「驱动方式」从 PortAudio 回调换成写管道线程：
+
+        PortAudio：回调每次要恰好填满 frames 字节 → 不够就补静音
+        pw-cat   ：写线程每次推 chunk 字节     → 不够就补静音（同样的语义）
+
+    ⚠️ `--raw` 不能省：不加的话 pw-cat 会用 libsndfile 解析容器格式，
+    实测报 `sndfile: failed to open audio file "-": Format not recognised` 且**根本没播出去**。
+    """
+
+    def __init__(self, target: str, *, sample_rate: int = 48000,
+                 buffer_ms: int = 300, max_buffer_ms: int = 2000,
+                 on_status: Callable[[str, str], None] = lambda *_a: None) -> None:
+        super().__init__(device_index=0, device_name=target,
+                         sample_rate=sample_rate, buffer_ms=buffer_ms,
+                         max_buffer_ms=max_buffer_ms, on_status=on_status)
+        self._target = target
+        self._chunk = int(sample_rate * 0.02) * 2 * 2      # 20ms 立体声 s16le（对齐 PortAudio 的 blocksize）
+        self._proc: subprocess.Popen | None = None
+        self._stop = threading.Event()
+        self._writer: threading.Thread | None = None
+        self._closed = False        # close() 幂等用；父类没有这个标志，得自己初始化
+
+    def open(self) -> bool:
+        """拉起 `pw-cat` 并启动写线程。失败返回 False 并报错（调用方据此禁用这条腿）。"""
+        argv = [
+            "pw-cat", "--playback", "--raw",
+            f"--target={self._target}",
+            "--format=s16", f"--rate={self._sample_rate}", "--channels=2",
+            "-",
+        ]
+        try:
+            self._proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                          stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.PIPE)
+        except Exception as exc:  # noqa: BLE001
+            self._on_status("error", f"启动 pw-cat 失败（{self._target}）：{exc}")
+            return False
+        self._stop.clear()
+        self._writer = threading.Thread(target=self._writer_loop, daemon=True,
+                                        name="vlt-pwcat-writer")
+        self._writer.start()
+        self._on_status("info", f"译音输出已接到虚拟声卡节点：{self._target}")
+        return True
+
+    def _writer_loop(self) -> None:
+        """按 PortAudio 回调的语义持续喂数据：起播前补静音，起播后排空缓冲（不足补静音）。"""
+        assert self._proc is not None and self._proc.stdin is not None
+        try:
+            while not self._stop.is_set():
+                with self._lock:
+                    self._maybe_prime()
+                    if self._primed:
+                        data = self._drain(self._chunk)
+                    else:
+                        data = b"\x00" * self._chunk      # 还没攒够 → 出静音（与回调一致）
+                try:
+                    self._proc.stdin.write(data)
+                    self._proc.stdin.flush()
+                except (BrokenPipeError, ValueError, OSError) as exc:
+                    log.warning("[virtualmic] pw-cat 管道断了（%s）→ 停止喂数据",
+                                type(exc).__name__)
+                    break
+        except Exception as exc:  # noqa: BLE001 — 写线程绝不能把异常抛到主线程
+            log.warning("[virtualmic] 写线程退出：%s: %s", type(exc).__name__, exc)
+
+    def close(self) -> None:
+        """幂等。顺序：停写线程 → join → 才关 pw-cat（与 loopback 采集侧同一条纪律）。"""
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        th = self._writer
+        if th is not None and th.is_alive():
+            th.join(timeout=2.0)
+            if th.is_alive():
+                log.warning("[virtualmic] 写线程未在 2s 内退出，仍继续关闭 pw-cat")
+        proc = self._proc
+        if proc is not None:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            except Exception:  # noqa: BLE001
+                pass
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            for stream in (proc.stderr,):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        with self._lock:
+            self._buf.clear()
+            self._buf_bytes = 0
+        self._primed = False
+
+    def stderr_tail(self) -> str:
+        """pw-cat 的 stderr（排查用；进程结束后才读得到）。"""
+        proc = self._proc
+        if proc is None or proc.stderr is None or proc.poll() is None:
+            return ""
+        try:
+            return proc.stderr.read().decode("utf-8", "replace").strip()
+        except Exception:  # noqa: BLE001
+            return ""

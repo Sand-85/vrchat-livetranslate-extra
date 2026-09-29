@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -33,7 +35,13 @@ RELEASES_HTML = "https://github.com/Sand-85/vrchat-livetranslate-extra/releases"
 DEFAULT_TIMEOUT_S = 10.0
 DOWNLOAD_TIMEOUT_S = 120.0
 EXE_ASSET_NAME = "VRChatLiveTranslate.exe"
+# Linux 侧要换的那个附件（scripts/build_appimage.sh 产出的名字，release.yml 原样传上去）。
+# 「换哪个文件」由运行形态定，见 asset_name_for()：Windows 单文件 exe ↔ Linux AppImage。
+APPIMAGE_ASSET_NAME = "VRChatLiveTranslate-x86_64.AppImage"
 SUMS_ASSET_NAME = "SHA256SUMS.txt"
+# 待替换文件的落点后缀：下载物放在**安装文件同目录**（同卷 rename 才原子）。
+# exe → VRChatLiveTranslate.exe.new；AppImage → VRChatLiveTranslate-x86_64.AppImage.new。
+NEW_SUFFIX = ".new"
 # exe 同目录：{"version": "...", "sha256": "..."}（【稍后】与异常恢复的凭据）
 PENDING_JSON = "update_pending.json"
 # APP_DIR：{"last_seen_version": "..."}（版本变化一次性提示用）
@@ -79,17 +87,22 @@ def is_newer(remote_tag: str, local_version: str) -> bool:
 
 @dataclass(frozen=True)
 class ReleaseInfo:
-    """一次「最新 Release」查询的结果。"""
+    """一次「最新 Release」查询的结果。
+
+    ⚠️ 字段叫 `asset_*` 而不是 `exe_*`：这套更新器现在服务两种产物 ——
+    Windows 单文件 exe 与 Linux AppImage（`asset_name` 记着这次查的是哪一个）。
+    """
 
     tag: str              # 原始 tag，如 "v0.1.2"
     version: str          # 规范化版本，如 "0.1.2"
     html_url: str         # Release 页面（「打开页面」/ 手动下载用）
-    exe_url: str          # VRChatLiveTranslate.exe 的 browser_download_url
-    exe_digest: str = ""  # GitHub 算好的 sha256（assets[].digest，剥掉 "sha256:" 前缀）——
-                          # 校验的**首选**来源：服务端对收到的字节算的，不必再依赖我们自己传的摘要文件
-    sums_url: str = ""    # SHA256SUMS.txt 的 browser_download_url（仅老 Release 的兜底；
-                          # 2026-09 起发布的版本不再上传这个文件）
-    exe_size: int | None = None   # assets[].size（字节）：进度条总量的兜底，Content-Length 优先
+    asset_url: str        # 本次要下载的那个附件的 browser_download_url
+    asset_name: str = EXE_ASSET_NAME   # 附件名（决定下载物落点 `<name>.new`）
+    asset_digest: str = ""  # GitHub 算好的 sha256（assets[].digest，剥掉 "sha256:" 前缀）——
+                            # 校验的**首选**来源：服务端对收到的字节算的，不必再依赖我们自己传的摘要文件
+    sums_url: str = ""    # SHA256SUMS.txt 的 browser_download_url（**只对 exe 有意义**的兜底：
+                          # 那个文件里只有 exe 那一行，2026-09 起官方 Release 也不再上传它）
+    asset_size: int | None = None   # assets[].size（字节）：进度条总量的兜底，Content-Length 优先
 
 
 # 延迟创建的默认 opener（带重定向守卫；测试里整体替换这个模块级对象即可离线）
@@ -124,8 +137,10 @@ def _mapped_errors():
         raise UpdateCheckError(f"{type(exc).__name__}: {exc}") from exc
 
 
-def fetch_latest_release(timeout: float = DEFAULT_TIMEOUT_S) -> ReleaseInfo:
-    """查 GitHub 最新 Release。/releases/latest 天然排除 prerelease 和 draft（GitHub 语义）。
+def fetch_latest_release(timeout: float = DEFAULT_TIMEOUT_S,
+                         asset_name: str = EXE_ASSET_NAME) -> ReleaseInfo:
+    """查 GitHub 最新 Release 里**我要的那份附件**（默认 exe；AppImage 传 APPIMAGE_ASSET_NAME）。
+    /releases/latest 天然排除 prerelease 和 draft（GitHub 语义）。
 
     失败一律 UpdateCheckError：403/429=限流、URLError/超时=网络不可达、
     附件不全 / tag 不是版本号 = Release 本身异常（调用方留痕跳过，不崩）。
@@ -147,29 +162,29 @@ def fetch_latest_release(timeout: float = DEFAULT_TIMEOUT_S) -> ReleaseInfo:
     if ver is None:
         # tag 与 __version__ 的一致性由 release.yml 对账保证；走到这说明 Release 本身异常
         raise UpdateCheckError(t("最新 Release 的 tag 不是版本号：{tag}", tag=f"{tag!r}"))
-    exe_url = sums_url = exe_digest = ""
-    exe_size: int | None = None
+    asset_url = asset_digest = sums_url = ""
+    asset_size: int | None = None
     for a in data.get("assets") or []:
-        if a.get("name") == EXE_ASSET_NAME:
-            exe_url = str(a.get("browser_download_url") or "")
+        if a.get("name") == asset_name:
+            asset_url = str(a.get("browser_download_url") or "")
             size = a.get("size")
-            exe_size = size if isinstance(size, int) and size > 0 else None
+            asset_size = size if isinstance(size, int) and size > 0 else None
             # GitHub 为每个附件算好并在 API 里返回 digest（形如 "sha256:abcd…"）。
             # 用它做校验就不必再自己上传 SHA256SUMS.txt（2026-09 已停止上传）。
             digest = str(a.get("digest") or "").lower()
             if digest.startswith("sha256:"):
-                exe_digest = digest.split(":", 1)[1]
+                asset_digest = digest.split(":", 1)[1]
         elif a.get("name") == SUMS_ASSET_NAME:
             sums_url = str(a.get("browser_download_url") or "")
-    if not exe_url:
-        raise UpdateCheckError(t("Release 附件不全：缺少 {exe} 或校验值", exe=EXE_ASSET_NAME))
-    if not exe_digest and not sums_url:
-        # 两个校验来源都没有 → 宁可不更新，也不装一个没法验的包（调用方按「检查失败」留痕）
-        raise UpdateCheckError(t("Release 附件不全：缺少 {exe} 或校验值", exe=EXE_ASSET_NAME))
+    if not asset_url or (not asset_digest and not (sums_url and asset_name == EXE_ASSET_NAME)):
+        # 附件不在 / 没有可用校验来源 → 宁可不更新，也不装一个没法验的包（调用方按「检查失败」留痕）
+        # ⚠️ SHA256SUMS.txt 只兜底 exe：那个文件里只有 exe 一行，AppImage 必须自带 digest。
+        raise UpdateCheckError(t("Release 附件不全：缺少 {name} 或校验值", name=asset_name))
     return ReleaseInfo(tag=tag, version=f"{ver[0]}.{ver[1]}.{ver[2]}",
                        html_url=str(data.get("html_url") or ""),
-                       exe_url=exe_url, exe_digest=exe_digest,
-                       sums_url=sums_url, exe_size=exe_size)
+                       asset_url=asset_url, asset_name=asset_name,
+                       asset_digest=asset_digest,
+                       sums_url=sums_url, asset_size=asset_size)
 
 
 # ---------------------------------------------------------------- 忽略列表读写
@@ -245,7 +260,9 @@ def check_for_updates(local_version: str, config_path: Path,
     """
     print("[update] 检查中…", flush=True)
     try:
-        info = fetch_latest_release(timeout=timeout)
+        # 要哪份附件按**当前运行形态**定（Windows 单文件 exe / Linux AppImage）——
+        # 拿错附件的话后面下载校验都对不上，所以选附件这一步只在这里做一次。
+        info = fetch_latest_release(timeout=timeout, asset_name=asset_name_for())
     except Exception as exc:  # noqa: BLE001 — 失败只留痕，绝不把异常甩给启动流程
         print(f"[update] 检查失败：{exc}", flush=True)
         return "error", None
@@ -307,10 +324,10 @@ def _expected_sha256(info: ReleaseInfo, timeout: float) -> str:
     """这次下载该期望什么 sha256。
 
     首选 GitHub 在 API 里给的 `assets[].digest`（服务端对上传字节算的，最省事也最独立）；
-    只有当老 Release 没带 digest 时，才回去拉 SHA256SUMS.txt 兜底。
+    只有当老 Release 没带 digest 时，才回去拉 SHA256SUMS.txt 兜底（只对 exe 有意义）。
     """
-    if info.exe_digest:
-        return info.exe_digest
+    if info.asset_digest:
+        return info.asset_digest
     return _download_expected_sha256(info.sums_url, timeout)
 
 
@@ -359,18 +376,21 @@ def _stream_to_file(url: str, dest: Path, timeout: float,
 def download_and_verify(info: ReleaseInfo, dest_dir: Path,
                         timeout: float = DOWNLOAD_TIMEOUT_S,
                         progress: Callable[[int, int | None], None] | None = None) -> Path:
-    """下载 exe + SHA256SUMS.txt 到 dest_dir（调用方保证 = exe 同目录，同卷 move 才近原子）。
+    """下载本次要换的那个附件（exe / AppImage，由 `info.asset_name` 定）到 dest_dir。
 
-    校验：SHA256SUMS.txt 里 VRChatLiveTranslate.exe 行的值 == 实测 sha256，
-    不一致/解析不出 → 删除已下载文件 + UpdateCheckError，绝不进入替换步骤。
+    调用方保证 dest_dir = **安装文件同目录**（同卷 rename 才近原子）：Windows 是 exe 旁边，
+    Linux 是那个 `.AppImage` 旁边。
+
+    校验：期望值取 GitHub 的 asset digest（老 Release 回落 SHA256SUMS.txt 的 exe 行），
+    与实测 sha256 不一致/解析不出 → 删除已下载文件 + UpdateCheckError，绝不进入替换步骤。
     progress(done, total) 在下载线程里被调，total 取 Content-Length（缺省 None）——
     本模块不碰 Tk，GUI 负责把回调转进队列。
-    返回校验通过的 exe 路径（<dest_dir>/VRChatLiveTranslate.exe.new）。
+    返回校验通过的文件路径（<dest_dir>/<asset_name>.new）。
     """
-    dest = Path(dest_dir) / (EXE_ASSET_NAME + ".new")
+    dest = Path(dest_dir) / (info.asset_name + NEW_SUFFIX)
     try:
         expected = _expected_sha256(info, timeout)
-        actual = _stream_to_file(info.exe_url, dest, timeout, progress)
+        actual = _stream_to_file(info.asset_url, dest, timeout, progress)
     except Exception as exc:  # noqa: BLE001 — 任何失败都要清理残留 + 留痕，再原样上抛
         dest.unlink(missing_ok=True)
         print(f"[update] 下载失败：{exc}（残留已清理）", flush=True)
@@ -394,8 +414,89 @@ def download_and_verify(info: ReleaseInfo, dest_dir: Path,
 
 
 def update_mode() -> str:
-    """'frozen' | 'source' —— 决定「立即更新」按钮行为（源码运行不自更新，只给指引）。"""
-    return "frozen" if is_frozen() else "source"
+    """'frozen' | 'appimage' | 'source' —— 决定「立即更新」怎么换、甚至能不能换。
+
+    - `frozen`  ：Windows 单文件 exe（PyInstaller）→ 换 exe 自己（换不了就靠更新器 bat）；
+    - `appimage`：Linux AppImage（`$APPIMAGE` 指向那个文件）→ 换那个 `.AppImage`；
+    - `source`  ：仓库里直接跑（`run_gui.sh`）、或 `--appimage-extract-and-run` 这种
+      **没有单文件可换**的形态 → 只给指引，绝不动任何东西。
+
+    ⚠️ AppImage 必须单独一类，别并进 source：它的**源码目录**确实是只读挂载（不能改），
+    但 AppImage **文件本身**通常可写，而且 Linux 允许「运行中的可执行文件被 rename 顶替」
+    （旧 inode 继续活着，见 `install_appimage()`）—— 所以它和 exe 一样能自更新。
+    以前这里只有 frozen/source，AppImage 用户会被当成源码：界面弹「在仓库目录跑 git pull」，
+    而 AppImage 用户根本没有仓库。
+    """
+    if is_frozen():
+        return "frozen"
+    if appimage_path() is not None:
+        return "appimage"
+    return "source"
+
+
+def appimage_path() -> Path | None:
+    """当前运行的 AppImage 文件（`$APPIMAGE`）；没这变量 / 文件已经不在了 → None。
+
+    只认 `APPIMAGE`：那是 AppImage 运行时自己设的、指向那个 `.AppImage` 文件。
+    `APPDIR` 是挂载点（`--appimage-extract-and-run` 下也有），但那种形态没有可替换的
+    单文件，所以不能拿它当「能自更新」的依据。
+    """
+    raw = (os.environ.get("APPIMAGE") or "").strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    try:
+        return p if p.is_file() else None
+    except OSError:          # 路径里有非法字符 / 权限问题：当没有，别让检查流程崩
+        return None
+
+
+def can_self_update() -> bool:
+    """当前形态能不能**就地换掉自己**（Windows 单文件 exe / Linux AppImage）。
+
+    界面所有「自更新」相关的入口（退出时替换、启动残留恢复、版本变化提示）都该按它判，
+    而不是各写一遍 `update_mode() == "frozen"` —— 后者就是 AppImage 被漏掉的原因。
+    """
+    return update_mode() in ("frozen", "appimage")
+
+
+def asset_name_for(mode: str | None = None) -> str:
+    """这次更新该下载哪个附件名（按运行形态定）。"""
+    return APPIMAGE_ASSET_NAME if (mode or update_mode()) == "appimage" else EXE_ASSET_NAME
+
+
+def update_target_path() -> Path | None:
+    """当前形态「该被换掉的那个文件」：frozen → exe 自己；appimage → 那个 AppImage。
+
+    ⚠️ 别用 `sys.executable` 代替它：AppImage 下那是挂载点里的
+    `usr/python/bin/python3.11`，换它既没意义（重挂载就没了）也做不到（只读挂载）。
+    """
+    mode = update_mode()
+    if mode == "frozen":
+        return Path(sys.executable).resolve()
+    if mode == "appimage":
+        return appimage_path()
+    return None
+
+
+def install_appimage(new_path: Path, current_path: Path) -> None:
+    """把下载好的新版 AppImage 就地顶替旧版（**运行中也能做**）。
+
+    为什么这里不需要 Windows 那套「等 PID 退出的更新器」：Linux 的 `os.replace` 是原子的，
+    只换目录项 —— 运行中的进程和它的 squashfs 挂载仍指向**旧 inode**，继续正常工作，
+    新进程打开的就是新文件。所以没有「父进程还攥着文件句柄」这类窗口期，也就不需要外部脚本。
+
+    没有留 .bak：`os.replace` 要么换成、要么异常（旧文件原样不动），不存在「换了一半」的
+    状态，而 Windows 那边留 .bak 正是为了兜住 `move /y` 的失败重试。新版文件本身坏了的话，
+    回下载页拿上一版即可（发布产物都带 GitHub 服务端的 digest，可以自己核）。
+    """
+    new_path, current_path = Path(new_path), Path(current_path)
+    try:
+        new_path.chmod(0o755)          # 下载来的文件没有可执行位，顶替过去必须补上
+        os.replace(new_path, current_path)
+    except OSError as exc:
+        raise UpdateCheckError(t("替换 AppImage 失败：{msg}", msg=exc)) from exc
+    print(f"[update] AppImage 已就地替换：{current_path}（下次启动就是新版）", flush=True)
 
 
 # ---------------------------------------------------------------- 更新器 bat 生成
@@ -491,9 +592,14 @@ def file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def pending_new_exe(exe_path: Path) -> Path:
-    """exe 旁待替换的新版文件位置（与 download_and_verify 的落地路径同一规则）。"""
-    return Path(exe_path).parent / (EXE_ASSET_NAME + ".new")
+def pending_new_asset(asset_path: Path) -> Path:
+    """安装文件旁待替换的新版位置（与 download_and_verify 的落地规则同一个后缀）。
+
+    exe → `VRChatLiveTranslate.exe.new`；AppImage → `VRChatLiveTranslate-x86_64.AppImage.new`。
+    从路径本身推名字（而不是拼 `EXE_ASSET_NAME`）：两种产物共用一套残留复核逻辑。
+    """
+    p = Path(asset_path)
+    return p.parent / (p.name + NEW_SUFFIX)
 
 
 def write_pending(dest_dir: Path, version: str, sha256: str) -> Path:
@@ -504,19 +610,19 @@ def write_pending(dest_dir: Path, version: str, sha256: str) -> Path:
     return p
 
 
-def check_pending_download(exe_path: Path,
+def check_pending_download(asset_path: Path,
                            current_version: str = "") -> tuple[str, str] | None:
     """残留 .new 的安全网：用之前必须重新校验，损坏/半截绝不放行。
 
-    exe 旁存在 <EXE_ASSET_NAME>.new 且 update_pending.json 完好 → 重新计算 .new 的
-    SHA256 与 json 比对：一致 → 返回 (version, sha256)；
+    安装文件（exe / AppImage）旁存在 `<安装文件名>.new` 且 update_pending.json 完好 →
+    重新计算 .new 的 SHA256 与 json 比对：一致 → 返回 (version, sha256)；
     不一致 / json 损坏缺字段 / .new 缺失 / 版本不比 current_version 新（换过的残留）→
     清理残留（.new 与 json 都删）+ 逐分支 [update] 留痕，返回 None。
     完全没有残留 → 静默返回 None（每次启动都会走这条路，不刷日志）。
     """
-    exe_path = Path(exe_path)
-    new_exe = pending_new_exe(exe_path)
-    pending = exe_path.parent / PENDING_JSON
+    asset_path = Path(asset_path)
+    new_exe = pending_new_asset(asset_path)
+    pending = asset_path.parent / PENDING_JSON
 
     def _cleanup(reason: str) -> None:
         new_exe.unlink(missing_ok=True)

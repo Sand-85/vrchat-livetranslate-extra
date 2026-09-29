@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -58,16 +59,29 @@ def _yaml_set_in_text(text: str, path: list[str], value: str) -> str:
             #    - 0.0
             #  而本函数当时只换了 `pos:` 那一行，热重载就报
             #  `expected <block end>, but found '-'`，界面上拖滑块完全没效果。
+            #
+            # ⚠️ 但**纯注释行绝不删**：说明注释常写成「比所属键缩进更深」的续行
+            #   （如 `rot:` 下面那几行「换左手要镜像」），旧版本把注释当子块一并吃掉 ——
+            #   实测拖一次滑块 / 选一次设备就少 5~6 行说明（PR #4 审查：70 → 65）。
+            #   注释不影响 YAML 语义，保留它们、只删真正的块行即可（见下方 drop）。
+            drop: list[int] = []
             j = i + 1
             while j < hi and lines[j].strip():
                 stripped = lines[j].lstrip()
                 ind_j = len(lines[j]) - len(stripped)
+                if stripped.startswith("#"):
+                    if ind_j > indent:      # 本键的深层注释：保留，但继续往下扫块行
+                        j += 1
+                        continue
+                    break                   # 同级注释：保留，块到此为止
                 # 更深的缩进 = 属于本键的块；同级但以 "- " 开头 = 块序列（PyYAML 默认就不缩进）
                 if ind_j > indent or (ind_j == indent and stripped.startswith("- ")):
+                    drop.append(j)
                     j += 1
                     continue
                 break
-            del lines[i + 1:j]
+            for k in reversed(drop):        # 从后往前删，前面的行号才不会漂移
+                del lines[k]
             lines[i] = new_line
             return "\n".join(lines)
     lines.insert(hi, f"{' ' * indent}{leaf}: {value}")
@@ -125,23 +139,116 @@ def _yaml_set_or_create(text: str, path: list[str], value: str) -> str:
             m = re.compile(rf"^(\s*){re.escape(key_path[0])}:(\s*)([^#\n]*)(\s*#.*)?$").match(lines[i])
             comment = (m.group(4) or "").strip() if m else ""
             lines[i] = f"{' ' * indent}{key_path[0]}: {value}" + (f"   {comment}" if comment else "")
+            # 与 `_yaml_set_in_text` 同一取舍：删块行、**不删纯注释行**（见那边的说明）。
+            drop: list[int] = []
             j = i + 1
             while j < chi:
                 s = lines[j].lstrip()
-                if not s:
+                if not s:                   # 空行保留、继续扫（本函数原本就跨空行找子块）
                     j += 1
                     continue
                 ind_j = len(lines[j]) - len(s)
+                if s.startswith("#"):
+                    if ind_j > indent:
+                        j += 1
+                        continue
+                    break
                 if ind_j > indent or (ind_j == indent and s.startswith("- ")):
+                    drop.append(j)
                     j += 1
                     continue
                 break
-            del lines[i + 1:j]
+            for k in reversed(drop):
+                del lines[k]
             return
         _walk(key_path[1:], indent + 2, clo, chi)
 
     _walk(path, 0, 0, len(lines))
     return "\n".join(lines)
+
+
+def _yaml_quote(x: object) -> str:
+    """YAML 双引号标量（复用 JSON 的转义规则 —— YAML 双引号风格是它的超集）。
+
+    一律加引号，是为了社团名/术语里那些 `#`、`:`、前后空格、`-` 开头不让 YAML 变味
+    （`VRChat: VRChat` 不加引号也合法，但 `Rob: a club` 就不是了）。
+    """
+    return json.dumps("" if x is None else str(x), ensure_ascii=False)
+
+
+def _yaml_set_mapping(text: str, path: list[str], mapping: dict[str, str]) -> str:
+    """就地写入一整段**块映射**（如顶层 `glossary:` 专有词库），保留注释与键顺序。
+
+    为什么需要第三个函数：`_yaml_set_in_text` / `_yaml_set_or_create` 都只改**单个叶子
+    标量**。词库是一整段映射 —— 用它们得为每个词条各走一遍，还得先把不存在的条目
+    删干净（否则用户删掉一条、文件里还留着，下次启动又「复活」）。整段替换语义明确：
+    **这段归程序管，以界面里的当前内容为准**。
+
+    ⚠️ 取舍（写下来免得后人踩）：段**内部**的注释会随整段一起被替换掉；段外（上方）
+    的说明注释不受影响。所以模板里的词库说明一律写在 `glossary:` 上方，不写在段内。
+
+    实现取巧但可靠：先借 `_yaml_set_or_create` 把该键收敛成 `key: {}`（顺带搞定
+    「老配置里整段不存在」的补建），再把这**一行**展开成块映射。这样父级补建、
+    注释保留、块行清理三个难点都复用了已经过测试的代码路径。
+
+    mapping 为空 → 保留 `glossary: {}`（键在，用户才知道有这个功能）。
+    """
+    text = _yaml_set_or_create(text, path, "{}")
+    if not mapping:
+        return text
+
+    leaf = path[-1]
+    lines = text.split("\n")
+
+    # ⚠️ 必须**逐级定位父块**再在里面找那一行，绝不能全文件按缩进找：
+    #    同一层里可能另有一张同名的表 —— `directions.mine.hotwords` 与
+    #    `directions.theirs.hotwords` 缩进都是 4 空格，全文件找第一个匹配就会改**错表**
+    #    （实测踩过：存「别人说」的词条，结果写进了「我说」那张，目标那张留成 `{}`）。
+    #    顺带：`hotwords:` 这种「值是映射、自己独占一行」的写法也匹配得到，
+    #    而它往往是兄弟块里的同名键，正是最容易踩的那一脚。
+    def _child_span(key: str, indent: int, lo: int, hi: int):
+        """在 [lo,hi) 里找缩进为 indent 的 `key:`；返回 (行号, 子块起, 子块止)。"""
+        head = re.compile(rf"^(\s*){re.escape(key)}:(\s*)([^#\n]*)(\s*#.*)?$")
+        for i in range(lo, hi):
+            stripped = lines[i].lstrip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if len(lines[i]) - len(stripped) != indent or head.match(lines[i]) is None:
+                continue
+            child_hi = hi
+            for j in range(i + 1, hi):
+                s2 = lines[j].lstrip()
+                if not s2 or s2.startswith("#"):
+                    continue
+                if len(lines[j]) - len(s2) <= indent:
+                    child_hi = j
+                    break
+            return i, i + 1, child_hi
+        return None
+
+    lo, hi, indent = 0, len(lines), 0
+    for key in path[:-1]:
+        found = _child_span(key, indent, lo, hi)
+        if found is None:
+            return text          # 父级找不到（上一步刚写过，理论不可达）→ 宁可没生效，也不乱改
+        _, lo, hi = found
+        indent += 2
+
+    pad = " " * indent
+    pat = re.compile(rf"^{re.escape(pad)}{re.escape(leaf)}:\s*(\{{\}})?\s*(#.*)?$")
+    for i in range(lo, hi):
+        m = pat.match(lines[i])
+        if m is None:
+            continue
+        comment = (m.group(2) or "").strip()
+        block = [f"{pad}{leaf}:" + (f"   {comment}" if comment else "")]
+        for k, v in mapping.items():
+            # json.dumps 产出的就是合法的 YAML 双引号标量（含转义），且不会把 / 转义掉；
+            # 一律加引号是为了社团名里那些 `#`、`:`、前后空格不让 YAML 变味。
+            block.append(f"{pad}  {_yaml_quote(k)}: {_yaml_quote(v)}")
+        lines[i:i + 1] = block
+        return "\n".join(lines)
+    return text          # 理论上不可达（上一步刚写过这行）；宁可这次没生效，也不乱改
 
 
 def _write_config_text(path: Path, text: str) -> None:

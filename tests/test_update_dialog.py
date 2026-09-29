@@ -41,24 +41,31 @@ from vlt.config import DEFAULT_CONFIG                # noqa: E402
 MB = 1024 * 1024
 OUT = ROOT / "out" / "update_dialog"
 EXE_NEW = "VRChatLiveTranslate.exe.new"
+IMG_NAME = uc.APPIMAGE_ASSET_NAME                 # 与发布契约同名（见 test_update_check 的断言）
+IMG_NEW = IMG_NAME + ".new"
 
 INFO = uc.ReleaseInfo(tag="v9.9.9", version="9.9.9",
                       html_url="https://example.test/r",
-                      exe_url="https://example.test/e",
+                      asset_url="https://example.test/e",
                       sums_url="https://example.test/s",
-                      exe_size=10 * MB)
+                      asset_size=10 * MB)
 INFO_NOSIZE = uc.ReleaseInfo(tag="v9.9.9", version="9.9.9",
                              html_url="https://example.test/r",
-                             exe_url="https://example.test/e",
+                             asset_url="https://example.test/e",
                              sums_url="https://example.test/s",
-                             exe_size=None)
+                             asset_size=None)
 # 另一个版本号：ignore 用例会把 9.9.9 写进忽略列表（被测的正确行为），
 # 之后还要弹窗的用例换用 9.9.8，避免用例间通过 config.yaml 互相干扰。
 INFO2 = uc.ReleaseInfo(tag="v9.9.8", version="9.9.8",
                        html_url="https://example.test/r2",
-                       exe_url="https://example.test/e2",
+                       asset_url="https://example.test/e2",
                        sums_url="https://example.test/s2",
-                       exe_size=10 * MB)
+                       asset_size=10 * MB)
+# AppImage 形态要下载的那份附件（frozen 用例里用 INFO/INFO2，它们都是 exe，别混）
+INFO_IMG = uc.ReleaseInfo(tag="v9.9.9", version="9.9.9",
+                          html_url="https://example.test/r",
+                          asset_url="https://example.test/img",
+                          asset_name=IMG_NAME, asset_size=10 * MB)
 
 # UI 禁词（计划「面向普通用户的交互/文案 checklist」硬要求）：技术细节只进日志，不进界面
 FORBIDDEN_WORDS = ("exe", "pid", "sha256", "bat", "进程", "校验", "asset")
@@ -127,6 +134,32 @@ def _frozen_env(name: str, *, frozen: bool = True):
     finally:
         uc.update_mode = old_mode
         sys.executable = old_exe
+        vlt_gui.APP_DIR = old_app
+
+
+@contextlib.contextmanager
+def _appimage_env(name: str):
+    """模拟 Linux AppImage 运行形态：`$APPIMAGE` → out/ 下的假 AppImage 文件。
+
+    **不打桩 `update_mode()`**：这条路就是要让真实判定跑一遍（有 $APPIMAGE 且文件在 →
+    "appimage"）—— AppImage 被误判成「源码运行」正是要钉住的那个 bug。
+    APP_DIR 一并指向临时目录（update_state.json 等状态文件绝不落进仓库根）。"""
+    old_env, old_app = os.environ.get("APPIMAGE"), vlt_gui.APP_DIR
+    fake_dir = OUT / name
+    if fake_dir.exists():
+        shutil.rmtree(fake_dir)
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    img = fake_dir / IMG_NAME
+    img.write_bytes(b"old-appimage")
+    os.environ["APPIMAGE"] = str(img)
+    vlt_gui.APP_DIR = fake_dir
+    try:
+        yield fake_dir, img
+    finally:
+        if old_env is None:
+            os.environ.pop("APPIMAGE", None)
+        else:
+            os.environ["APPIMAGE"] = old_env
         vlt_gui.APP_DIR = old_app
 
 
@@ -648,7 +681,7 @@ def test_reload_now_replaces_and_relaunches() -> None:
         assert gui._reload_started is True, "没记重载中状态（防 _on_close 重复安排）"
         assert str(gui._dl_reload_btn.cget("text")) == "正在重启…", "主按钮文案没变"
         assert gui._dl_reload_btn.instate(["disabled"]), "主按钮没置灰防连点"
-        assert "已启动更新器，程序即将退出" in buf.getvalue(), "缺重载留痕"
+        assert "已安排替换并拉起新版，程序即将退出" in buf.getvalue(), "缺重载留痕"
         print("  ✓ 立即重启并更新：置灰「正在重启…」→ bat（含拉起）→ 分离启动 → 正常退出")
     finally:
         _destroy(gui)
@@ -722,7 +755,7 @@ def test_postpone_then_exit_replaces_without_relaunch() -> None:
             assert 'start ""' not in bat, "退出时替换绝不自动拉起新版"
             assert "move /y" in bat and str(os.getpid()) in bat, "bat 缺等待/替换逻辑"
             assert new_exe.exists(), ".new 在 bat 真正跑起来前不该被动"
-            assert "退出时替换已安排（不自动拉起）" in buf.getvalue(), "缺退出替换留痕"
+            assert "退出时已安排替换（不自动拉起）" in buf.getvalue(), "缺退出替换留痕"
             print("  ✓ 稍后更新 → 正常退出时替换：bat 不含拉起行、.new 保留、逐分支留痕")
         finally:
             _destroy(gui)
@@ -792,6 +825,114 @@ def test_startup_pending_residue_offers_update() -> None:
                 "「稍后更新」把下载好的文件删了"
             assert gui._update_pending_exit is True
             print("  ✓ 启动残留恢复：复核通过 → 直接完成态（不重复下载）+ 记下退出时替换")
+        finally:
+            _destroy(gui)
+
+
+def test_appimage_reload_replaces_and_relaunches() -> None:
+    """AppImage：「立即重启并更新」= **就地换掉那个文件** + 拉起新版（不需要 bat / 外部脚本）。
+
+    这条替代了 Windows 那套「写 .bat → 等 PID 退出 → move /y → start」：Linux 的
+    `os.replace` 是原子的，运行中的旧文件是旧 inode（当前会话继续正常工作）。
+    ⚠️ 拉起时必须清掉 APPIMAGE / APPDIR（`updater_env()`）：不清的话新进程不会重新挂载，
+    会去用父进程那个马上消失的挂载点 —— 症状是「更新完没再打开」。
+    """
+    body = b"new-appimage-" * 500
+
+    def fake_dl(info, dest_dir, timeout=None, progress=None):  # noqa: ANN001, ANN201
+        p = Path(dest_dir) / IMG_NEW
+        p.write_bytes(body)
+        uc.write_pending(Path(dest_dir), info.version, uc.file_sha256(p))
+        return p
+
+    with _appimage_env("appimage_reload") as (fake_dir, img):
+        gui = _make_gui()
+        try:
+            assert uc.update_mode() == "appimage", "有 $APPIMAGE 却没被判成 AppImage 形态"
+            gui._update_downloader = fake_dl
+            gui._on_update_now(INFO_IMG)
+            assert _pump_until(gui, lambda: gui._dl_new_exe is not None), "没进到完成态"
+
+            popen_calls: list = []
+            closed = {"n": 0}
+            orig_close = gui._on_close
+            gui._on_close = lambda: closed.__setitem__("n", closed["n"] + 1)
+            buf = io.StringIO()
+            try:
+                with _stub_popen(popen_calls), contextlib.redirect_stdout(buf):
+                    _btn(gui._dl_win, "立即重启并更新").invoke()
+            finally:
+                gui._on_close = orig_close
+
+            assert closed["n"] == 1, "点「立即重启并更新」没走正常退出流程"
+            assert img.read_bytes() == body, "AppImage 文件没被换成新版"
+            assert not (fake_dir / IMG_NEW).exists(), "新版文件应当被 rename 顶替"
+            assert len(popen_calls) == 1, "新版没被拉起"
+            argv, kwargs = list(popen_calls[0][0][0]), popen_calls[0][1]
+            assert argv == [str(img)], f"拉起的不是刚换上的那个文件：{argv}"
+            env = kwargs.get("env", {})
+            assert "APPIMAGE" not in env and "APPDIR" not in env, \
+                "拉起时没清 APPIMAGE/APPDIR —— 新进程不会重新挂载（「更新完没再打开」）"
+            assert "已安排替换并拉起新版" in buf.getvalue(), "缺重载留痕"
+            print("  ✓ AppImage：就地替换 + 拉起新版（已清 APPIMAGE/APPDIR）")
+        finally:
+            _destroy(gui)
+
+
+def test_appimage_postpone_then_exit_replaces() -> None:
+    """AppImage：【稍后更新】→ 退出时直接把文件换好（不拉起、也不要外部脚本兜着）。"""
+    body = b"new-appimage-" * 500
+
+    def fake_dl(info, dest_dir, timeout=None, progress=None):  # noqa: ANN001, ANN201
+        p = Path(dest_dir) / IMG_NEW
+        p.write_bytes(body)
+        uc.write_pending(Path(dest_dir), info.version, uc.file_sha256(p))
+        return p
+
+    with _appimage_env("appimage_postpone") as (fake_dir, img):
+        gui = _make_gui()
+        try:
+            gui._update_downloader = fake_dl
+            gui._on_update_now(INFO_IMG)
+            assert _pump_until(gui, lambda: gui._dl_new_exe is not None), "没进到完成态"
+            _btn(gui._dl_win, "稍后更新").invoke()
+            assert gui._dl_win is None and gui._update_pending_exit is True
+            assert img.read_bytes() == b"old-appimage", "点「稍后更新」不该当场替换"
+
+            popen_calls: list = []
+            buf = io.StringIO()
+            with _stub_popen(popen_calls), contextlib.redirect_stdout(buf):
+                gui._maybe_replace_on_exit()
+            assert img.read_bytes() == body, "退出时没把 AppImage 换成新版"
+            assert not popen_calls, "这条路径绝不自动拉起新进程"
+            assert "退出时已就地替换" in buf.getvalue(), "缺退出时替换的留痕"
+            print("  ✓ AppImage：【稍后更新】→ 退出时就地换好（不拉起）")
+        finally:
+            _destroy(gui)
+
+
+def test_appimage_startup_residue_offers_update() -> None:
+    """AppImage 的强杀恢复：残留复验通过 → 直接出「下载完成」窗口（不重复下载）→
+    退出时换成新版。与 exe 共用同一套残留复核，落点名字从安装文件推出来。"""
+    body = b"new-appimage-" * 500
+    with _appimage_env("appimage_residue") as (fake_dir, img):
+        new_img = fake_dir / IMG_NEW
+        new_img.write_bytes(body)
+        uc.write_pending(fake_dir, "9.9.9", uc.file_sha256(new_img))
+
+        gui = _make_gui()              # 启动兜底在 __init__ 里同步跑
+        try:
+            win = gui._dl_win
+            assert win is not None and win.winfo_exists(), "残留完好却没给更新入口"
+            assert win.title() == "下载完成", "该直接出完成态，而不是重新下载"
+            assert not gui._dl_downloading, "残留恢复不许重新下载"
+            assert gui._update_pending_exit is True, "没记下退出时替换"
+            popen_calls: list = []
+            with _stub_popen(popen_calls), contextlib.redirect_stdout(io.StringIO()):
+                gui._maybe_replace_on_exit()
+            assert img.read_bytes() == body, "退出时没换成新版"
+            assert not popen_calls
+            print("  ✓ AppImage 启动残留恢复：直接完成态 → 退出时换好")
         finally:
             _destroy(gui)
 
@@ -899,6 +1040,9 @@ def main() -> int:
         test_postpone_then_exit_replaces_without_relaunch,
         test_exit_replace_skipped_when_verify_fails,
         test_startup_pending_residue_offers_update,
+        test_appimage_reload_replaces_and_relaunches,
+        test_appimage_postpone_then_exit_replaces,
+        test_appimage_startup_residue_offers_update,
         test_version_changed_hint_once,
     ]
     print("更新弹窗/下载窗/设置区接线验收：")

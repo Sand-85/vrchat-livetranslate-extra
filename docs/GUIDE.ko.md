@@ -1,6 +1,6 @@
 # vrchat-livetranslate · 가이드
 
-> [中文](GUIDE.md) | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | **한국어** | [Русский](GUIDE.ru.md)
+> [中文](../GUIDE.md) | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | **한국어** | [Русский](GUIDE.ru.md)
 
 [← README로 돌아가기](README.ko.md)
 
@@ -55,7 +55,7 @@
 ```bat
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements-windows.txt
 ```
 
 ## 3. API key 설정
@@ -267,7 +267,7 @@ output:
 | 슬라이더 | 범위 / 단위 | 슬라이더 | 범위 / 단위 |
 |---|---|---|---|
 | 위치 X / Y / Z | −0.30 ~ 0.30 m, 0.005 | 크기 | 0.05 ~ 0.80 m, 0.01 |
-| 피치 / 요 / 롤 | −90 ~ 90°, 1 | 곡률 | 0.0 ~ 0.50, 0.01 |
+| 피치 / 요 / 롤 | −180 ~ 180°, 1 | 곡률 | 0.0 ~ 0.50, 0.01 |
 | 불투명도 | 0.10 ~ 1.00, 0.05 | 번역문 글자 크기 | 20 ~ 64, 1 |
 | 원문 글자 크기 | 14 ~ 48, 1 | 패널 높이 | 240 ~ 560 px, 10 |
 

@@ -1,6 +1,6 @@
 # vrchat-livetranslate · ガイド
 
-> [中文](GUIDE.md) | [English](GUIDE.en.md) | **日本語** | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
+> [中文](../GUIDE.md) | [English](GUIDE.en.md) | **日本語** | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
 
 [← README に戻る](README.ja.md)
 
@@ -56,7 +56,7 @@
 ```bat
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements-windows.txt
 ```
 
 ## 3. API key の設定
@@ -270,7 +270,7 @@ output:
 | スライダー | 範囲 / 刻み | スライダー | 範囲 / 刻み |
 |---|---|---|---|
 | 位置 X / Y / Z | −0.30 ~ 0.30 m、0.005 | サイズ | 0.05 ~ 0.80 m、0.01 |
-| ピッチ / ヨー / ロール | −90 ~ 90°、1 | カーブ | 0.0 ~ 0.50、0.01 |
+| ピッチ / ヨー / ロール | −180 ~ 180°、1 | カーブ | 0.0 ~ 0.50、0.01 |
 | 不透明度 | 0.10 ~ 1.00、0.05 | 訳文の文字サイズ | 20 ~ 64、1 |
 | 原文の文字サイズ | 14 ~ 48、1 | パネルの高さ | 240 ~ 560 px、10 |
 

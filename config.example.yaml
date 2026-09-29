@@ -50,9 +50,28 @@ session:
   repeat_guard_ratio: 0.9
 
 # 音频设备选择（空字符串 = 自动检测，也可在界面下拉里选）
+# 两端的设备名来源不同：
+#   Windows → WASAPI 设备的名字（如 "Steam Streaming Speakers (loopback)"）
+#   Linux   → PipeWire 输出节点的 description（如 "REDMI 电脑音箱 2 Pro 模拟立体声"）
 capture:
   mic_device: ""            # 麦克风设备名；空 = 自动检测（默认设备）
-  loopback_device: ""       # VRChat 音频端点名；空 = 自动回退链
+  loopback_device: ""       # 「别人说话」的采集端点；空 = 自动回退链
+                            # Linux 上就是 VRChat 输出到的那个 sink（见 GUIDE.linux.md 第六节）
+  # ---- 输入门限（只作用于 VRChat 输出 = 「别人说话」那条腿）----
+  # 治什么：VRChat 把人声混成一路输出，远处玩家声音小、本来就听不清，以前照样被送给
+  # 模型 → 白花钱还容易被翻成乱话。开启后按**每 100ms 块的 RMS 响度**（不是峰值：
+  # 峰值会被按键/音效的单个尖刺骗开）判：低于 gate_db 的块不上送，模型听不到 = 不翻译。
+  #   gate_db 越高（越接近 0）= 过滤越狠，只留贴近耳边的人；越低 = 越宽松。
+  #   参考：近处正常说话大致落在 -30 ~ -20 dBFS，远处小声的常在 -50 以下。
+  # gate_hold_ms：一旦超过门限，之后这段时间内即使回落到门限以下也继续送 ——
+  #   说话句中的停顿、句尾渐弱不会被切碎（调小会更"干净"，但句子容易断）。
+  # gate_preroll_ms：开闸时补发越阈值之前的一小段 —— 句首辅音不丢（识别少掉字）。
+  # 界面「⚙ 设置 → 输入门限」里有滑块 + 实时电平条，可以边放歌边拖到合适位置。
+  # 只影响「听别人」这条腿；麦克风（自己说话）不受影响。
+  gate_enabled: true
+  gate_db: -45.0
+  gate_hold_ms: 500
+  gate_preroll_ms: 250
 
 # 每个方向一条独立会话
 directions:
@@ -61,12 +80,40 @@ directions:
     source_lang: zh
     target_lang: en          # 可改 ja / ko / fr / de / es / ru ...
     output_audio: false      # true 则同时拿译音（走虚拟声卡那条腿）
-    hotwords: {}             # 例：{"VRChat": "VRChat", "逆袭": "Nixi"}
+    hotwords: {}             # 方向级热词（可选）：只对**这个方向**生效，覆盖下面 glossary 的同名词条
+                             # 例：{"Nekoya": "Nekoya"} —— 我说英文名、英文译文保持原样
   # ② 别人说 → 手腕屏
   theirs:
     source_lang: null        # null = 自动识别（多国玩家场景）
     target_lang: zh
     output_audio: false
+    hotwords: {}             # 例：{"Nekoya": "猫屋"} —— 对方念英文名、中文译文用中文名
+
+# ---------------------------------------------------------------
+# 专有词库：把社团名 / 人名 / 术语**钉死**成你要的写法。
+# 说话那条腿 → 实时会话的热词；打字那条腿 → Qwen-MT 术语干预。
+#
+# ⚠️ 它是**给模型的提示（术语干预）**，不是字符串替换：模型会尽量按你给的译名走，
+#    但搭配由模型处理（`Nekoya Studio` 会译成「猫屋工作室」）；模型自己音译出的写法
+#    （如「尼可亚」）不会被改写，那种要把该写法也写成一条。
+#    附带好处：key 同时也是**识别热词**，能纠正听写（实测 Nekoya 不再被听成 Nikoya）。
+#
+# 写法：`原文: 译名`。「原文」按**源语言**里的实际写法填。
+#
+# ⚠️ 这个 `glossary` 是**全局**的，会同时作用到两个方向。两个方向的目标语言不同，
+#    所以只放「两个方向都要同一个译名」的词（如 VRChat 保持原样）。
+#    只在某一个方向成立、或两向需要**不同**译名的词条，放上面 `directions.<方向>.hotwords`：
+#        mine.hotwords:   {"Nekoya": "Nekoya"}    # 我说 → 英文：保持原样
+#        theirs.hotwords: {"Nekoya": "猫屋"}      # 别人说 → 中文：用中文名
+#    放错的后果（实测）：全局写 "Nekoya": "猫屋"，则「我说 → 英文」的译文会变成
+#        I come from the Cat House club.          # 社团名被换掉了
+# 界面入口：⚙ 设置 → 专有词库（一行一条 `原文=译名`）。界面上那行「作用方向」下拉
+#   可以切三张表：`全局`（就是下面这段）/ `我说`/`别人说`（写上面 directions.<方向>.hotwords）。
+#   保存只动当前选中的那一张，不会碰另一张。
+# 段内注释会被界面保存时整段覆盖 —— 要写说明请写在本段**上方**（就像现在这样）。
+glossary:
+  "VRChat": "VRChat"
+  "逆袭": "Nixi"
 
 chatbox:
   host: 127.0.0.1
@@ -83,22 +130,33 @@ merger:
   interval_s: 2.0            # 首个 delta 立即发，之后每 2 秒一次快照，句末必刷最终版
   carry_over: false          # true = 把上一段最终译文作为前缀保留（连续字幕观感）
 
-# 手腕屏幕（SteamVR overlay）
+# 手腕屏幕（Windows: SteamVR overlay / Linux: 自建 OpenXR overlay）
 overlay:
   enabled: true
+  # 后端：auto = 按平台自动选（Windows 用 pyopenvr；Linux 用自建 OpenXR，直接连
+  # Monado/WiVRn，不依赖任何第三方 overlay 管理器、无需注册、不写配置、不重启）。
+  # null = 彻底禁用这一条腿（等价于 enabled: false，但语义更明确）。
+  backend: auto
   # 刷新策略：0 = 有更新立刻上屏（本地显示不受 chatbox 2 秒节流约束，默认如此）
   #            >0 = 按秒数节流（怕刷太快看着晃时才调，例如 0.5）
   interval_s: 0
   anchor: right_hand         # left_hand | right_hand | tracker | hmd
   tracker_index: 0           # anchor=tracker 时取第几个 tracker（前臂 tracker 最贴合“绑在手臂上”）
+                             # ⚠️ Linux/OpenXR 上 tracker 是**按 role 寻址**的（不是按设备序号），
+                             #    这个序号是 role 表的序号，且未在真实 tracker 上验证过
   offset:
     pos: [0.0, 0.06, 0.02]   # 相对锚点偏移（米）——改完存盘即生效，无需重启
-    rot: [-47, -16, 0]       # 欧拉角（度）——默认值取自作者实测调好的右手腕角度
+    rot: [-47, -16, 0]       # 欧拉角（度，约定 Rz·Ry·Rx）——默认值取自作者实测调好的**右手腕**角度
+                             # ⚠️ 换到左手要镜像：rx 不变、ry 取反、rz 取反
+                             #    即 left_hand 用 [-47, 16, 0]（起始值，再戴着微调）
+                             # 界面上的「手腕屏微调」滑块拖完也是写回这里
     width_m: 0.23            # 面板宽度（米）
     curvature: 0.0           # >0 则弯曲贴合（0.1~0.3 可试）
     alpha: 0.9
   size_px: [1024, 440]       # 面板像素尺寸（[宽, 高]；界面「面板高」滑块改的就是这个高）
   font: "C:/Windows/Fonts/msyh.ttc"   # 雅黑；日文可用 NotoSansJP-VF.ttf
+                             # ⚠️ 这是 Windows 路径。**Linux 上留空即可**，会自动用 fontconfig
+                             #    找一套中日韩字体（填了不存在的路径会回落到位图字体、画不出中文）
   font_size: 36              # 译文字号（界面微调面板可拖；调小 → 同样高度能塞更多字）
   source_font_size: 29       # 原文小字号（同上）
   max_lines: 3               # 译文最多显示几行（超出保留最新）
@@ -140,6 +198,9 @@ output:
     #   tts      = B：本地流式 TTS 合成，音色与打字腿完全一致（text_input.tts）；
     #              代价是每句要等该句**终版文本**（短句约 +0.5s；连续长句可能等到句末才开口）
     mode: realtime
+    # ⚠️ 下面这条回退链是 **Windows 专用**（VB-Cable / VoiceMeeter 这类**事先装好**的虚拟声卡）。
+    #    Linux 上**不用配**：程序运行时会自己声明一对 PipeWire 节点
+    #    （`vlt_mic_sink` / `vlt_mic_source`，VRChat 里选显示名 "VLT Mic"），退出时自动销毁。
     device:                  # 按名称回退链找虚拟声卡（设备 ID 会随插拔变化，绝不写死）
       - "voicemeeter input"
       - "voicemeeter aux input"

@@ -97,11 +97,12 @@ def main() -> int:
     CONFIG.write_text(before, encoding="utf-8")
     print(f"已还原 config.yaml（注释 {n_comments(CONFIG.read_text(encoding='utf-8'))} 行）")
 
-    # 三个新用例：块序列替换 / 写入校验 / 坏配置恢复
+    # 三个新用例：块序列替换 / 写入校验 / 坏配置恢复 / 深层注释不被吃掉
     try:
         test_block_sequence_value_is_replaced_intact()
         test_write_guard_refuses_invalid_yaml()
         test_broken_config_backed_up_and_regenerated()
+        test_deep_indented_comments_survive_leaf_writes()
     except AssertionError as exc:
         fails.append(f"新增用例失败：{exc}")
 
@@ -141,6 +142,34 @@ def test_block_sequence_value_is_replaced_intact() -> None:
     assert data["capture"]["mic_device"] == "", "其他段被破坏"
     assert "- 0.06" not in out, f"孤立的序列项没被吃掉：{out!r}"
     print("  块序列值被整体替换、文件仍是合法 YAML OK")
+
+
+def test_deep_indented_comments_survive_leaf_writes() -> None:
+    """★ 回归（PR #4 审查）：比所属键缩进更深的说明注释，不能被就地写入顺手删掉。
+
+    旧版 `_yaml_set_in_text` 的删除分支把「键之后更深缩进的块」整段删掉，而配置里
+    新增的说明注释恰好写成这种深层续行 —— 拖一次滑块会删 5 行、选一次设备再多删
+    1 行，丢的正是「换左手要镜像」和「tracker 按 role 寻址」这两处最该留住的。
+    """
+    from vlt.gui import _yaml_set_in_text
+
+    template = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+    base = n_comments(template)
+
+    cases = [
+        (["overlay", "offset", "rot"], "[-47, 16, 0]", "换到左手要镜像"),
+        (["overlay", "tracker_index"], "1", "按 role 寻址"),
+        (["capture", "loopback_device"], '"foo"', "VRChat 输出到的那个 sink"),
+        (["overlay", "font"], '""', "Linux 上留空即可"),
+    ]
+    for path, value, marker in cases:
+        out = _yaml_set_in_text(template, path, value)
+        assert n_comments(out) == base, (
+            f"{'.'.join(path)} 写入后注释被破坏：{base} → {n_comments(out)}")
+        assert marker in out, f"{'.'.join(path)} 的说明注释丢了：{marker!r}"
+        data = yaml.safe_load(out)                 # 删的时候别把 YAML 弄坏
+        assert data is not None, f"{'.'.join(path)} 写入后不再是合法 YAML"
+    print(f"  4 处深层缩进注释在就地写入后一字不少（各 {base} 行注释）OK")
 
 
 def test_write_guard_refuses_invalid_yaml() -> None:

@@ -1,0 +1,19 @@
+# VRChat 实时同传 —— Linux 独占依赖
+#
+# 用法：pip install -r requirements-linux.txt
+-r requirements.txt
+
+# 手腕屏 → **自建 OpenXR overlay**（vlt/output/openxr_overlay.py）：我们的进程作为
+# XR_EXTX_overlay 会话直接连 Monado / WiVRn 的合成器，不依赖 WayVR 之类的第三方管理器。
+# 需要 pyopenxr（它会顺带拖进 PyOpenGL / glfw —— 我们只用它调 xr.*，
+# GL/EGL 绑定是纯 ctypes 调 libEGL / libwayland-client）。
+pyopenxr>=1.1.6301
+
+# 其余 Linux 功能都不需要额外的 Python 包：
+#   * 系统声采集 → `pw-record` 子进程读 PCM（PipeWire 原生，monitor 语义）
+#   * 虚拟声卡   → 运行期声明 PipeWire 节点（capture 侧用 Audio/Sink/Internal）＋ `pw-cat` 写入
+#   * 麦克风     → sounddevice（在公共依赖里），PortAudio 走 ALSA
+#
+# 需要系统层具备（非 pip 依赖，setup.sh 会体检）：
+#   pipewire（pw-dump / pw-record / pw-cat）
+#   OpenXR 运行时（Monado 或 WiVRn）＋ libEGL ＋ libwayland-client

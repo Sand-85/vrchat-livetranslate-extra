@@ -1,6 +1,20 @@
-"""VirtualMic 纯函数/纯逻辑测试：不依赖真实音频设备。"""
+"""VirtualMic 纯函数/纯逻辑测试：不依赖真实音频设备。
+
+## ⚠️ 打桩纪律（踩过 4 次，每次都动了用户的音频图）
+
+任何会让引擎走到 `_setup_virtualmic` 的测试，都**必须同时桩住两个平台**：
+
+    Windows 侧：`vlt.engine.pick_output_device` / `vlt.engine.VirtualMic`
+    Linux  侧：`vlt.platform.open_audio_out`
+
+只桩 Windows 侧时，Linux 分支会**绕过打桩**、真的拉起 `pw-loopback`
+去创建虚拟声卡 —— 这会往用户的 PipeWire 图里塞节点、还可能污染
+`default.configured.*` 元数据。统一用下面的 `_stub_audio_out()` 就不会漏。
+（`vlt/platform/linux.py` 里还有一道「测试进程拒绝声明虚拟声卡」的防呆兜底。）
+"""
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import struct
@@ -10,10 +24,36 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from vlt.output.virtualmic import (
+    PwCatVirtualMic,
     VirtualMic,
     pick_output_device,
     resample_24k_mono_to_48k_stereo,
 )
+
+
+@contextlib.contextmanager
+def _stub_audio_out(*, win_vm=None, win_pick=None, linux_factory=None):
+    """一次性把两个平台的译音输出入口都换成假的。
+
+    `linux_factory(cfg, on_status)` 要返回一个**未打开**的对象
+    （引擎随后会自己调 `.open()`），返回 None 表示这条腿不可用。
+    """
+    import vlt.engine as E
+    from vlt import platform
+
+    orig = (E.pick_output_device, E.VirtualMic, platform.open_audio_out)
+    if win_pick is not None:
+        E.pick_output_device = win_pick
+    if win_vm is not None:
+        E.VirtualMic = win_vm
+    if linux_factory is not None:
+        platform.open_audio_out = linux_factory            # type: ignore[assignment]
+    else:
+        platform.open_audio_out = lambda _c, _s: None      # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        E.pick_output_device, E.VirtualMic, platform.open_audio_out = orig
 
 
 def test_resample_byte_count():
@@ -122,9 +162,16 @@ def test_buffer_keeps_newest():
 
 
 def test_no_device_no_crash():
-    """没有设备时走 on_status('error', ...) 且进程正常退出。"""
+    """没有可用输出设备时走 on_status('error', ...)、virtualmic 留 None、不抛异常。
+
+    ⚠️ 两个平台要分别打桩，**绝不能让测试真的去建虚拟声卡**（那会动用户的音频图）：
+      * Windows：桩在 `E.pick_output_device`（按设备名找不到 → None）
+      * Linux  ：桩在 `platform.open_audio_out`（声明失败 → None）
+    早先只桩了 Windows 那侧，加上 Linux 分支后测试会真的拉起 pw-loopback —— 已修。
+    """
     statuses: list[tuple[str, str]] = []
     from vlt.config import AppConfig, Direction
+    from vlt import platform
     cfg = AppConfig(
         session_base={"model": "x", "base_url": "x", "voice": "x", "api_key": "x",
                        "workspace_id": "", "reconnect_backoff": [1], "max_new_sessions_per_minute": 10,
@@ -138,8 +185,20 @@ def test_no_device_no_crash():
     events = EngineEvents(
         on_status=lambda lvl, msg: statuses.append((lvl, msg)),
     )
-    engine = Engine(cfg=cfg, direction="mine", source="mic", sinks=set(), events=events)
-    engine._setup_virtualmic(cfg.output["audio"])
+
+    def _fake_open(_audio_cfg, on_status):
+        on_status("error", "没找到匹配的输出设备（回退链：nonexistent_device_xyz）"
+                           "。虚拟声卡装好了吗？其余功能不受影响。")
+        return None
+
+    orig = platform.open_audio_out
+    platform.open_audio_out = _fake_open            # type: ignore[assignment]
+    try:
+        engine = Engine(cfg=cfg, direction="mine", source="mic", sinks=set(), events=events)
+        engine._setup_virtualmic(cfg.output["audio"])
+    finally:
+        platform.open_audio_out = orig              # type: ignore[assignment]
+
     assert engine.virtualmic is None
     errors = [msg for lvl, msg in statuses if lvl == "error"]
     assert len(errors) >= 1, f"应该有 error 状态，实际：{statuses}"
@@ -184,7 +243,7 @@ def test_resample_edge_cases():
 
 
 def test_setup_virtualmic_success_path():
-    """★ 回归：译音输出设备**打开成功**那条分支必须跑通。
+    """★ 回归：译音输出设备**打开成功**那条分支必须跑通，且后续调用不因属性名写错而炸。
 
     真实事故（用户机器上有 VoiceMeeter 才会走到这条分支）：
     `_setup_virtualmic` 成功分支里多打了一行日志，用了不存在的属性
@@ -193,10 +252,17 @@ def test_setup_virtualmic_success_path():
 
     我本机没装虚拟声卡，永远走不到这条分支，所以本地测试全绿、一到用户那儿就炸 ——
     因此必须用**假设备**把成功分支覆盖掉。
+
+    ⚠️ 两个平台都要桩住（Windows 桩 `E.pick_output_device`/`E.VirtualMic`，
+    Linux 桩 `platform.open_audio_out`）。**只桩一侧会让另一侧真去建虚拟声卡、
+    动到用户的音频图** —— 这个坑踩过一次（测试真的拉起了 pw-loopback）。
+    而且必须用**真实类的子类**、只换掉 `open()`：这样后续对它的每一处属性访问都走真对象，
+    「属性名写错」这类 bug 才能立刻暴露（纯假对象会漏掉）。
     """
     from vlt.config import AppConfig, Direction
     from vlt.engine import Engine, EngineEvents
     import vlt.engine as E
+    from vlt import platform
 
     statuses: list[tuple[str, str]] = []
     cfg = AppConfig(
@@ -210,8 +276,8 @@ def test_setup_virtualmic_success_path():
                           "buffer_ms": 300, "max_buffer_ms": 2000}},
     )
 
-    # ★ 用**真实的 VirtualMic 子类**，只把 open() 换掉不真的开音频流：
-    # 这样引擎里对它的每一处属性访问都会走真对象，属性名写错立刻暴露。
+    # ★ 用**真实的类**做子类，只把 open() 换掉不真的开音频流
+    from vlt.output.virtualmic import PwCatVirtualMic
     from vlt.output.virtualmic import VirtualMic as RealVirtualMic
 
     class PatchedVirtualMic(RealVirtualMic):
@@ -219,20 +285,38 @@ def test_setup_virtualmic_success_path():
             self.opened = True
             return True
 
+    class PatchedPwCat(PwCatVirtualMic):
+        def open(self) -> bool:
+            self.opened = True
+            return True
+
+    def _fake_open(_audio_cfg, _on_status):
+        # 注意：PwCatVirtualMic 的构造**不启动任何进程**，只有 open() 才会 ——
+        # 所以这里返回真对象也不会碰到用户的音频图。
+        return PatchedPwCat("vlt_mic_sink", sample_rate=48000, buffer_ms=300,
+                            max_buffer_ms=2000)
+
     orig_pick, orig_vm = E.pick_output_device, E.VirtualMic
+    orig_open = platform.open_audio_out
     E.pick_output_device = lambda patterns=None: (  # noqa: ARG005
         11, "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)", 48000)
     E.VirtualMic = PatchedVirtualMic
+    platform.open_audio_out = _fake_open            # type: ignore[assignment]
     try:
         engine = Engine(cfg=cfg, direction="mine", source="mic", sinks=set(),
                         events=EngineEvents(on_status=lambda lvl, msg: statuses.append((lvl, msg))))
         engine._setup_virtualmic(cfg.output["audio"])       # ← 不许抛异常
+        vm = engine.virtualmic
+        assert vm is not None, "设备可用时应该留下译音输出实例"
+        assert getattr(vm, "opened", False), "没有调用 open()"
+        # ★ 后续调用也要走一遍：属性名/接口写错在这里立刻炸（这正是当年那个 bug）
+        vm.push(bytes(48000 * 4 // 10))                     # 100ms 立体声 s16
+        vm.end_sentence()
+        vm.close()
     finally:
         E.pick_output_device, E.VirtualMic = orig_pick, orig_vm
+        platform.open_audio_out = orig_open         # type: ignore[assignment]
 
-    assert engine.virtualmic is not None, "设备可用时应该留下 VirtualMic 实例"
-    assert getattr(engine.virtualmic, "opened", False), "没有调用 open()"
-    assert isinstance(engine.virtualmic, RealVirtualMic)
     print(f"  虚拟声卡打开成功分支不抛异常 OK（状态：{[m[:40] for _, m in statuses]}）")
 
 
@@ -259,12 +343,22 @@ def test_setup_virtualmic_open_failure():
     orig_pick, orig_vm = E.pick_output_device, E.VirtualMic
     E.pick_output_device = lambda patterns=None: (11, "Fake Virtual Card", 48000)  # noqa: ARG005
     E.VirtualMic = FailVirtualMic
+    from vlt import platform
+
+    def _fake_open(_audio_cfg, on_status):
+        # Linux 侧对应「声明虚拟声卡失败 / 打开写入端失败」——一样要优雅降级。
+        on_status("error", "虚拟声卡声明失败 → 译音输出已禁用（其余功能不受影响）")
+        return None
+
+    orig_open = platform.open_audio_out
+    platform.open_audio_out = _fake_open            # type: ignore[assignment]
     try:
         engine = Engine(cfg=cfg, direction="mine", source="mic", sinks=set(),
                         events=EngineEvents(on_status=lambda lvl, msg: None))
         engine._setup_virtualmic(cfg.output["audio"])
     finally:
         E.pick_output_device, E.VirtualMic = orig_pick, orig_vm
+        platform.open_audio_out = orig_open         # type: ignore[assignment]
     assert engine.virtualmic is None, "打开失败应清成 None"
     print("  虚拟声卡打开失败 → 优雅降级 OK")
 
@@ -350,10 +444,29 @@ def test_engine_marks_sentence_boundaries():
         chatbox={}, merger={}, overlay={},
         output={"audio": {"enabled": True, "device": ["voicemeeter input"], "sample_rate": 48000}},
     )
-    orig_pick, orig_vm = E.pick_output_device, E.VirtualMic
-    E.pick_output_device = lambda patterns=None: (11, "Fake", 48000)  # noqa: ARG005
-    E.VirtualMic = RecordingVM
-    try:
+
+    class RecordingPwCat(PwCatVirtualMic):
+        """Linux 侧的等价录制桩（构造不启动进程，只有 open() 才启动）。"""
+
+        def __init__(self) -> None:
+            super().__init__("vlt_mic_sink")
+            self.marks = 0
+            self.pushed = 0
+            self.opens = 0
+
+        def open(self) -> bool:
+            self.opens += 1
+            return True
+
+        def end_sentence(self) -> None:
+            self.marks += 1
+
+        def push(self, pcm: bytes) -> None:  # noqa: ARG002
+            self.pushed += 1
+
+    with _stub_audio_out(win_vm=RecordingVM,
+                         win_pick=lambda patterns=None: (11, "Fake", 48000),
+                         linux_factory=lambda _c, _s: RecordingPwCat()):
         eng = Engine(cfg=cfg, direction="mine", source="mic", sinks=set(),
                      events=EngineEvents(on_status=lambda lvl, msg: None))
         eng._setup_virtualmic(cfg.output["audio"])
@@ -363,8 +476,6 @@ def test_engine_marks_sentence_boundaries():
         eng._on_text(TextDelta(confirmed="你好", pending="", is_final=True, source=""))
         for _ in range(3):                       # 第二句：3 段音频
             eng._on_audio(b"\x00\x02" * 240)
-    finally:
-        E.pick_output_device, E.VirtualMic = orig_pick, orig_vm
 
     assert vm.pushed == 6, f"音频段数不对：{vm.pushed}"
     assert vm.marks == 1, f"句尾标记数不对：{vm.marks}（应在第二句起始处封一次）"

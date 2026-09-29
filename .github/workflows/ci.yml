@@ -31,7 +31,14 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-windows.txt
+
+      # ★ 依赖门禁：这几个是 **Windows 独占**依赖，缺了不会报错，只会静默少两条腿
+      #   （openvr 没了 → SteamVR 手腕屏 unavailable；pyaudiowpatch 没了 →
+      #    设备枚举抛异常被 devices.py 吞成空列表，「VRChat 音频」下拉空空如也）。
+      #   这正是 PR #4 审查发现的漏检类型（文件写对了、没人装），所以做成红灯门禁。
+      - name: 断言 Windows 独占依赖可导入
+        run: python -c "import openvr, pyaudiowpatch; print('Windows 独占依赖 OK')"
 
       - name: 语法检查（不导入，只编译）
         run: python -m compileall -q vlt scripts tests
@@ -79,8 +86,12 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-windows.txt
           python -m pip install "pyinstaller>=6.6"
+
+      # ★ 同 tests job：打包前先确认发布用得到的两条腿真的装上了
+      - name: 断言 Windows 独占依赖可导入
+        run: python -c "import openvr, pyaudiowpatch; print('Windows 独占依赖 OK')"
 
       - name: 打包（跳过需要真 key 的自检）
         run: python scripts/build_exe.py --no-verify
@@ -93,3 +104,108 @@ jobs:
           $len = (Get-Item $exe).Length
           Write-Host ("打包成功：{0:N1} MB" -f ($len / 1MB))
           if ($len -lt 20MB) { Write-Error "体积异常，打包不完整"; exit 1 }
+
+      # ★ 平台隔离断言：Windows 产物里不允许出现 Linux 独占实现
+      #   （PipeWire 采集/虚拟声卡、自建 OpenXR 手腕屏）。判据是解包后的字节码，
+      #   不是搜 exe 原始字节 —— PYZ 是 zlib 压缩的，直接搜永远搜不到。
+      #   这条要求不能靠人记，所以做成了红灯门禁，见 docs/平台约束记录.md 第三节。
+      - name: 断言平台隔离（不含 Linux 独占实现）
+        run: python scripts/check_platform_purity.py dist/VRChatLiveTranslate.exe --platform windows
+
+  # ------------------------------------------------------------------
+  # Linux 侧：跑同一批离线测试。
+  #
+  # ⚠️ 与 Windows job 的三个关键差异（都写在下面的步骤里）：
+  #   1) GitHub 的 ubuntu runner **没有显示器** —— 界面测试（Tk）必须挂在 xvfb 下跑，
+  #      否则 tkinter 起不了窗口直接失败（Windows runner 自带桌面会话，所以那边不用）。
+  #   2) 必须装**中日韩字体** —— 离线渲染手腕屏贴图要走 fontconfig 找字体，
+  #      缺了会让 test_wrap / test_i18n 红（本项目在 Linux 上实测踩过这个）。
+  #   3) 这里**不会**有 PipeWire、OpenXR 运行时、音频设备、API key ——
+  #      对应代码必须走优雅降级分支。为此 `vlt/` 里有结构性防呆
+  #      （`_test_process_guard()`：测试进程拒绝声明虚拟声卡 / 拒绝建 OpenXR 会话），
+  #      所以跑测试**绝不会**去碰宿主的音频图或 XR 运行时。
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: 装系统依赖
+        run: |
+          sudo apt-get update
+          # xvfb        —— 无显示器下给 Tk 一个虚拟 X
+          # fonts-noto-cjk —— 离线渲染中日韩贴图要 fontconfig 能找到字体
+          # tk          —— tkinter 的运行时（setup-python 的解释器不一定自带 _tkinter）
+          # libportaudio2 —— sounddevice 的运行时
+          # libegl1 / libwayland-client0 —— 手腕屏后端 import 期就需要（真建会话会被防呆拦住）
+          sudo apt-get install -y --no-install-recommends \
+            xvfb fonts-noto-cjk tk libportaudio2 libegl1 libwayland-client0
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-linux.txt
+
+      - name: 语法检查（不导入，只编译）
+        run: python -m compileall -q vlt scripts tests
+
+      - name: 凭据扫描
+        run: python scripts/check_no_secrets.py --once
+
+      - name: 检查 tkinter 可用性
+        id: tk
+        run: |
+          if python -c "import tkinter" 2>/dev/null; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            echo "::warning::当前解释器没有 tkinter → 界面相关测试将跳过（非静默，见本步骤）"
+          fi
+
+      - name: 跑离线测试
+        shell: bash
+        run: |
+          set -o pipefail
+
+          # 不进 CI 的（都写清理由，别让「跳过」变成静默）：
+          #   test_engine —— 要真 API key 打真会话、还要联网，属本机实测项
+          ALWAYS_SKIP="tests/test_engine.py"
+          # 需要真实窗体的（无 xvfb 时跳过；有 xvfb 就跑）
+          GUI_TESTS="tests/test_api_key_gui.py tests/test_config_save.py tests/test_gui_rows.py \
+                     tests/test_i18n.py tests/test_overlay_conversation.py tests/test_sponsor.py \
+                     tests/test_textin.py tests/test_update_dialog.py tests/test_vrchat_capture.py"
+
+          fail=0
+          for t in tests/test_*.py; do
+            if [[ " $ALWAYS_SKIP " == *" $t "* ]]; then
+              echo "::notice::$t 已跳过（需要真实 API key / 网络）"
+              continue
+            fi
+            if [[ "${{ steps.tk.outputs.ok }}" != "1" && " $GUI_TESTS " == *" $t "* ]]; then
+              echo "::notice::$t 已跳过（当前解释器无 tkinter）"
+              continue
+            fi
+            echo "::group::$t"
+            if xvfb-run -a python "$t"; then
+              echo "PASS $t"
+            else
+              echo "::error file=$t::测试失败（见本组日志）"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  # ------------------------------------------------------------------
+  # Linux AppImage：构建 + **独立验收**。
+  #
+  # 步骤本体在 **[appimage.yml](appimage.yml)**（可复用 workflow）—— 因为打 tag 发布时
+  # 要用**同一份**（release.yml 也是 `uses:` 它）。构建口径只留一处：这边的系统依赖清单、
+  # Tcl/Tk 版本进 cache key、构建→验收的顺序，抄第二份迟早只改一处（#12 的教训）。
+  # 这里只保留「CI 里怎么排」：先跑完 Linux 测试，再构建 AppImage，失败即红灯。
+  appimage:
+    needs: linux-tests
+    uses: ./.github/workflows/appimage.yml

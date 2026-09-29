@@ -27,15 +27,16 @@ from tkinter import messagebox, ttk
 import yaml
 
 from . import __version__, crashlog, i18n, tts, update_check
-from .config import Direction, DEFAULT_CONFIG, load_api_key, load_config
+from .config import Direction, _as_str_map, DEFAULT_CONFIG, load_api_key, load_config
 from .config_io import (
     _fmt_scalar,
     _write_config_text,
     _yaml_set_in_text,
+    _yaml_set_mapping,
     _yaml_set_or_create,
 )
 from .i18n import t
-from .output.overlay import OverlayConfig, WristOverlay
+from .output.overlay import OverlayConfig
 from .devices import (
     DeviceInfo,
     enumerate_audio_out_devices,
@@ -47,9 +48,19 @@ from .engine import Engine, EngineEvents
 from .room.client import RoomClient
 from .room.model import ConnectionState, RoomConfig, RoomMessage
 from .room.publisher import SourcePublisher, should_publish
+from .engine import (
+    INPUT_GATE_MAX_DB,
+    INPUT_GATE_MIN_DB,
+    LEVEL_FLOOR_DB,
+    Engine,
+    EngineEvents,
+    input_gate_settings,
+)
 from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
 
 from .paths import APP_DIR, BUNDLE_DIR
+from . import platform
+from .platform import IS_WINDOWS
 
 ROOT = APP_DIR
 
@@ -59,11 +70,70 @@ ROOT = APP_DIR
 VOICE_PREVIEW_TEXT = "你好，这是我的音色试听。"
 VOICE_PREVIEW_MODEL = "qwen3-tts-flash"
 
+# 界面字体族：**不能写死** "Microsoft YaHei UI"。
+# 那个族在 Linux 上不存在，Tk 会静默回落到没有中日韩字形的 `fixed` ——
+#   1) 中文靠逐字 fontconfig 回落渲染，实测**每次 measure() 要 0.3 秒**，
+#      界面构建要把 4 种语言的控件全量一遍测量，慢到看起来像卡死
+#      （tests/test_i18n.py 与 test_update_dialog.py 就是这样超时的）；
+#   2) 观感也不对（字形族不一致）。
+# 所以运行时按「这台机器真的有什么」挑一个（见 _apply_ui_font）。
+_FONT_CANDIDATES = (
+    "Microsoft YaHei UI", "Microsoft YaHei",                  # Windows
+    "Noto Sans CJK SC", "Source Han Sans CN", "Noto Sans SC",  # Linux（Noto / 思源）
+    "WenQuanYi Micro Hei", "Noto Sans", "DejaVu Sans",         # 再兜一层
+)
+_ui_family: str | None = None
+
+# 下面这组是**占位**默认值，`_apply_ui_font()` 会在建 Tk root 之后按平台重绑。
 FONT = ("Microsoft YaHei UI", 11)          # 译文（主）
 FONT_SMALL = ("Microsoft YaHei UI", 9)     # 原文（辅，小一号）
 FONT_META = ("Microsoft YaHei UI", 8)
 FONT_UI = ("Microsoft YaHei UI", 9)        # 控件文字
 FONT_STATUS = ("Microsoft YaHei UI", 8)    # 状态栏
+FONT_BOLD_SM = ("Microsoft YaHei UI", 8, "bold")    # 分区小标题
+FONT_BOLD_MD = ("Microsoft YaHei UI", 12, "bold")   # 弹窗小标题
+FONT_BOLD_LG = ("Microsoft YaHei UI", 13, "bold")   # 弹窗大标题（赞助）
+
+
+def resolve_ui_family(root) -> str:
+    """挑一个这台机器上**真实存在**的界面字体族。
+
+    先按候选表找；都没有就退回 Tk 自己的默认字体族（`TkDefaultFont` 的 actual family），
+    保证至少是一个有字形的真字体，而不是 `fixed`。
+    """
+    global _ui_family
+    if _ui_family:
+        return _ui_family
+    try:
+        available = {str(f).strip().lower() for f in tkfont.families(root)}
+    except Exception:  # noqa: BLE001 — 拿不到列表就退回默认
+        available = set()
+    for cand in _FONT_CANDIDATES:
+        if cand.lower() in available:
+            _ui_family = cand
+            return cand
+    try:
+        _ui_family = str(tkfont.nametofont("TkDefaultFont").actual("family"))
+    except Exception:  # noqa: BLE001
+        _ui_family = "sans-serif"
+    return _ui_family
+
+
+def _apply_ui_font(root) -> None:
+    """按当前平台重绑界面字体常量（在建 Tk root 之后、建任何控件之前调用）。"""
+    global FONT, FONT_SMALL, FONT_META, FONT_UI, FONT_STATUS
+    global FONT_BOLD_SM, FONT_BOLD_MD, FONT_BOLD_LG
+    fam = resolve_ui_family(root)
+    FONT = (fam, 11)
+    FONT_SMALL = (fam, 9)
+    FONT_META = (fam, 8)
+    FONT_UI = (fam, 9)
+    FONT_STATUS = (fam, 8)
+    FONT_BOLD_SM = (fam, 8, "bold")
+    FONT_BOLD_MD = (fam, 12, "bold")
+    FONT_BOLD_LG = (fam, 13, "bold")
+
+
 MAX_BUBBLES = 500
 
 # ---- 统一配色：深灰 + 蓝（明度阶梯：聊天区最暗 → 面板次之 → 控件最亮） ----
@@ -124,6 +194,16 @@ def _yaml_quote(s) -> str:  # noqa: ANN001, ANN202
     """
     txt = "" if s is None else str(s)
     return '"' + txt.replace("\\", "\\\\").replace('"', '\\"') + '"'
+# ---- 设置弹窗（分页）----
+# 宽度**固定**：每页的长说明都按 SETTINGS_WRAP 换行，于是各语言的窗宽一致，
+# 不会因为俄语文案长就忽然变宽（也不再靠「窗口自然撑大 → 超出屏幕」）。
+SETTINGS_WIDTH = 760
+SETTINGS_WRAP = 660            # 长说明的换行宽 = 窗宽 - 左右留白(40) - 滚动条(~12) - 余量
+SETTINGS_MIN_H = 360           # 再小的屏也至少给这么多高（内容靠页面滚动兜底）
+SETTINGS_MAX_H = 900           # 上限：1080p 屏（可用高约 1040）也必须整窗看得见
+SETTINGS_CHROME_H = 66         # tab 条 + 页面上下留白：算窗高时在内容高度上加这一份
+# 每页内容 frame 的左右内边距（内容区位置固定，不随标签条动）
+TAB_INSET_X = 20
 
 
 def _sponsor_qr_specs() -> list[tuple[str, Path]]:
@@ -165,8 +245,16 @@ def updater_env() -> dict[str, str]:
     更新器里 `start` 出来的**新版本**就会带着 `_PYI_PARENT_PROCESS_LEVEL=1` 启动 →
     引导器以为无需自解包 → 直接起不来（不写日志、无窗口、只留一个空转进程）。
     用户看到的症状是「点完更新、程序自己关了、再没打开」。
+
+    ⚠️ Linux/AppImage 是**同一类坑的另一半**：AppImage 运行时看到 `APPDIR` 已经存在就
+    **不会重新挂载**（它以为自己是「已被解包的子进程」），新进程会去用父进程那个马上要随
+    父进程消失的挂载点 —— 症状一样是「更新完没再打开」。所以 `APPIMAGE` / `APPDIR` /
+    `OWD` / `ARGV0` 也要剥掉，让新 AppImage 干干净净地自己挂载。
+    （`PYTHONPATH` 不清：AppRun 是**追加**而不是覆盖继承值，新挂载的路径排在前面，
+    清掉反而会抹掉用户自己设的东西。）
     """
-    return {k: v for k, v in os.environ.items() if not k.startswith(("_MEI", "_PYI_"))}
+    strip = ("_MEI", "_PYI_", "APPIMAGE", "APPDIR", "OWD", "ARGV0")
+    return {k: v for k, v in os.environ.items() if not k.startswith(strip)}
 
 
 def _source_name(code: str | None) -> str:
@@ -197,6 +285,24 @@ def _lang_key(shown: str, table: dict[str, str | None]) -> str | None:
     return None
 
 
+_char_width_cache: dict[tuple, int] = {}
+
+
+def _font_spec_key(font_spec) -> object:
+    """把字体规格压成可哈希的缓存 key（跨平台容错）。
+
+    `font_spec` 可能是 tuple、字符串（字体名）、`tkfont.Font`，或 —— 在 Linux 上 ——
+    `widget.cget("font")` 返回的 `_tkinter.Tcl_Obj`（不可迭代，直接 `tuple()`
+    会抛 `TypeError: '_tkinter.Tcl_Obj' object is not iterable`）。
+    """
+    if isinstance(font_spec, str):
+        return font_spec
+    try:
+        return tuple(font_spec)
+    except TypeError:
+        return str(font_spec)
+
+
 def _char_width_for(text: str, font_spec, minimum: int = 0) -> int:
     """把「这段文字需要多宽」换算成 Tk 的**字符宽度单位**（给 width= 用）。
 
@@ -205,14 +311,24 @@ def _char_width_for(text: str, font_spec, minimum: int = 0) -> int:
     「訳文の文字サイズ」自然宽 100px，按 8 个字符只申请到 67px，屏幕上只剩「訳文の文字」。
     中文同样中招（「译文字号」需 52px、按 6 字符只给 46px），只是裁得少不容易看出来。
     这里用字体的真实 measure 换算，并留 1 个字符余量。
+
+    结果**带缓存**：切界面语言会把整套控件重建一遍，同一个词条会被反复测量；
+    而一次 `measure()` 在字体需要 fontconfig 回落的机器上要几百毫秒
+    （见上方 _FONT_CANDIDATES 的说明），不缓存会明显卡顿。
     """
+    key = (text, _font_spec_key(font_spec), minimum)
+    hit = _char_width_cache.get(key)
+    if hit is not None:
+        return hit
     try:
         f = tkfont.Font(font=font_spec)
         avg = max(1, f.measure("0"))
         need = -(-f.measure(text) // avg) + 1     # 向上取整 + 1 字符余量
     except Exception:  # noqa: BLE001 — 量不出来就退回字符数（至少不比改动前差）
         need = len(text) + 1
-    return max(minimum, need)
+    out = max(minimum, need)
+    _char_width_cache[key] = out
+    return out
 
 
 def _combo_width(names, minimum: int = 9, font_spec=None) -> int:
@@ -222,6 +338,24 @@ def _combo_width(names, minimum: int = 9, font_spec=None) -> int:
     """
     f = font_spec or FONT_UI
     return max(minimum, max((_char_width_for(str(n), f) for n in names), default=0))
+
+
+def combo_values(combo) -> list[str]:
+    """读回 ttk.Combobox 的候选值（跨平台安全）。
+
+    ⚠️ 坑（实测）：`combo.cget("values")` 的**返回类型依平台而变** ——
+    Windows 上 Tk 返回 tuple（可直接 `list()`），Linux 上返回
+    `_tkinter.Tcl_Obj`（不可迭代，`list()` 直接抛
+    `TypeError: '_tkinter.Tcl_Obj' object is not iterable`）。
+    这在设备下拉里是**真会走到**的路径（`_on_device_change` 要按下标取回原始设备名），
+    不是只影响测试。
+
+    用 Tk 自己的 `splitlist` 归一化：tuple / 列表 / 空格分隔的字符串 / Tcl_Obj 都能吃。
+    """
+    try:
+        return [str(v) for v in combo.tk.splitlist(combo.cget("values"))]
+    except Exception:  # noqa: BLE001 — 读不到就当空，别让「保存设备选择」这一步炸掉
+        return []
 
 
 def round_rect(cv: tk.Canvas, x1, y1, x2, y2, r, **kw):
@@ -292,6 +426,67 @@ def _is_unsupported_voice_err(msg: str) -> bool:
     return any(m in low for m in _UNSUPPORTED_VOICE_MARKERS)
 
 
+# ---------------------------------------------------------------- 专有词库的文本格式
+# 界面上一行一条：`原文=译名`。为什么用这个格式而不是 JSON / YAML：
+#   · 用户是主播，不是程序员 —— 敲 `原文=译名` 不需要懂缩进和引号；
+#   · 一行一条，删一条就删一行，改坏了也不影响别人（JSON 少个逗号整段报废）；
+#   · 与 config.yaml 里的映射表一一对应，肉眼能对上。
+# 解析纪律：以 `#` 开头的行是注释、空行忽略；**只按第一个等号切**，
+# 这样译名里带 `=`（或中文全角 `＝`）也不会切错。
+
+def _iter_glossary_lines(text: str):
+    """逐行分类：产出 `(行号, 原文, 译名, 忽略原因, 原样内容)`。
+
+    - 空行 / `#` 注释 = 正常跳过（原因 `""`）
+    - 原文/译名为 `None` 且原因非空 = 用户**写了内容但格式看不懂** —— 以前这类行被静默丢掉，
+      用户写了 `原文：译名` 只会觉得「保存没反应」，所以要能报出来。
+    """
+    for lineno, raw in enumerate((text or "").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            yield lineno, None, None, "", line
+            continue
+        if "=" in line:
+            src, _, tgt = line.partition("=")
+        elif "＝" in line:
+            # 容忍全角等号（中文输入法下极易打出来），否则用户会以为「保存没反应」
+            src, _, tgt = line.partition("＝")
+        else:
+            yield lineno, None, None, "缺少等号", line
+            continue
+        src, tgt = src.strip(), tgt.strip()
+        if not (src and tgt):
+            yield lineno, None, None, "等号有一侧是空的", line
+            continue
+        yield lineno, src, tgt, "", line
+
+
+def _parse_glossary_lines(text: str) -> dict[str, str]:
+    """把界面文本框的内容解析成 {原文: 译名}（纯函数，离线可测）。
+
+    重复的原文以**后出现的为准**（用户在下面写一条更具体的覆盖上面那条，
+    与「后写覆盖先写」的直觉一致）。
+    """
+    out: dict[str, str] = {}
+    for _lineno, src, tgt, _reason, _raw in _iter_glossary_lines(text):
+        if src:
+            out[src] = tgt
+    return out
+
+
+def _glossary_line_issues(text: str) -> list[tuple[int, str]]:
+    """格式看不懂的行 `[(行号, 原样内容)]`（纯函数，离线可测）。
+
+    界面拿它给用户一句提示：以前这些行是**静默**丢掉的，用户很容易以为「保存没反应」。
+    """
+    return [(n, raw) for n, src, _tgt, reason, raw in _iter_glossary_lines(text) if reason]
+
+
+def _glossary_to_lines(mapping: dict[str, str] | None) -> list[str]:
+    """反向：{原文: 译名} → 界面文本框的行（保持配置里的顺序）。"""
+    return [f"{k}={v}" for k, v in (mapping or {}).items()]
+
+
 class TranslationGUI:
     """主界面。headless=True 时不创建 Tk 窗口（给 --self-test / --self-test-dual 用）。"""
 
@@ -302,7 +497,7 @@ class TranslationGUI:
         self._engine_dirs: list[str] = []      # 与 _engines 一一对应
         # 手腕屏由**界面**持有（不是某个引擎）：手腕上只该有一块屏，内容镜像聊天区，
         # 而聊天区本来就在界面这一层（两个方向的文字都汇到这里）。
-        self._overlay_out: WristOverlay | None = None
+        self._overlay_out: Any | None = None
         self._specs: list[tuple] = []
         self._sinks: set[str] = set()
         self._pending_starts = 0
@@ -355,11 +550,26 @@ class TranslationGUI:
         self._updated_hint_win: tk.Toplevel | None = None
         self._updated_hint_job: str | None = None
 
+        # 设置弹窗（分页）：headless 模式下不建 UI，这几个保持空/默认值
+        self._settings_nb: ttk.Notebook | None = None
+        # 每页一份 (滚动画布, 内容 frame, 滚动条)，顺序 = tab 顺序（滚轮按当前页取用）
+        self._settings_pages: list[tuple[tk.Canvas, ttk.Frame, ttk.Scrollbar]] = []
+        self._settings_size: tuple[int, int] = (SETTINGS_WIDTH, SETTINGS_MIN_H)
+
         # 设备选择
         self._mic_names: list[str] = []
         self._loopback_names: list[str] = []
         self._audio_out_names: list[str] = []
         self._device_scan_pending = False
+
+        # 输入门限（只作用于 VRChat 输出 = 「别人说话」那条腿）
+        self._gate_level_canvas: tk.Canvas | None = None
+        self._gate_level_lbl: ttk.Label | None = None
+        self._gate_level_hold = LEVEL_FLOOR_DB     # 峰值保持：读数跳动时靠它平滑
+        self._gate_level_tick = 0                  # _poll 节流（50ms → 100ms 刷一次）
+        self._gate_save_job: str | None = None
+        self._gate_hold_ms = 500.0                 # 只从配置读（界面不暴露，避免旋钮过多）
+        self._gate_preroll_ms = 250
 
         self._cfg = load_config(require_key=False)   # 没填 key 也要能起界面（否则没法填 key）
         # 界面语言解析顺序：用户选过（ui.lang）→ 系统语言 → zh。
@@ -394,6 +604,7 @@ class TranslationGUI:
         # Tk 会从最后打包的控件开始裁（实测 860 时目标语言下拉被裁到 40px）。
         self._root.minsize(928, 460)
         self._root.configure(bg=PANEL)
+        _apply_ui_font(self._root)   # 必须先于 _apply_theme：字体族要按平台重绑
         self._set_window_icon()      # 标题栏/任务栏图标（失败只留痕，不影响启动）
 
         self._apply_theme()          # 必须先于任何控件创建
@@ -477,11 +688,13 @@ class TranslationGUI:
         style.configure("Status.TLabel", font=FONT_STATUS)
         # 分区小标题（设置弹窗里的「API KEY / 音频设备」）：小一号、暗色、加粗
         style.configure("Section.TLabel", foreground=TEXT_DIM,
-                        font=("Microsoft YaHei UI", 8, "bold"))
+                        font=FONT_BOLD_SM)
         # API key 状态槽位里的两个控件：**已配置 → 纯展示标签**（「⚙ 设置」是改 key 的入口，
         # 标签不可点）；**未配置 → 可点按钮**，点击用默认浏览器打开千问云开通页（QIANWEN_SIGNUP_URL）。
         style.configure("Chip.TLabel", font=FONT_STATUS, foreground=TEXT_DIM)
         style.configure("ChipWarn.TLabel", font=FONT_STATUS, foreground=COLOR_WARN)
+        # 设置弹窗里「保存失败」这类就地提示：警示色，但只是文字（不抢按钮的视觉重量）
+        style.configure("Warn.TLabel", font=FONT_STATUS, foreground=COLOR_WARN)
         # 未配置按钮：暗橙底 + 警示橙字，悬停/按下亮一档 —— 警示色系但不刺眼。
         style.configure("ChipWarn.TButton", font=FONT_STATUS, foreground=COLOR_WARN,
                         background="#33291c", borderwidth=0, focusthickness=0,
@@ -551,18 +764,54 @@ class TranslationGUI:
         style.map("Vertical.TScrollbar",
                   background=[("pressed", ACCENT_ACTIVE), ("active", SURFACE_HOVER)])
 
+        # 设置弹窗的分页标签（Notebook）：clam 的默认 tab 是浅灰渐变，
+        # 深色界面里就是一块亮斑（和「ttk.Entry 默认白底」同一类坑），必须逐状态配色。
+        # tabmargins 左侧必须是 **0**：标签条的基准是 Notebook **外框**左边 ——
+        # 也就是内容区那条左边框竖线（贯穿整窗、也是用户会拿来对的那条线）。
+        # ⚠️ 别把它对齐到「页内分隔线的左端」：那条线本身被页面 20px 内边距缩进过，
+        #    拿它当基准会让整排标签比内容区左边框右缩 22px（截图实测过，正是用户说的「没对齐」）。
+        style.configure("TNotebook", background=PANEL, bordercolor=BORDER,
+                        darkcolor=PANEL, lightcolor=PANEL, tabmargins=(0, 6, 10, 0))
+        tab_pad = (16, 7)
+        style.configure("TNotebook.Tab", font=FONT_UI, padding=tab_pad,
+                        background=PANEL, foreground=TEXT_DIM, bordercolor=BORDER,
+                        lightcolor=PANEL, darkcolor=PANEL, focuscolor=PANEL)
+        # padding 必须逐状态映射成同一个值：只写 configure 的默认值时，selected/active
+        # 会回落成 clam 自己的 tab 布局尺寸，选中标签的外框就比未选中的矮一截。
+        # lightcolor/darkcolor/bordercolor 同理——任一状态回落成空值都会画出亮边。
+        # 于是选中态**只靠背景色 + 前景色**区分，三态尺寸完全一致。
+        # 注意两点实测坑：① ttk 取「第一个匹配的状态规格」，所以默认态必须排在最后；
+        # ② 默认态**不能**写成 ("", …)——Tk 8.6 里空规格匹配任意状态，会把 selected 盖掉。
+        style.map("TNotebook.Tab",
+                  padding=[("selected", tab_pad), ("active", tab_pad),
+                           ("!selected !active", tab_pad)],
+                  background=[("selected", SURFACE), ("active", SURFACE_HOVER),
+                              ("!selected !active", PANEL)],
+                  foreground=[("selected", TEXT), ("active", TEXT),
+                              ("!selected !active", TEXT_DIM)],
+                  lightcolor=[("selected", SURFACE), ("active", SURFACE_HOVER),
+                              ("!selected !active", PANEL)],
+                  darkcolor=[("selected", SURFACE), ("active", SURFACE_HOVER),
+                             ("!selected !active", PANEL)],
+                  bordercolor=[("selected", BORDER), ("active", BORDER),
+                               ("!selected !active", BORDER)])
+
     def _set_window_icon(self) -> None:
         """窗口 / 任务栏图标。资源走 bundle_dir()（源码 = 仓库根，打包后 = _MEIPASS）。
 
-        Windows 上优先 `.ico` + `iconbitmap(default=...)`：它同时管标题栏和**任务栏**；
-        没有 .ico 时退回 `iconphoto(png)`。整段失败只打一行日志，绝不影响启动。
+        **`.ico` 只在 Windows 上优先**：`iconbitmap` 是 Windows/经典 Tk 的接口，
+        Linux 的 Tk 8.6 只接受 `.xbm`，喂 `.ico` 会抛
+        `TclError: wrong # args: should be "wm iconbitmap window ?bitmap?"` ——
+        每次都刷一行警告。Linux 上直接用 `iconphoto(png)`（跨平台、走现代窗口管理器）。
+        整段失败只打一行日志，绝不影响启动。
         """
         assets = BUNDLE_DIR / "assets"
         try:
-            ico = assets / "app.ico"
-            if ico.exists():
-                self._root.iconbitmap(default=str(ico))
-                return
+            if IS_WINDOWS:
+                ico = assets / "app.ico"
+                if ico.exists():
+                    self._root.iconbitmap(default=str(ico))
+                    return
             png = assets / "app.png"
             if png.exists():
                 self._icon_img = tk.PhotoImage(file=str(png))   # 留引用防 GC
@@ -574,7 +823,13 @@ class TranslationGUI:
                   flush=True)
 
     def _apply_dark_titlebar(self, win=None) -> None:
-        """Windows 标题栏变深色；老系统不支持就静默跳过（不能因此崩掉）。"""
+        """Windows 标题栏变深色；老系统不支持就静默跳过（不能因此崩掉）。
+
+        Linux 上直接返回：深色标题栏由桌面环境/主题决定，没有 `dwmapi` 这套东西，
+        调 `ctypes.windll` 连属性都不存在。
+        """
+        if not IS_WINDOWS:
+            return
         try:
             import ctypes
             w = win if win is not None else self._root
@@ -1005,9 +1260,10 @@ class TranslationGUI:
             ("pos_x", t("位置X"), -0.30, 0.30, 0.005, "m"),
             ("pos_y", t("位置Y"), -0.30, 0.30, 0.005, "m"),
             ("pos_z", t("位置Z"), -0.30, 0.30, 0.005, "m"),
-            ("rot_x", t("俯仰X"), -90.0, 90.0, 1.0, "°"),
-            ("rot_y", t("偏航Y"), -90.0, 90.0, 1.0, "°"),
-            ("rot_z", t("翻滚Z"), -90.0, 90.0, 1.0, "°"),
+            # 旋转三轴定义域是整圈 ±180°：卡到 ±90° 拖不到反戴/侧戴等姿态，还会把手写的 180 夹回 90
+            ("rot_x", t("俯仰X"), -180.0, 180.0, 1.0, "°"),
+            ("rot_y", t("偏航Y"), -180.0, 180.0, 1.0, "°"),
+            ("rot_z", t("翻滚Z"), -180.0, 180.0, 1.0, "°"),
             ("width_m", t("大小"), 0.05, 0.80, 0.01, "m"),
             ("curvature", t("弯曲"), 0.0, 0.50, 0.01, ""),
             ("alpha", t("透明度"), 0.10, 1.00, 0.05, ""),
@@ -1103,12 +1359,20 @@ class TranslationGUI:
 
     # ---------------------------------------------------------------- 设置弹窗（低频设置）
     def _build_settings_dialog(self) -> None:
-        """低频设置收进弹窗：API key + 音频设备。
+        """低频设置收进弹窗：**分页**（常规 / 音频 / 词库 / 关于）+ 固定尺寸 + 每页可滚。
 
-        为什么不在主界面：这两组是「装好一次、几乎不动」的设置，常驻只会让
-        主界面变成 4 行控件堆叠（改造前的样子）。弹窗**先建好再 withdraw**——
-        控件属性（_key_entry / _mic_combo 等）必须在弹窗不可见时也随即可用，
-        设备扫描和自动化测试都直接访问它们。
+        为什么不在主界面：这些是「装好一次、几乎不动」的设置，常驻只会让主界面变成
+        4 行控件堆叠（改造前的样子）。
+
+        为什么必须分页（改造前的实测病）：8 个分区一竖列堆下来弹窗高 **1485px**，
+        从 y=352 起 ⇒ 底边落到 1837，2560×1600 的屏都装不下 —— 「日志」「软件更新」
+        两区整个在屏幕外；而弹窗 `resizable(False, False)` 且没有滚动条，
+        所以不是「难找」，是**真的够不着**（1080p 屏只会更糟）。分页后每页最高约 400px，
+        整窗按内容实测 + 两道上限（SETTINGS_MAX_H / 屏高-90）定高，真装不下时页面能滚。
+
+        弹窗**先建好再 withdraw**，且四页的控件**一次性全建齐**（不做「切到那页才建」的
+        懒加载）：控件属性（_key_entry / _mic_combo / _glossary_text …）必须在弹窗不可见时
+        也随即可用 —— 设备扫描、更新检查回填和自动化测试都直接访问它们。
         """
         win = tk.Toplevel(self._root)
         win.title(t("设置"))
@@ -1118,32 +1382,133 @@ class TranslationGUI:
         win.withdraw()
         win.protocol("WM_DELETE_WINDOW", self._close_settings)
         win.bind("<Escape>", lambda _e: self._close_settings())
+        # 滚轮绑在弹窗上（toplevel 是页里每个控件的 bindtag）：指针停在页内哪儿都能滚当前页
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            win.bind(seq, self._on_settings_wheel)
         self._settings_win = win
         self._apply_dark_titlebar(win)
 
-        body = ttk.Frame(win, padding=(18, 16, 18, 14))
-        body.pack(fill=tk.BOTH, expand=True)
+        nb = ttk.Notebook(win, style="TNotebook")
+        nb.pack(fill=tk.BOTH, expand=True)
+        self._settings_nb = nb
 
-        # ---- 界面语言 ----
-        # 本批只做到「重启后生效」：控件文案全在建窗时按当前语言取词，
-        # 运行中换语言不重建树（正在进行的翻译/设备列表状态绝不受影响）。
-        ttk.Label(body, text=t("界面语言"), style="Section.TLabel").pack(anchor=tk.W)
-        lang_row = ttk.Frame(body)
-        lang_row.pack(fill=tk.X, pady=(8, 4))
-        self._ui_lang_names = dict(i18n.available_languages())   # code → 母语名称
-        self._ui_lang_var = tk.StringVar(
-            value=self._ui_lang_names.get(i18n.current_language(), "简体中文"))
-        self._ui_lang_combo = ttk.Combobox(
-            lang_row, values=list(self._ui_lang_names.values()),
-            state="readonly", width=14, textvariable=self._ui_lang_var)
-        self._ui_lang_combo.pack(side=tk.LEFT)
-        self._ui_lang_combo.bind("<<ComboboxSelected>>", self._on_ui_lang_change)
-        self._ui_lang_note = ttk.Label(body, text=t("界面语言在重启程序后生效"),
-                                       style="Muted.TLabel")
-        self._ui_lang_note.pack(anchor=tk.W)
+        # 分页口径 = 「我要改什么」→ 去哪页：
+        #   常规 = 填 key / 换界面语言；音频 = 声音的进出（设备 · 门限 · 音色）；
+        #   词库 = 专有名词怎么译；关于 = 版本与日志（出问题时给维护者的东西）
+        self._build_settings_general(self._settings_page(nb, t("常规")))
+        self._build_settings_audio(self._settings_page(nb, t("音频")))
+        self._build_settings_glossary(self._settings_page(nb, t("词库")))
+        self._build_settings_about(self._settings_page(nb, t("关于")))
+        self._size_settings_window()
 
-        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+    def _settings_page(self, nb: ttk.Notebook, title: str) -> ttk.Frame:
+        """给 Notebook 加一页，返回该页**放控件的内容 frame**（外面套一层可滚动画布）。
 
+        每页都套滚动是兜底、不是常态：窗口高度是固定的（保证整窗在屏幕内），
+        而文案长度随界面语言变（俄语普遍更长）—— 装不下时必须能滚，
+        绝不能让 Tk 把内容裁掉。滚动条只在**真装不下**时出现（_sync_page_scrollbar）。
+        """
+        tab = ttk.Frame(nb)
+        nb.add(tab, text=title)
+        canvas = tk.Canvas(tab, bg=PANEL, highlightthickness=0, bd=0)
+        sb = ttk.Scrollbar(tab, orient=tk.VERTICAL, style="Vertical.TScrollbar",
+                           command=canvas.yview)
+        inner = ttk.Frame(canvas, padding=(TAB_INSET_X, 16, TAB_INSET_X, 16))
+        canvas.configure(yscrollcommand=sb.set)
+        slot = canvas.create_window((0, 0), window=inner, anchor="nw")
+        # 只打包可伸长的 canvas；滚动条要出现时用 before=canvas 插到它左边（右侧）——
+        # 打包顺序恒为「滚动条先、canvas 后」，空间不够时被压缩的才是 canvas，
+        # 反过来滚动条会被挤成 1px（按钮行上踩过同一个坑）。
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._settings_pages.append((canvas, inner, sb))
+
+        def _on_inner(_e=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 1, 1))
+            self._sync_page_scrollbar(canvas, inner, sb)
+
+        def _on_canvas(e) -> None:
+            # 内容宽 = 画布宽：fill=X 的控件（输入框/词库框）才撑得开，也不会横向溢出
+            canvas.itemconfigure(slot, width=e.width)
+            self._sync_page_scrollbar(canvas, inner, sb)
+
+        inner.bind("<Configure>", _on_inner)
+        canvas.bind("<Configure>", _on_canvas)
+        return inner
+
+    def _sync_page_scrollbar(self, canvas: tk.Canvas, inner: ttk.Frame,
+                             sb: ttk.Scrollbar) -> None:
+        """内容比可视高度高才显示滚动条；装得下就收起来（多数语言根本用不上）。"""
+        have = canvas.winfo_height()
+        if have <= 1:
+            return          # 弹窗还 withdraw 着、没布局过：等 <Configure> 或打开时再判
+        if inner.winfo_reqheight() > have + 1:
+            if sb.winfo_manager() != "pack":
+                sb.pack(side=tk.RIGHT, fill=tk.Y, before=canvas)
+        elif sb.winfo_manager() == "pack":
+            sb.pack_forget()
+
+    def _sync_settings_pages(self) -> None:
+        """弹窗显示出来后补一次滚动条判定：建窗时它 withdraw 着，那时量不到可视高度。"""
+        try:
+            self._settings_win.update_idletasks()
+            for canvas, inner, sb in self._settings_pages:
+                self._sync_page_scrollbar(canvas, inner, sb)
+        except Exception as exc:  # noqa: BLE001 — 滚动条判错不该影响弹窗能用
+            print(f"[ui] ⚠️ 设置弹窗滚动条同步失败（不影响使用）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+
+    def _on_settings_wheel(self, event) -> None:
+        """滚轮滚**当前那一页**；指针停在自带滚动的控件上（词库 tk.Text）时不抢。
+
+        Tk 的 bindtag 顺序是「控件 → 类 → 顶层 → all」，而 tk.Text 的类绑定滚完自己
+        并不 return break，所以这里必须显式跳过它，否则一次滚轮两边一起滚。
+        """
+        try:
+            w = getattr(event, "widget", None)
+            if w is not None and w.winfo_class() in ("Text", "Listbox"):
+                return
+            nb = self._settings_nb
+            canvas = self._settings_pages[nb.index(nb.select())][0]
+        except Exception:  # noqa: BLE001 — 弹窗没建好/已销毁，滚轮直接忽略
+            return
+        delta, num = getattr(event, "delta", 0), getattr(event, "num", 0)
+        if delta:
+            step = -1 if delta > 0 else 1
+        elif num == 4:                            # X11 没有 MouseWheel，只有 Button-4/5
+            step = -1
+        elif num == 5:
+            step = 1
+        else:
+            return
+        canvas.yview_scroll(step * 3, "units")
+
+    def _size_settings_window(self) -> None:
+        """按当前语言实测各页需求高度，定弹窗的固定尺寸（宽固定、高按内容 + 两道上限）。
+
+        上限两道：SETTINGS_MAX_H（1080p 屏也要整窗可见）与「屏高 - 90」（更小的屏优先保命，
+        标题栏/任务栏也要占地方）。真装不下的部分由页面滚动兜底，不再靠「窗口被裁」糊过去。
+        """
+        win = self._settings_win
+        try:
+            win.update_idletasks()
+            need = max((inner.winfo_reqheight() for _c, inner, _s in self._settings_pages),
+                       default=0)
+            screen_h = int(win.winfo_screenheight() or 0)
+            cap = min(SETTINGS_MAX_H, screen_h - 90) if screen_h else SETTINGS_MAX_H
+            h = max(SETTINGS_MIN_H, min(need + SETTINGS_CHROME_H, cap))
+            self._settings_size = (SETTINGS_WIDTH, h)
+            win.geometry(f"{SETTINGS_WIDTH}x{h}")
+            print(f"[ui] 设置弹窗 {SETTINGS_WIDTH}x{h}"
+                  f"（最高一页需 {need}px，屏高 {screen_h}px）", flush=True)
+        except Exception as exc:  # noqa: BLE001 — 尺寸算错不该拦住启动
+            self._settings_size = (SETTINGS_WIDTH, SETTINGS_MAX_H)
+            win.geometry(f"{SETTINGS_WIDTH}x{SETTINGS_MAX_H}")
+            print(f"[ui] ⚠️ 设置弹窗尺寸自适应失败，按上限值开窗："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+
+    # ---------------------------------------------------------------- 设置弹窗 · 常规页
+    def _build_settings_general(self, body: ttk.Frame) -> None:
+        """「常规」页：API key（新用户第一件事，放最前）+ 界面语言。"""
         # ---- API Key ----
         # 安全约束（与 vlt/credentials.py 一致）：
         # - 输入框用 ● 掩码；保存成功后**立刻清空输入框**，明文不留在界面上；
@@ -1164,32 +1529,68 @@ class TranslationGUI:
                                     width=34, style="Key.TEntry")
         self._key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
         self._key_entry.bind("<Return>", lambda _e: self._on_save_key())
-        self._key_status = ttk.Label(body, text="", style="Dim.TLabel")
+        self._key_status = ttk.Label(body, text="", style="Dim.TLabel",
+                                     justify=tk.LEFT, wraplength=SETTINGS_WRAP)
         self._key_status.pack(anchor=tk.W)
         self._refresh_key_status()
 
         ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
 
+        # ---- 界面语言 ----
+        # 本批只做到「重启后生效」：控件文案全在建窗时按当前语言取词，
+        # 运行中换语言不重建树（正在进行的翻译/设备列表状态绝不受影响）。
+        ttk.Label(body, text=t("界面语言"), style="Section.TLabel").pack(anchor=tk.W)
+        lang_row = ttk.Frame(body)
+        lang_row.pack(fill=tk.X, pady=(8, 4))
+        self._ui_lang_names = dict(i18n.available_languages())   # code → 母语名称
+        self._ui_lang_var = tk.StringVar(
+            value=self._ui_lang_names.get(i18n.current_language(), "简体中文"))
+        self._ui_lang_combo = ttk.Combobox(
+            lang_row, values=list(self._ui_lang_names.values()),
+            state="readonly", width=14, textvariable=self._ui_lang_var)
+        self._ui_lang_combo.pack(side=tk.LEFT)
+        self._ui_lang_combo.bind("<<ComboboxSelected>>", self._on_ui_lang_change)
+        self._ui_lang_note = ttk.Label(body, text=t("界面语言在重启程序后生效"),
+                                       style="Muted.TLabel", justify=tk.LEFT,
+                                       wraplength=SETTINGS_WRAP)
+        self._ui_lang_note.pack(anchor=tk.W)
+
+    # ---------------------------------------------------------------- 设置弹窗 · 音频页
+    def _build_settings_audio(self, body: ttk.Frame) -> None:
+        """「音频」页：设备选择 → 输入门限 → 译音音色（都是「声音怎么进出」这一件事）。"""
         # ---- 音频设备 ----
         dev_head = ttk.Frame(body)
         dev_head.pack(fill=tk.X)
-        ttk.Label(dev_head, text=t("音频设备"), style="Section.TLabel").pack(side=tk.LEFT)
+        # 按钮先占右侧（压不动），标题后打包 —— 空间不足时被裁的才是标题
         self._refresh_btn = ttk.Button(dev_head, text=t("刷新"),
                                        command=self._on_refresh_devices)
         self._refresh_btn.pack(side=tk.RIGHT)
+        ttk.Label(dev_head, text=t("音频设备"), style="Section.TLabel").pack(side=tk.LEFT)
 
         grid = ttk.Frame(body)
         grid.pack(fill=tk.X, pady=(8, 2))
         grid.columnconfigure(1, weight=1)
         auto = t("自动检测")
-        # ⚠️ 控件名不能改：设备扫描结果直接往这三个下拉里写值
+        # ⚠️ 控件名不能改：设备扫描结果直接往这些下拉里写值
+        #
+        # Linux 上「VRChat 音频」与「译音输出」**不暴露给用户**（末影猫口径）：
+        #   · VRChat 音频：采集目标固定为「等 VRChat 的输出流」，不抓系统默认输出
+        #     （默认 sink 上混着浏览器/音乐，抓它等于把噪音当游戏内语音）；
+        #   · 译音输出：固定写到本程序运行时自建的虚拟麦，手选设备毫无意义
+        #     （引擎的 Linux 分支本就忽略 output.audio.device_name）。
+        # 于是 Linux 只留「麦克风」一个下拉；两个属性置 None，读写在
+        # `self._linux_fixed_audio` 为真时一律跳过。配置键保留不动（向后兼容）。
+        self._linux_fixed_audio = platform.IS_LINUX
         self._mic_combo = ttk.Combobox(grid, values=[auto], state="readonly")
-        self._loopback_combo = ttk.Combobox(grid, values=[auto], state="readonly")
-        self._audio_out_combo = ttk.Combobox(grid, values=[auto], state="readonly")
-        for i, (label, combo) in enumerate((
-                (t("麦克风:"), self._mic_combo),
-                (t("VRChat 音频:"), self._loopback_combo),
-                (t("译音输出:"), self._audio_out_combo))):
+        self._loopback_combo: ttk.Combobox | None = None
+        self._audio_out_combo: ttk.Combobox | None = None
+        rows = [(t("麦克风:"), self._mic_combo)]
+        if not self._linux_fixed_audio:
+            self._loopback_combo = ttk.Combobox(grid, values=[auto], state="readonly")
+            self._audio_out_combo = ttk.Combobox(grid, values=[auto], state="readonly")
+            rows += [(t("VRChat 音频:"), self._loopback_combo),
+                     (t("译音输出:"), self._audio_out_combo)]
+        for i, (label, combo) in enumerate(rows):
             ttk.Label(grid, text=label, style="Dim.TLabel").grid(
                 row=i, column=0, sticky="w", pady=3)
             combo.grid(row=i, column=1, sticky="ew", padx=(8, 0), pady=3)
@@ -1200,11 +1601,65 @@ class TranslationGUI:
         capture_cfg = (self._cfg.output or {}).get("capture") or {}
         audio_cfg = (self._cfg.output or {}).get("audio") or {}
         self._mic_combo.set(capture_cfg.get("mic_device") or auto)
-        self._loopback_combo.set(capture_cfg.get("loopback_device") or auto)
-        self._audio_out_combo.set(audio_cfg.get("device_name") or auto)
+        if not self._linux_fixed_audio:
+            self._loopback_combo.set(capture_cfg.get("loopback_device") or auto)
+            self._audio_out_combo.set(audio_cfg.get("device_name") or auto)
 
-        ttk.Label(body, text=t("设备选择自动保存到 config.yaml"),
-                  style="Muted.TLabel").pack(anchor=tk.W, pady=(6, 0))
+        if self._linux_fixed_audio:
+            ttk.Label(body, text=t("Linux：VRChat 音频与译音输出已自动处理"),
+                      style="Muted.TLabel", justify=tk.LEFT,
+                      wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
+        else:
+            ttk.Label(body, text=t("设备选择自动保存到 config.yaml"),
+                      style="Muted.TLabel", justify=tk.LEFT,
+                      wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
+
+        # ---- 输入门限（只作用于 VRChat 输出 = 「别人说话」那条腿）----
+        # 与设备选择同属「输入侧」：设备选好之后，紧接着就是「收到的东西要多响才送」。
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+        ttk.Label(body, text=t("输入门限"), style="Section.TLabel").pack(anchor=tk.W)
+        # 取值统一走 engine.input_gate_settings：配置里的非法值在那里留痕并回落默认值，
+        # 界面与引擎看到的就是同一套值（省得两边各解析一遍、口径还不一致）。
+        _gate_en, _gate_db, self._gate_hold_ms, self._gate_preroll_ms = \
+            input_gate_settings(capture_cfg)
+        self._gate_enabled_var = tk.BooleanVar(value=_gate_en)
+        self._gate_check = tk.Checkbutton(
+            body, variable=self._gate_enabled_var,
+            text=t("启用 —— 低于门限的声音不翻译（滤掉远处说话小声的玩家）"),
+            command=self._on_gate_change, wraplength=SETTINGS_WRAP,
+            justify=tk.LEFT, anchor="w", **self._indicator_kw())
+        self._gate_check.pack(anchor=tk.W, pady=(8, 4))
+
+        ggrid = ttk.Frame(body)
+        ggrid.pack(fill=tk.X)
+        ggrid.columnconfigure(1, weight=1)
+        # 实时电平条：横轴 -70 ~ 0 dBFS；蓝 = 当前已超过门限（这段会被翻译），
+        # 白竖线 = 门限位置。数据来自 loopback 采集腿 —— 没在翻译时显示「—」。
+        self._gate_level_canvas = tk.Canvas(ggrid, width=320, height=15,
+                                            bg=SURFACE, highlightthickness=1,
+                                            highlightbackground=BORDER, bd=0)
+        ttk.Label(ggrid, text=t("当前电平:"), style="Dim.TLabel").grid(
+            row=0, column=0, sticky="w", pady=3)
+        self._gate_level_canvas.grid(row=0, column=1, sticky="w", padx=(8, 6), pady=3)
+        self._gate_level_lbl = ttk.Label(ggrid, text="—", style="Dim.TLabel", width=9)
+        self._gate_level_lbl.grid(row=0, column=2, sticky="w")
+
+        self._gate_var = tk.DoubleVar(value=_gate_db)
+        ttk.Label(ggrid, text=t("门限:"), style="Dim.TLabel").grid(
+            row=1, column=0, sticky="w", pady=3)
+        self._gate_scale = tk.Scale(
+            ggrid, from_=INPUT_GATE_MIN_DB, to=INPUT_GATE_MAX_DB, resolution=1,
+            orient=tk.HORIZONTAL, variable=self._gate_var, showvalue=False, length=320,
+            bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
+            highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
+            command=self._on_gate_change)
+        self._gate_scale.grid(row=1, column=1, sticky="w", padx=(8, 6), pady=3)
+        self._gate_val_lbl = ttk.Label(ggrid, text=f"{_gate_db:g} dB",
+                                       style="Dim.TLabel", width=9)
+        self._gate_val_lbl.grid(row=1, column=2, sticky="w")
+        ttk.Label(body, text=t("只有响度超过门限的声音才会被翻译；改完立刻生效（开始翻译后这里显示实时电平）"),
+                  style="Muted.TLabel", justify=tk.LEFT,
+                  wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
 
         # ---- 译音：音源（A/B 热切换）+ 音色 ----
         # 一个菜单管两件事：
@@ -1274,14 +1729,99 @@ class TranslationGUI:
         self._tts_voice_combo.bind("<Return>", self._on_tts_voice_change)
         self._voice_note = ttk.Label(body, text=t("说话译音跟随「译音输出」开关（改完下次开始翻译生效）；"
                                                   "打字译音立刻生效"),
-                                     style="Muted.TLabel", justify=tk.LEFT)
+                                     style="Muted.TLabel", justify=tk.LEFT,
+                                     wraplength=SETTINGS_WRAP)
         self._voice_note.pack(anchor=tk.W, pady=(6, 0))
 
+    # ---------------------------------------------------------------- 设置弹窗 · 词库页
+    def _build_settings_glossary(self, body: ttk.Frame) -> None:
+        """「词库」页：专有名词怎么译（社团名 / 人名 / 术语）。"""
+        # ---- 专有词库 ----
+        # 用户场景：VRChat 里念社团名 / 人名 / 术语，模型要么听错、要么按字面意译
+        # （「VRChat」被翻成「虚拟聊天」这种）。词库就是把这些词**钉死**：
+        #   · 实时那条腿 → session.translation.corpus.phrases（顺带提升识别率）
+        #   · 打字那条腿 → translation_options.terms（qwen-mt 的术语干预）
+        #
+        # 词库分两层，`config.merge_hotwords` 是**唯一**合并口径：
+        #   全局（`glossary`）—— 两个方向共用；
+        #   方向级（`directions.<X>.hotwords`）—— 只作用于一条腿，同名词条**覆盖**全局。
+        # 两层都得能改，所以下面给一个「作用方向」下拉切换的是"**编辑哪张表**"：
+        # 两个方向的目标语言通常不同（同一个社团名，别人说时要中文译名、我说时要保持原样），
+        # 只让用户编辑全局那份的话，这功能对最常见的场景等于白给（实测过：全局写
+        # `Nekoya=猫屋` 会让「我说 → 英文」的译文变成 `the Cat House club`）。
+        #
+        # 为什么这里用 tk.Text 而不是 ttk.Entry：一个词库是**多行**的，单行输入框
+        # 逼用户去手改 YAML（这功能就等于没做）。样式手动对齐 SURFACE/TEXT 体系，
+        # 因为 tk.Text 不走 ttk style。
+        ttk.Label(body, text=t("专有词库"), style="Section.TLabel").pack(anchor=tk.W)
+        # 作用方向：显示名（i18n）→ 内部 scope key。顺序固定：全局 / 我说 / 别人说
+        self._glossary_scope_names = {
+            "global": t("全局"),
+            "mine": t("我说"),
+            "theirs": t("别人说"),
+        }
+        scope_row = ttk.Frame(body)
+        scope_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(scope_row, text=t("作用方向:"), style="Dim.TLabel").pack(side=tk.LEFT)
+        self._glossary_scope_var = tk.StringVar(value=self._glossary_scope_names["global"])
+        self._glossary_scope_combo = ttk.Combobox(
+            scope_row, values=list(self._glossary_scope_names.values()),
+            state="readonly", width=10, textvariable=self._glossary_scope_var)
+        self._glossary_scope_combo.pack(side=tk.LEFT, padx=(8, 0))
+        self._glossary_scope_combo.bind("<<ComboboxSelected>>", self._on_glossary_scope_change)
+        gloss_box = ttk.Frame(body)
+        gloss_box.pack(fill=tk.X, pady=(8, 2))
+        self._glossary_text = tk.Text(
+            gloss_box, height=9, width=44, wrap=tk.NONE, undo=True,
+            bg=SURFACE, fg=TEXT, insertbackground=TEXT, selectbackground=ACCENT,
+            selectforeground="#ffffff", relief=tk.FLAT, highlightthickness=1,
+            highlightbackground=BORDER, highlightcolor=ACCENT, font=FONT_UI)
+        # 滚动条**先**占住右侧（它压不动），词库框后打包并 fill=X expand 吸收压缩；
+        # 顺序反过来窗口变窄时滚动条会被挤成 1px。样式要显式引用，否则是 clam 的浅灰。
+        gloss_sb = ttk.Scrollbar(gloss_box, orient=tk.VERTICAL, style="Vertical.TScrollbar",
+                                 command=self._glossary_text.yview)
+        gloss_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._glossary_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._glossary_text.configure(yscrollcommand=gloss_sb.set)
+        self._glossary_hint = ttk.Label(
+            body, text="", style="Muted.TLabel", justify=tk.LEFT,
+            wraplength=SETTINGS_WRAP)
+        self._glossary_hint.pack(anchor=tk.W, pady=(4, 4))
+        gloss_row = ttk.Frame(body)
+        gloss_row.pack(fill=tk.X)
+        self._glossary_save_btn = ttk.Button(gloss_row, text=t("保存词库"),
+                                            command=self._on_save_glossary)
+        self._glossary_save_btn.pack(side=tk.RIGHT)
+        self._glossary_status = ttk.Label(gloss_row, text="", style="Muted.TLabel")
+        self._glossary_status.pack(side=tk.LEFT)
+        # 控件建齐后再按当前 scope 填一次（读盘口径与 `_refresh_glossary_box` 完全一致，
+        # 这样「打开设置 → 已经是磁盘上的最新内容」这条保证在首屏也成立）
+        self._refresh_glossary_box()
+
+    # ---------------------------------------------------------------- 设置弹窗 · 关于页
+    def _build_settings_about(self, body: ttk.Frame) -> None:
+        """「关于」页：软件更新 + 日志（出问题时要交给维护者的东西）+ 开发者署名。
+
+        这两区改造前排在长列**最末尾**，正好是掉到屏幕外、用户根本看不到也点不着的部分。
+        """
+        # ---- 软件更新 ----
+        upd_head = ttk.Frame(body)
+        upd_head.pack(fill=tk.X)
+        # 按钮先占右侧（压不动），标题后打包 —— 空间不足时被裁的才是标题
+        self._update_check_btn = ttk.Button(
+            upd_head, text=t("检查更新"),
+            command=lambda: self._schedule_update_check(manual=True))
+        self._update_check_btn.pack(side=tk.RIGHT)
+        ttk.Label(upd_head, text=t("软件更新"), style="Section.TLabel").pack(side=tk.LEFT)
+        self._update_info = ttk.Label(
+            body, text=t("当前版本 v{ver} · 启动时会自动检查一次", ver=__version__),
+            style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP)
+        self._update_info.pack(anchor=tk.W, pady=(6, 0))
+
         # ---- 日志 ----
-        ttk.Separator(body).pack(fill=tk.X, pady=(14, 10))
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
         log_head = ttk.Frame(body)
         log_head.pack(fill=tk.X)
-        ttk.Label(log_head, text=t("日志"), style="Section.TLabel").pack(side=tk.LEFT)
         self._log_export_btn = ttk.Button(log_head, text=t("导出日志压缩包…"),
                                           command=self._on_export_logs)
         self._log_export_btn.pack(side=tk.RIGHT)
@@ -1289,23 +1829,18 @@ class TranslationGUI:
         self._log_open_btn = ttk.Button(log_head, text=t("打开日志文件夹"),
                                         command=self._on_open_log_folder)
         self._log_open_btn.pack(side=tk.RIGHT, padx=(0, 6))
-        self._log_info = ttk.Label(body, text="", style="Muted.TLabel", justify=tk.LEFT)
+        ttk.Label(log_head, text=t("日志"), style="Section.TLabel").pack(side=tk.LEFT)
+        self._log_info = ttk.Label(body, text="", style="Muted.TLabel", justify=tk.LEFT,
+                                   wraplength=SETTINGS_WRAP)
         self._log_info.pack(anchor=tk.W, pady=(6, 0))
         self._refresh_log_info()
 
-        # ---- 软件更新 ----
-        ttk.Separator(body).pack(fill=tk.X, pady=(14, 10))
-        upd_head = ttk.Frame(body)
-        upd_head.pack(fill=tk.X)
-        ttk.Label(upd_head, text=t("软件更新"), style="Section.TLabel").pack(side=tk.LEFT)
-        self._update_check_btn = ttk.Button(
-            upd_head, text=t("检查更新"),
-            command=lambda: self._schedule_update_check(manual=True))
-        self._update_check_btn.pack(side=tk.RIGHT)
-        self._update_info = ttk.Label(
-            body, text=t("当前版本 v{ver} · 启动时会自动检查一次", ver=__version__),
-            style="Muted.TLabel", justify=tk.LEFT)
-        self._update_info.pack(anchor=tk.W, pady=(6, 0))
+        # ---- 开发者 ----
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+        ttk.Label(body, text=t("开发者"), style="Section.TLabel").pack(anchor=tk.W)
+        ttk.Label(body, text=t("由可爱的赛博巫师和他的朋友们 开发"),
+                  style="Muted.TLabel", justify=tk.LEFT,
+                  wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
 
     def _log_dir(self) -> Path:
         from .crashlog import _LOG_PATH      # noqa: SLF001  （跟着实际日志走）
@@ -1389,20 +1924,32 @@ class TranslationGUI:
         print(f"[gui] 已打开日志文件夹：{d}", flush=True)
 
     def _open_settings(self) -> None:
-        """打开设置弹窗（已建好，只是显示出来），定位到主窗口附近。"""
+        """打开设置弹窗（已建好，只是显示出来），定位到主窗口附近且**整窗都在屏幕内**。"""
         win = self._settings_win
         self._refresh_key_status()          # 每次打开都刷新来源/打码显示
+        self._refresh_glossary_box()        # 手改过 config.yaml 的话，别让旧内容把它覆盖回去
         win.update_idletasks()
+        ww, wh = self._settings_size
         rx, ry = self._root.winfo_x(), self._root.winfo_y()
         rw = self._root.winfo_width()
-        ww, wh = win.winfo_reqwidth(), win.winfo_reqheight()
-        win.geometry(f"+{rx + max((rw - ww) // 2, 20)}+{ry + 48}")
+        x, y = rx + max((rw - ww) // 2, 20), ry + 48
+        # 夹进屏幕：改造前不做这一步，1485px 高的弹窗从 y=352 起、底边落到 1837
+        # （屏高 1600），最下面两个分区整个在屏幕外 —— 不是难找，是够不着。
+        screen_w = int(win.winfo_screenwidth() or 0)
+        screen_h = int(win.winfo_screenheight() or 0)
+        if screen_w:
+            x = max(8, min(x, screen_w - ww - 8))
+        if screen_h:
+            y = max(8, min(y, screen_h - wh - 48))    # 底部留 48px 给任务栏
+        win.geometry(f"{ww}x{wh}+{x}+{y}")
         win.deiconify()
         win.lift()
         win.focus_set()
         # 建窗时它处于 withdraw 状态，那时调 DWM 拿不到有效 hwnd、会静默失败
         # （实测弹窗标题栏仍是浅色、跟主窗口不一致）。显示出来之后再设一次。
         self._apply_dark_titlebar(win)
+        # 也是同理：withdraw 时量不到可视高度，滚动条的显隐得等显示出来再判一次
+        self._sync_settings_pages()
 
     def _close_settings(self) -> None:
         self._settings_win.withdraw()
@@ -1489,7 +2036,7 @@ class TranslationGUI:
         body.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(body, text=t("☕ 请我喝一杯"),
-                  font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.CENTER)
+                  font=FONT_BOLD_LG).pack(anchor=tk.CENTER)
 
         ttk.Button(body, text=t("打开 Ko-fi 赞助页面"), style="Accent.TButton",
                    command=self._open_kofi).pack(anchor=tk.CENTER, pady=(12, 14))
@@ -1636,7 +2183,7 @@ class TranslationGUI:
         body = ttk.Frame(win, padding=(20, 16, 20, 14))
         body.pack(fill=tk.BOTH, expand=True)
         ttk.Label(body, text=t("发现新版本"),
-                  font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W)
+                  font=FONT_BOLD_MD).pack(anchor=tk.W)
         ttk.Label(body,
                   text=t("VRChat Live Translate 有新版本了。"
                          "现在更新只要一两分钟，不影响你正在进行的翻译。"),
@@ -1701,8 +2248,8 @@ class TranslationGUI:
         self._close_update_dialog()
 
     def _on_update_now(self, info) -> None:
-        """「立即更新」：源码运行给指引（不自更新）；打包 exe 走两段式 —— 先开下载进度窗。"""
-        if update_check.update_mode() != "frozen":
+        """「立即更新」：源码运行给指引（不自更新）；打包 exe / AppImage 走两段式 —— 先开下载进度窗。"""
+        if not update_check.can_self_update():
             open_page = messagebox.askokcancel(
                 t("如何更新"),
                 t("你现在运行的是源码版，不能自动更新。\n\n"
@@ -1715,8 +2262,8 @@ class TranslationGUI:
             print("[update] 源码运行：已给出更新指引（git pull / 下载页），不做自更新",
                   flush=True)
             return
-        exe = Path(sys.executable).resolve()
-        if not _dir_writable(exe.parent):
+        target = update_check.update_target_path()
+        if target is None or not _dir_writable(target.parent):
             open_page = messagebox.askokcancel(
                 t("无法自动更新"),
                 t("程序所在的位置不允许写入（比如放在 Program Files）。\n\n"
@@ -1724,12 +2271,13 @@ class TranslationGUI:
                 parent=self._update_win)
             if open_page:
                 self._open_release_page(info.html_url)
-            print(f"[update] 安装目录不可写（{exe.parent}），转为手动下载指引", flush=True)
+            print(f"[update] 安装目录不可写（{target.parent if target else '?'}），"
+                  f"转为手动下载指引", flush=True)
             return
         # 这个版本之前已经下载好（点过「稍后更新」/上次没换完就被关掉）→
         # 复验通过直接给更新入口，30MB+ 不白下（硬要求：用残留前必须重新校验）
         try:
-            hit = update_check.check_pending_download(exe, __version__)
+            hit = update_check.check_pending_download(target, __version__)
         except Exception as exc:  # noqa: BLE001
             hit = None
             print(f"[update] ⚠️ 待更新文件复核失败：{type(exc).__name__}: {exc}"
@@ -1737,7 +2285,7 @@ class TranslationGUI:
         if hit is not None and hit[0] == info.version:
             self._close_update_dialog()
             self._show_download_window(info)
-            self._enter_download_done_state(update_check.pending_new_exe(exe))
+            self._enter_download_done_state(update_check.pending_new_asset(target))
             return
         self._close_update_dialog()
         self._show_download_window(info)
@@ -1747,7 +2295,7 @@ class TranslationGUI:
     def _show_download_window(self, info) -> None:
         """懒建懒销毁 Toplevel（transient + lift，非模态 —— 下载期间翻译照跑）。
         文案逐字照抄「文案 checklist ②」；完成后切「完成态」（checklist ③）。
-        总量优先级：Content-Length（回调带）> ReleaseInfo.exe_size > indeterminate 只显示已下载量。"""
+        总量优先级：Content-Length（回调带）> ReleaseInfo.asset_size > indeterminate 只显示已下载量。"""
         self._close_download_window()
         win = tk.Toplevel(self._root)
         win.title(t("正在下载新版本"))
@@ -1764,9 +2312,9 @@ class TranslationGUI:
         self._dl_bar = ttk.Progressbar(body, mode="determinate", length=380,
                                        maximum=100.0, value=0.0)
         self._dl_bar.pack(fill=tk.X)
-        if info.exe_size:
+        if info.asset_size:
             text = t("已下载 {done} / 约 {total} MB，一般 1–3 分钟就好。下载期间可以正常翻译。",
-                     done="0.0", total=f"{info.exe_size / 1048576:.1f}")
+                     done="0.0", total=f"{info.asset_size / 1048576:.1f}")
         else:
             self._dl_bar.configure(mode="indeterminate")
             self._dl_bar.start(14)
@@ -1823,7 +2371,10 @@ class TranslationGUI:
         self._dl_cancel = threading.Event()
         self._dl_last_push = 0.0
         self._dl_downloading = True
-        dest_dir = Path(sys.executable).resolve().parent   # exe 同目录：同卷 move 才近原子
+        # 安装文件（exe / AppImage）同目录：同卷 rename 才近原子。拿不到目标（不该发生：
+        # 能走到这儿说明 can_self_update() 为真）就退回 APP_DIR，绝不让它崩在 None 上。
+        target = update_check.update_target_path() or (APP_DIR / update_check.asset_name_for())
+        dest_dir = target.parent
 
         def _progress(done: int, total: int | None) -> None:
             if self._dl_cancel is not None and self._dl_cancel.is_set():
@@ -1849,7 +2400,7 @@ class TranslationGUI:
         threading.Thread(target=_work, daemon=True).start()
 
     def _on_download_progress(self, done: int, total: int | None) -> None:
-        """主线程：更新进度条与文本；total=None 且 exe_size 也没有 → indeterminate。"""
+        """主线程：更新进度条与文本；total=None 且 asset_size 也没有 → indeterminate。"""
         if self._dl_win is None or self._dl_bar is None or self._dl_text is None:
             return
         try:
@@ -1857,7 +2408,7 @@ class TranslationGUI:
                 return
         except Exception:  # noqa: BLE001
             return
-        total = total or (self._dl_info.exe_size if self._dl_info else None)
+        total = total or (self._dl_info.asset_size if self._dl_info else None)
         if total:
             if str(self._dl_bar.cget("mode")) != "determinate":
                 self._dl_bar.stop()
@@ -1918,9 +2469,11 @@ class TranslationGUI:
         if self._dl_win is None:
             return                               # 用户已关窗取消，错误不必再烦他
         # 残留双保险（download_and_verify 失败时已清过一遍）
+        target = update_check.update_target_path()
+        if target is None:
+            target = APP_DIR / update_check.asset_name_for()
         try:
-            (Path(sys.executable).resolve().parent
-             / (update_check.EXE_ASSET_NAME + ".new")).unlink(missing_ok=True)
+            update_check.pending_new_asset(target).unlink(missing_ok=True)
         except OSError:
             pass
         retry = messagebox.askretrycancel(
@@ -1946,8 +2499,10 @@ class TranslationGUI:
     #   【不再提示这个版本】= 只对这个版本号不再提示，与上面两条无关
 
     def _on_reload_clicked(self) -> None:
-        """「立即重启并更新」= 立刻替换 + 自动拉起新版（当前会话结束）：
-        按钮置灰「正在重启…」→ 生成 bat（relaunch=True）→ 分离启动 → 走正常退出流程。
+        """「立即重启并更新」= 立刻替换 + 自动拉起新版（当前会话结束）。
+
+        Windows：生成 bat（relaunch=True）→ 分离启动 → 走正常退出流程。
+        AppImage：**直接换**（`os.replace`，运行中的旧文件是旧 inode，不受影响）→ 拉起新文件。
         任一步失败：留痕 + 恢复按钮 + 错误提示带可点下一步，绝不静默。"""
         if self._reload_started:
             return                              # 防连点：已经安排上了
@@ -1965,10 +2520,18 @@ class TranslationGUI:
         if self._dl_reload_btn is not None:
             self._dl_reload_btn.configure(text=t("正在重启…"))
         try:
-            exe = Path(sys.executable).resolve()
-            bat = update_check.build_updater_bat(pid=os.getpid(), current_exe=exe,
-                                                 new_exe=new_exe, relaunch=True)
-            self._launch_updater_bat(bat)
+            if update_check.update_mode() == "appimage":
+                target = update_check.update_target_path()
+                if target is None:
+                    raise update_check.UpdateCheckError(
+                        "找不到正在运行的 AppImage 文件（$APPIMAGE 没了？）")
+                update_check.install_appimage(new_exe, target)
+                self._relaunch_appimage(target)
+            else:
+                exe = Path(sys.executable).resolve()
+                bat = update_check.build_updater_bat(pid=os.getpid(), current_exe=exe,
+                                                     new_exe=new_exe, relaunch=True)
+                self._launch_updater_bat(bat)
         except Exception as exc:  # noqa: BLE001 — 失败必须被用户看到，不许静默
             print(f"[update] ⚠️ 启动更新器失败：{type(exc).__name__}: {exc}"
                   f"（下载好的新版本保留着，可以再点）", flush=True)
@@ -1994,7 +2557,7 @@ class TranslationGUI:
                 print("[update] 用户选择先继续用现在的版本（新版本已下载好，保留着）",
                       flush=True)
             return
-        print(f"[update] 已启动更新器，程序即将退出（重载路径，v{__version__} → "
+        print(f"[update] 已安排替换并拉起新版，程序即将退出（重载路径，v{__version__} → "
               f"v{info.version}）", flush=True)
         self._on_close()
 
@@ -2026,19 +2589,32 @@ class TranslationGUI:
                          creationflags=flags, env=updater_env())
         return bat_path
 
+    def _relaunch_appimage(self, appimage: Path) -> None:
+        """分离启动刚换上的 AppImage（当前会话随后正常退出，不等待它结束）。
+
+        ⚠️ 必须用 `updater_env()`（它会剥掉 APPIMAGE / APPDIR / OWD / ARGV0）：AppImage
+        运行时看到 `APPDIR` 已设就**不会重新挂载**，新进程会去用父进程那个马上要消失的
+        挂载点 —— 与 Windows 侧漏清 `_MEI*` 是同一类「更新完没再打开」。
+        cwd 落在 AppImage 自己所在目录：绝不能是旧挂载点里的路径（那会随进程一起消失）。
+        """
+        subprocess.Popen([str(appimage)], env=updater_env(), start_new_session=True,
+                         cwd=str(Path(appimage).parent))
+
     def _maybe_replace_on_exit(self) -> None:
-        """正常退出时替换（【稍后】路径的另一半）：复验 → bat（relaunch=False）→
-        分离启动 → 退出。本路径绝不自动拉起新进程 —— 下次用户自己打开就是新版。"""
+        """正常退出时替换（【稍后】路径的另一半）：复验 → 替换 → 退出（绝不拉起新进程，下次
+        用户自己打开就是新版）。Windows 走 bat（relaunch=False）；AppImage 直接 rename 顶替。"""
         if self._reload_started:
             return                    # 重载路径已安排了带拉起的替换，别重复安排
         if not self._update_pending_exit:
             return
-        if update_check.update_mode() != "frozen":
+        if not update_check.can_self_update():
             return                    # 源码运行不做自更新（正常也走不到这）
-        exe = Path(sys.executable).resolve()
+        target = update_check.update_target_path()
+        if target is None:
+            return
         try:
             # 硬要求：退出前再复验一次（防下载后文件被改坏/杀软动过），不通过就不换
-            hit = update_check.check_pending_download(exe, __version__)
+            hit = update_check.check_pending_download(target, __version__)
         except Exception as exc:  # noqa: BLE001
             print(f"[update] 跳过退出时替换（复核异常：{type(exc).__name__}: {exc}）",
                   flush=True)
@@ -2049,24 +2625,32 @@ class TranslationGUI:
             return
         version = hit[0]
         try:
-            bat = update_check.build_updater_bat(
-                pid=os.getpid(), current_exe=exe,
-                new_exe=update_check.pending_new_exe(exe), relaunch=False)
-            self._launch_updater_bat(bat)
+            if update_check.update_mode() == "appimage":
+                update_check.install_appimage(update_check.pending_new_asset(target), target)
+            else:
+                bat = update_check.build_updater_bat(
+                    pid=os.getpid(), current_exe=target,
+                    new_exe=update_check.pending_new_asset(target), relaunch=False)
+                self._launch_updater_bat(bat)
         except Exception as exc:  # noqa: BLE001 — 失败要被用户看到，不能静默退出
             print(f"[update] ⚠️ 退出时替换安排失败：{type(exc).__name__}: {exc}"
                   f"（新版本已下载好并保留，下次启动会再给更新入口）", flush=True)
-            info = self._update_pending_info
-            open_page = messagebox.askokcancel(
-                t("更新没有成功"),
+            self._offer_manual_download(
                 t("更新没有成功，现在的版本不受影响，下次打开还是它。\n\n"
-                  "点「确定」打开下载页自己下；点「取消」直接退出。"),
-                parent=self._root)
-            if open_page and info is not None and info.html_url:
-                self._open_release_page(info.html_url)
+                  "点「确定」打开下载页自己下；点「取消」直接退出。"))
             return
-        print(f"[update] 退出时替换已安排（不自动拉起），下次打开就是 v{version}",
-              flush=True)
+        done = ("已就地替换" if update_check.update_mode() == "appimage" else "已安排替换")
+        print(f"[update] 退出时{done}（不自动拉起），下次打开就是 v{version}", flush=True)
+
+    def _offer_manual_download(self, body: str) -> None:
+        """自动替换没成功时的统一退路：问一句 →「确定」就打开下载页自己下。
+
+        `body` 是给用户看的话（各调用点自己写，措辞必须讲清「现在还能继续用」）。
+        """
+        info = self._update_pending_info
+        open_page = messagebox.askokcancel(t("更新没有成功"), body, parent=self._root)
+        if open_page and info is not None and info.html_url:
+            self._open_release_page(info.html_url)
 
     # ---------------------------------------------------------------- 启动兜底与一次性提示
 
@@ -2074,11 +2658,13 @@ class TranslationGUI:
         """启动兜底：上次下载好了新版本但没来得及换（被强杀/直接关机）→
         重新复验残留，完好就直接出「下载完成」窗口给更新入口（不重复下载），
         并记下退出时替换；损坏/半截 → check_pending_download 内部已清理 + 留痕。"""
-        if self._headless or update_check.update_mode() != "frozen":
+        if self._headless or not update_check.can_self_update():
             return
-        exe = Path(sys.executable).resolve()
+        target = update_check.update_target_path()
+        if target is None:
+            return
         try:
-            hit = update_check.check_pending_download(exe, __version__)
+            hit = update_check.check_pending_download(target, __version__)
         except Exception as exc:  # noqa: BLE001
             print(f"[update] ⚠️ 待更新文件复核失败：{type(exc).__name__}: {exc}", flush=True)
             return
@@ -2088,16 +2674,17 @@ class TranslationGUI:
         info = update_check.ReleaseInfo(
             tag=f"v{version}", version=version,
             html_url=f"{update_check.RELEASES_HTML}/tag/v{version}",
-            exe_url="", sums_url="", exe_size=None)
+            asset_url="", asset_name=update_check.asset_name_for(),
+            sums_url="", asset_size=None)
         self._mark_update_pending(info)
         self._show_download_window(info)
-        self._enter_download_done_state(update_check.pending_new_exe(exe))
+        self._enter_download_done_state(update_check.pending_new_asset(target))
 
     def _schedule_version_changed_hint(self) -> None:
         """启动版本提示：上次运行版本 ≠ 本次（刚完成过替换/升级）→ ~1.5 秒后弹一次性
         「已更新」小提示；首次运行只悄悄记下版本；版本没变 → 什么都不做。"""
         self._updated_hint_job = None
-        if self._headless or update_check.update_mode() != "frozen":
+        if self._headless or not update_check.can_self_update():
             return
         last = update_check.load_last_seen_version(APP_DIR)
         if last is None:
@@ -2133,7 +2720,7 @@ class TranslationGUI:
         body = ttk.Frame(win, padding=(20, 16, 20, 14))
         body.pack(fill=tk.BOTH, expand=True)
         ttk.Label(body, text=t("已更新到最新版本"),
-                  font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W)
+                  font=FONT_BOLD_MD).pack(anchor=tk.W)
         ttk.Label(body, text=t("VRChat Live Translate 已更新到最新版本，一切照常使用。"),
                   wraplength=360, justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
         link = tk.Label(body, text=t("看看这次更新了什么"), fg=ACCENT_HOVER, bg=PANEL,
@@ -2630,6 +3217,196 @@ class TranslationGUI:
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] {err_label}失败：{exc}", flush=True)
 
+    # ---- 专有词库 ----
+
+    def _glossary_scope(self) -> str:
+        """当前下拉选中的 scope key（`global` / `mine` / `theirs`）。
+
+        认不出来就退回全局：宁可编辑到那张最不容易出事的表，也不要抛异常把设置窗干掉。
+        """
+        names = getattr(self, "_glossary_scope_names", None) or {}
+        var = getattr(self, "_glossary_scope_var", None)
+        shown = var.get() if var is not None else ""
+        for key, label in names.items():
+            if label == shown:
+                return key
+        return "global"
+
+    def _glossary_scope_label(self, scope: str) -> str:
+        """给用户看的名字（「全局」/「我说」/「别人说」）——别把内部 key 甩到界面上。"""
+        return (getattr(self, "_glossary_scope_names", None) or {}).get(scope, scope)
+
+    @staticmethod
+    def _glossary_scope_path(scope: str) -> list[str]:
+        """该 scope 在 config.yaml 里的键路径（`_yaml_set_mapping` 认这个）。"""
+        return ["glossary"] if scope == "global" else ["directions", scope, "hotwords"]
+
+    def _read_glossary_from_disk(self, scope: str) -> dict[str, str] | None:
+        """从**磁盘**读某个 scope 的词表；读不到 / 解析失败返回 None（调用方回落内存）。
+
+        为什么按 scope 分开读：界面要能切表编辑，而"用户手改过 config.yaml"这件事
+        对两张表都成立 —— 读的必须都是文件，不然切过去看到的是启动那一刻的快照。
+        """
+        try:
+            raw = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8")) or {}
+            if not isinstance(raw, dict):
+                return None
+            if scope == "global":
+                return _as_str_map(raw.get("glossary"), "glossary（专有词库）")
+            section = (raw.get("directions") or {}).get(scope) or {}
+            return _as_str_map(section.get("hotwords"),
+                               f"directions.{scope}.hotwords（方向级热词）")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 读磁盘词库（{scope}）失败，退回内存快照："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            return None
+
+    def _read_glossary_from_memory(self, scope: str) -> dict[str, str]:
+        """内存快照（磁盘读不到时的兜底）。"""
+        if scope == "global":
+            return dict((self._cfg.session_base or {}).get("glossary") or {})
+        d = (self._cfg.directions or {}).get(scope)
+        return dict(getattr(d, "hotwords", None) or {})
+
+    def _glossary_hint_text(self, scope: str) -> str:
+        """提示语随 scope 变 —— 「全局」和「方向级」的行为完全不同，不能共用一句。"""
+        if scope == "global":
+            return t("每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；"
+                     "作用于两个方向 —— 两个方向都要同一个译名时才放这里")
+        return t("每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；"
+                 "只对「{dir}」这条腿生效，同名词条会覆盖全局",
+                 dir=self._glossary_scope_label(scope))
+
+    def _on_glossary_scope_change(self, _event=None) -> None:
+        """切换作用方向 = 换一张表编辑（重读磁盘，别拿上一张表的内容覆盖过去）。"""
+        self._refresh_glossary_box()
+
+    def _on_save_glossary(self) -> None:
+        """把文本框里的词库写回 config.yaml 的**当前作用方向**那张表。
+
+        三件事必须都做到，少一件都会变成「界面说保存了、实际没生效」：
+          1) 落盘（对应键整段替换，保住段外注释）；
+          2) 同步**内存里的同一个 cfg 对象** —— 引擎每次都从它现读，不打桩就白存；
+          3) 通知**受影响的**跑着的引擎重建会话（词库是会话级配置，改不了热更新）。
+        引擎因 RPM 预算没法立刻重建时会自己出 warn 状态，这里不需要替它圆场。
+        """
+        scope = self._glossary_scope()
+        try:
+            mapping = _parse_glossary_lines(self._glossary_text.get("1.0", tk.END))
+        except Exception as exc:  # noqa: BLE001
+            self._set_glossary_status(t("保存失败：{err}", err=f"{type(exc).__name__}: {exc}"),
+                                      warn=True)
+            return
+
+        saved = self._save_glossary_config(self._glossary_scope_path(scope), mapping)
+        # 同步内存：引擎持有的是**同一个** AppConfig 对象（见 _start_engine 的 cfg=self._cfg）
+        if scope == "global":
+            if isinstance(self._cfg.session_base, dict):
+                self._cfg.session_base["glossary"] = dict(mapping)
+        else:
+            d = (self._cfg.directions or {}).get(scope)
+            if d is None:
+                # 理论上不可达（config.load 总会从模板建出两个方向）—— 但绝不静默：
+                # 内存没同步就意味着引擎不会用上新表，用户会以为「保存了却没生效」。
+                print(f"[gui] ⚠️ 配置里没有方向 {scope!r}：本次只落盘，未同步内存", flush=True)
+            else:
+                d.hotwords = dict(mapping)
+        self._push_glossary_to_engines(scope, mapping)
+
+        bad = _glossary_line_issues(self._glossary_text.get("1.0", tk.END))
+        if saved:
+            if bad:
+                # 格式看不懂的行**必须说出来**：以前是静默丢掉，用户写 `原文：译名`
+                # 只会觉得「保存没反应」，然后反复重试。
+                for _lineno, _raw in bad:
+                    print(f"[gui] ⚠️ 词库第 {_lineno} 行格式看不懂（要写成 原文=译名），"
+                          f"已忽略：{_raw!r}", flush=True)
+                self._set_glossary_status(
+                    t("已保存 {n} 条词条到「{scope}」；{bad} 行看不懂已忽略（要写成 原文=译名）",
+                      n=len(mapping), bad=len(bad), scope=self._glossary_scope_label(scope)),
+                    warn=True)
+            else:
+                self._set_glossary_status(
+                    t("已保存 {n} 条词条到「{scope}」（正在翻译时会重建会话生效）",
+                      n=len(mapping), scope=self._glossary_scope_label(scope)))
+            print(f"[gui] 专有词库已保存（{scope}）：{len(mapping)} 条"
+                  + (f"（另有 {len(bad)} 行格式看不懂已忽略）" if bad else ""), flush=True)
+        else:
+            # 写盘失败只在日志留痕、且**不回显成功**：不能骗用户说存好了
+            self._set_glossary_status(t("保存失败：{err}", err="写入 config.yaml 失败，见日志"),
+                                      warn=True)
+
+    def _save_glossary_config(self, path: list[str], mapping: dict[str, str]) -> bool:
+        """整段替换 config.yaml 里 `path` 指向的那张词表；成功返回 True。
+
+        路径由调用方给：全局是 `["glossary"]`，方向级是 `["directions", <名>, "hotwords"]`
+        —— `_yaml_set_mapping` 对父级缺失会自动补建，所以老配置里没有 `hotwords:` 也能存下去。
+        """
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            return False
+        try:
+            text = p.read_text(encoding="utf-8")
+            _write_config_text(p, _yaml_set_mapping(text, path, mapping))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 保存专有词库失败（{path}）：{exc}", flush=True)
+            return False
+
+    def _push_glossary_to_engines(self, scope: str, mapping: dict[str, str]) -> None:
+        """通知**受影响的**引擎。
+
+        全局改动两条腿都吃；方向级只吃那一条 —— 只发给对应引擎，别让另一条腿
+        平白撞一次 RPM 预算（那会让用户莫名其妙看到「连接预算不足」）。
+        """
+        label = self._glossary_scope_label(scope)
+        for eng, direction in zip(self._engines, self._engine_dirs):
+            if not eng.running:
+                continue
+            if scope == "global":
+                eng.set_glossary(mapping)
+            elif direction == scope:
+                eng.set_direction_hotwords(scope, mapping, label=label)
+
+    def _set_glossary_status(self, text: str, *, warn: bool = False) -> None:
+        lbl = getattr(self, "_glossary_status", None)
+        if lbl is None:
+            return
+        try:
+            lbl.configure(text=text, style="Warn.TLabel" if warn else "Muted.TLabel")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _refresh_glossary_box(self) -> None:
+        """把文本框重填成**磁盘上当前 scope 的那张**词表（读不到就退回内存快照）。
+
+        为什么每次打开设置 / 每次切作用方向都要重填：用户完全可能**手改 config.yaml**
+        （模板里就写着怎么改），而内存里的词库只是启动那一刻的快照。不重填的话，
+        他改完文件、再点设置里的「保存词库」，就会用界面上的旧内容把手工改动**覆盖掉**
+        —— 这是最容易被骂「把我配置搞丢了」的一类 bug。
+
+        所以这里读的是**文件**，不是内存（与 `_refresh_api_key_in_cfg` 同一口径：
+        配置文件的真相在磁盘上）。文件读不到 / 解析失败时退回内存快照 ——
+        配置坏了不该连设置窗都打不开。改动同时按 scope 刷新提示语、清掉上次的状态提示。
+        """
+        box = getattr(self, "_glossary_text", None)
+        if box is None:
+            return
+        scope = self._glossary_scope()
+        mapping = self._read_glossary_from_disk(scope)
+        if mapping is None:
+            mapping = self._read_glossary_from_memory(scope)
+        try:
+            box.delete("1.0", tk.END)
+            for line in _glossary_to_lines(mapping):
+                box.insert(tk.END, line + "\n")
+            hint = getattr(self, "_glossary_hint", None)
+            if hint is not None:
+                hint.configure(text=self._glossary_hint_text(scope))
+            self._set_glossary_status("")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 刷新词库文本框失败：{exc}", flush=True)
+
     # ---- 音色试听 ----
     def _on_preview_speech_voice(self) -> None:
         self._preview_voice("speech")
@@ -2882,7 +3659,8 @@ class TranslationGUI:
         if not force and "overlay" not in self._sinks:
             return False
         try:
-            self._overlay_out = WristOverlay(
+            # 后端按平台选（Windows=pyopenvr / Linux=自建 OpenXR）
+            self._overlay_out = platform.create_wrist_overlay(
                 OverlayConfig.from_dict(self._cfg.overlay), config_path=DEFAULT_CONFIG)
             if not self._overlay_out.start():
                 self._overlay_out = None      # start() 内部已打印原因
@@ -2994,8 +3772,9 @@ class TranslationGUI:
         try:
             self._root.update_idletasks()     # 先把"正在扫描…"画出来再阻塞
             mics = enumerate_mic_devices()
-            loops = enumerate_loopback_devices()
-            outs = enumerate_audio_out_devices()
+            # Linux 界面不提供 loopback / 输出两个下拉，也就不必跑这两次 pw-dump。
+            loops = [] if self._linux_fixed_audio else enumerate_loopback_devices()
+            outs = [] if self._linux_fixed_audio else enumerate_audio_out_devices()
             self._on_device_scan_result(mics, loops, outs)
         except Exception as exc:
             self._device_scan_pending = False
@@ -3028,8 +3807,9 @@ class TranslationGUI:
             out_display.append(format_device_display(info))
 
         self._mic_combo.configure(values=mic_display)
-        self._loopback_combo.configure(values=loop_display)
-        self._audio_out_combo.configure(values=out_display)
+        if not self._linux_fixed_audio:
+            self._loopback_combo.configure(values=loop_display)
+            self._audio_out_combo.configure(values=out_display)
 
         # 恢复配置里的选择（如果设备在列表里）
         capture_cfg = (self._cfg.output or {}).get("capture") or {}
@@ -3043,18 +3823,22 @@ class TranslationGUI:
         else:
             self._mic_combo.set(auto)
 
-        if loop_name and loop_name in self._loopback_names:
-            self._loopback_combo.set(loop_display[self._loopback_names.index(loop_name) + 1])
-        else:
-            self._loopback_combo.set(auto)
+        if not self._linux_fixed_audio:
+            if loop_name and loop_name in self._loopback_names:
+                self._loopback_combo.set(loop_display[self._loopback_names.index(loop_name) + 1])
+            else:
+                self._loopback_combo.set(auto)
 
-        if out_name and out_name in self._audio_out_names:
-            self._audio_out_combo.set(out_display[self._audio_out_names.index(out_name) + 1])
-        else:
-            self._audio_out_combo.set(auto)
+            if out_name and out_name in self._audio_out_names:
+                self._audio_out_combo.set(out_display[self._audio_out_names.index(out_name) + 1])
+            else:
+                self._audio_out_combo.set(auto)
 
         if not mics and not loops and not outs:
             self._set_status("warn", t("未扫描到设备（远程会话下枚举为空是正常的）"))
+        elif self._linux_fixed_audio:
+            self._set_status("info",
+                t("已扫描到 {m} 个麦克风（VRChat 音频与译音输出自动处理）", m=len(mics)))
         else:
             self._set_status("info",
                 t("已扫描到 {m} 个麦克风 / {l} 个 loopback / {o} 个输出",
@@ -3064,29 +3848,31 @@ class TranslationGUI:
     def _on_device_change(self, _event=None) -> None:
         auto = t("自动检测")
         mic_text = self._mic_combo.get()
-        loop_text = self._loopback_combo.get()
-        out_text = self._audio_out_combo.get()
 
         mic_name = ""
         if mic_text != auto and mic_text:
-            display_list = list(self._mic_combo.cget("values"))
+            display_list = combo_values(self._mic_combo)
             idx = display_list.index(mic_text) if mic_text in display_list else -1
             if idx > 0 and idx - 1 < len(self._mic_names):
                 mic_name = self._mic_names[idx - 1]
 
+        # Linux 没有这两个下拉：保持空串（_save_device_config 会跳过对应配置键）
         loop_name = ""
-        if loop_text != auto and loop_text:
-            display_list = list(self._loopback_combo.cget("values"))
-            idx = display_list.index(loop_text) if loop_text in display_list else -1
-            if idx > 0 and idx - 1 < len(self._loopback_names):
-                loop_name = self._loopback_names[idx - 1]
-
         out_name = ""
-        if out_text != auto and out_text:
-            display_list = list(self._audio_out_combo.cget("values"))
-            idx = display_list.index(out_text) if out_text in display_list else -1
-            if idx > 0 and idx - 1 < len(self._audio_out_names):
-                out_name = self._audio_out_names[idx - 1]
+        if not self._linux_fixed_audio:
+            loop_text = self._loopback_combo.get()
+            if loop_text != auto and loop_text:
+                display_list = combo_values(self._loopback_combo)
+                idx = display_list.index(loop_text) if loop_text in display_list else -1
+                if idx > 0 and idx - 1 < len(self._loopback_names):
+                    loop_name = self._loopback_names[idx - 1]
+
+            out_text = self._audio_out_combo.get()
+            if out_text != auto and out_text:
+                display_list = combo_values(self._audio_out_combo)
+                idx = display_list.index(out_text) if out_text in display_list else -1
+                if idx > 0 and idx - 1 < len(self._audio_out_names):
+                    out_name = self._audio_out_names[idx - 1]
 
         self._save_device_config(mic_name, loop_name, out_name)
         # 回显完整设备名：下拉框宽度有限（长设备名会被截断），
@@ -3098,6 +3884,9 @@ class TranslationGUI:
             self._set_status("info", t("设备：全部自动检测"))
 
     def _save_device_config(self, mic_name: str, loop_name: str, out_name: str) -> None:
+        # Linux：只写麦克风。`loopback_device` / `output.audio.device_name` **原样保留**
+        # （界面不给选、引擎也忽略它们），别把用户旧配置清成空串。
+        write_fixed = not self._linux_fixed_audio
         p = DEFAULT_CONFIG
         if not p.exists():
             return
@@ -3105,13 +3894,15 @@ class TranslationGUI:
             raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
             capture = dict(raw.get("capture") or {})
             capture["mic_device"] = mic_name
-            capture["loopback_device"] = loop_name
+            if write_fixed:
+                capture["loopback_device"] = loop_name
             raw["capture"] = capture
-            output = dict(raw.get("output") or {})
-            audio = dict(output.get("audio") or {})
-            audio["device_name"] = out_name
-            output["audio"] = audio
-            raw["output"] = output
+            if write_fixed:
+                output = dict(raw.get("output") or {})
+                audio = dict(output.get("audio") or {})
+                audio["device_name"] = out_name
+                output["audio"] = audio
+                raw["output"] = output
             with p.open("w", encoding="utf-8") as f:
                 yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)
         except Exception as exc:
@@ -3119,8 +3910,135 @@ class TranslationGUI:
             return
         # 同步内存里的配置，引擎启动时会读
         self._cfg.output.setdefault("capture", {})["mic_device"] = mic_name
-        self._cfg.output["capture"]["loopback_device"] = loop_name
-        self._cfg.output.setdefault("audio", {})["device_name"] = out_name
+        if write_fixed:
+            self._cfg.output["capture"]["loopback_device"] = loop_name
+            self._cfg.output.setdefault("audio", {})["device_name"] = out_name
+
+    # ------------------------------------------------ 输入门限（VRChat 输出侧过滤）
+
+    def _on_gate_change(self, _v=None) -> None:  # noqa: ANN001
+        """门限开关 / 滑块变化：立刻更新显示与正在跑的引擎，落盘延后 300ms。
+
+        这个回调要同时当两种用：`tk.Scale` 的 command 每次移动都触发（参数是字符串），
+        `tk.Checkbutton` 的 command 不带参数 —— 所以形参默认为 None。
+        """
+        db = float(self._gate_var.get())
+        self._gate_val_lbl.configure(text=f"{db:g} dB")
+        self._apply_gate_live()
+        if self._gate_save_job is not None:
+            try:
+                self._root.after_cancel(self._gate_save_job)
+            except Exception:  # noqa: BLE001
+                pass
+        # 拖动时别每像素写盘：停手 300ms 才落盘（同手腕屏微调的取舍）
+        self._gate_save_job = self._root.after(300, self._save_gate_cfg)
+
+    def _apply_gate_live(self) -> None:
+        """把界面上的门限热更新到**正在跑**的引擎（不必等下次「开始翻译」）。
+
+        gate 由采集线程读、界面线程写；写进去的是不可变标量（bool / float），
+        CPython 里原子且不会读到半截值 —— 不用加锁。正在送的那一块音频不受影响：
+        下一次 feed() 才看新阈值。
+        """
+        en = bool(self._gate_enabled_var.get())
+        db = float(self._gate_var.get())
+        n = 0
+        for e in self._engines:
+            g = getattr(e, "input_gate", None)
+            if g is None:
+                continue
+            g.enabled = en
+            g.threshold_db = db
+            n += 1
+        if n:
+            print(f"[gui] 输入门限已热更新（{n} 条腿）：{'开' if en else '关'} "
+                  f"{db:g} dBFS", flush=True)
+
+    def _save_gate_cfg(self) -> None:
+        """把门限写回 config.yaml 的 capture 段（就地改，保住注释与键顺序）。
+
+        只写界面暴露的两项（`gate_enabled` / `gate_db`）：hold / preroll 保持文件里的
+        原值 —— 那是手改的精细参数，不该被界面一次次覆盖回默认值。
+        """
+        self._gate_save_job = None
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            return
+        enabled = bool(self._gate_enabled_var.get())
+        db = round(float(self._gate_var.get()), 1)
+        try:
+            text = p.read_text(encoding="utf-8")
+            text = _yaml_set_or_create(text, ["capture", "gate_enabled"], _fmt_scalar(enabled))
+            text = _yaml_set_or_create(text, ["capture", "gate_db"], _fmt_scalar(db))
+            # hold / preroll 是「想细调才动」的旋钮，界面不暴露：
+            # 文件里**缺**就补上当前生效值（让人在配置里看得见有这两个旋钮），
+            # **已有就一个字都不动** —— 绝不覆盖用户手调过的精细值。
+            try:
+                cap_now = (yaml.safe_load(text) or {}).get("capture") or {}
+            except Exception:  # noqa: BLE001
+                cap_now = {}
+            for key, val in (("gate_hold_ms", self._gate_hold_ms),
+                             ("gate_preroll_ms", self._gate_preroll_ms)):
+                if key not in cap_now:
+                    text = _yaml_set_or_create(text, ["capture", key], _fmt_scalar(int(val)))
+            _write_config_text(p, text)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 保存输入门限失败：{exc}", flush=True)
+            return
+        cap = self._cfg.output.setdefault("capture", {})
+        cap["gate_enabled"] = enabled
+        cap["gate_db"] = db
+        print(f"[gui] 输入门限已写入 config.yaml：enabled={enabled} gate_db={db:g}"
+              f"（hold {self._gate_hold_ms:g}ms / preroll {self._gate_preroll_ms}ms 沿用配置）",
+              flush=True)
+        self._set_status("info", t("输入门限已保存：{db} dB", db=f"{db:g}"))
+
+    def _refresh_gate_level(self) -> None:
+        """刷新设置窗里的实时电平条（每 100ms 一次）。
+
+        横轴 -70 ~ 0 dBFS：门限是白竖线，蓝色填充 = 当前电平已超过门限（这段会被翻译）。
+        数据来源是运行中引擎的 `input_gate.level_db`（loopback 采集腿每 100ms 更新）；
+        没有引擎在跑就只画门限线、读数显示「—」—— 电平只有真在采集时才有意义，
+        不假装有数据。
+        """
+        cv = self._gate_level_canvas
+        gvar = getattr(self, "_gate_var", None)
+        if cv is None or gvar is None:
+            return
+        try:
+            if not cv.winfo_exists():
+                return
+            w = max(10, int(cv.winfo_width()))
+            h = max(6, int(cv.winfo_height()))
+        except Exception:  # noqa: BLE001
+            return
+        active = bool(self._gate_enabled_var.get())
+        thr = max(INPUT_GATE_MIN_DB, min(0.0, float(gvar.get())))
+        lo, hi = INPUT_GATE_MIN_DB, 0.0
+        x_thr = (thr - lo) / (hi - lo) * w
+        cv.delete("all")                       # 每 100ms 重建（2 个图元，开销可忽略）
+        cv.create_line(x_thr, 0, x_thr, h, fill=TEXT, width=2)
+        if not self._engines:
+            self._gate_level_hold = LEVEL_FLOOR_DB
+            if self._gate_level_lbl is not None:
+                try:
+                    self._gate_level_lbl.configure(text="—")
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        lvl = LEVEL_FLOOR_DB
+        for e in self._engines:
+            g = getattr(e, "input_gate", None)
+            if g is not None:
+                lvl = max(lvl, float(g.level_db))
+        # 峰值保持（每 100ms 掉 1.5dB）：逐块读数跳得厉害，直接画会闪成噪声
+        self._gate_level_hold = max(lvl, self._gate_level_hold - 1.5, LEVEL_FLOOR_DB)
+        db = max(lo, min(hi, self._gate_level_hold))
+        x_lvl = (db - lo) / (hi - lo) * w
+        cv.create_rectangle(0, 0, x_lvl, h, outline="",
+                            fill=(ACCENT if (active and db >= thr) else SURFACE_HOVER))
+        if self._gate_level_lbl is not None:
+            self._gate_level_lbl.configure(text=f"{db:.0f} dB")
 
     # ================================================================ 队列轮询
 
@@ -3181,6 +4099,10 @@ class TranslationGUI:
         if _now >= self._room_status_next:
             self._room_status_next = _now + 0.5
             self._refresh_room_status_label()
+        # 输入门限的实时电平条：每 100ms 刷一次（_poll 本身 50ms 一跳）
+        self._gate_level_tick += 1
+        if self._gate_level_canvas is not None and self._gate_level_tick % 2 == 0:
+            self._refresh_gate_level()
         self._root.after(50, self._poll)
 
     # ================================================================ 聊天气泡
