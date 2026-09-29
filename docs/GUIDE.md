@@ -270,8 +270,10 @@ overlay:
   # 分栏：一块面板里并排两个「窗口」，各自宽度可自定义（仍是同一块 overlay，不新增窗口句柄）
   split: false                # true = 启用；内容与换行按**该栏**宽度算
   split_panes: [0.5, 0.5]     # 每栏宽度：全 ≤1 = 比例；有 >1 = 像素/份数（[300,700] ≡ [0.3,0.7]）
-  split_content: ["theirs", "mine"]   # 每栏放谁的内容：mine / theirs / peer（房间里别人）/ all
-  split_labels: ["别人", "我"]         # 每栏顶部小标题（空 = 不画）
+  # 每栏放谁的内容：mine / theirs（别名 local：本地采集那条腿听到的人）/ peer（别名 room：房间里远端成员）/ all
+  #   房间开着时推荐 ["theirs", "room"]：把「周围的人」和「房间里的人」分开，谁在说一眼分清
+  split_content: ["theirs", "room"]
+  split_labels: ["别人（附近）", "房间（远端）"]   # 每栏顶部小标题（空 = 不画）
   split_divider: true         # 栏间竖分隔线
   split_gap_px: 10            # 栏间空隙（像素）
 

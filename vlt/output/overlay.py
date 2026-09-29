@@ -88,7 +88,7 @@ class OverlayConfig:
     split_panes: tuple[float, ...] = (0.5, 0.5)
     split_gap_px: int = 10                           # 栏间空隙（像素）
     split_divider: bool = True                       # 栏间竖分隔线
-    split_content: tuple[str, ...] = ("theirs", "mine")   # 每栏放谁的内容：mine / theirs / peer / all
+    split_content: tuple[str, ...] = ("theirs", "mine")   # 每栏放谁的内容：mine / theirs(=local) / peer(=room) / all
     split_labels: tuple[str, ...] = ("", "")         # 每栏顶部小标题（空 = 不画）
 
     @staticmethod
@@ -419,10 +419,21 @@ def _content_at(seq, i: int, default: str = "all") -> str:  # noqa: ANN001
 
 
 def _filter_entries(entries, sel: str) -> list:  # noqa: ANN001
-    """按栏的内容筛选：`all` / `mine` / `theirs` / `peer`（peer = 房间里别人的话）。"""
+    """按栏的内容筛选。
+
+    选择器（识别不区分大小写，别名为了配置好读）：
+      `all` / `*`            : 全部
+      `mine`                 : 我的话
+      `theirs` / `local`     : **本地采集那条腿**说的人（周围真实在场的人）
+      `peer` / `room`        : **房间里**的远端成员（房间文字中继，条目自带昵称）
+    """
     sel = (sel or "all").strip().lower()
     if sel in ("", "all", "*"):
         return list(entries or [])
+    if sel == "local":
+        sel = "theirs"
+    elif sel == "room":
+        sel = "peer"
     out = []
     for e in entries or []:
         who = _unpack_entry(e)[0]

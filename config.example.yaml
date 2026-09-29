@@ -119,8 +119,12 @@ overlay:
   split_panes: [0.5, 0.5]    # 每栏宽度：全 ≤1 视为比例；有 >1 视为像素/份数（[300,700] ≡ [0.3,0.7]）
   split_gap_px: 10           # 栏间空隙（像素）
   split_divider: true        # 栏间竖分隔线
-  split_content: ["theirs", "mine"]   # 每栏放谁的内容：mine / theirs / peer（房间里别人）/ all
-  split_labels: ["", ""]     # 每栏顶部小标题（空 = 不画；例如 ["别人", "我"]）
+  # 每栏放谁的内容：mine / theirs(别名 local) / peer(别名 room) / all
+  #   theirs = 本地采集那条腿听到的人（周围在场的人）
+  #   room   = 房间里远端成员（文字中继，条目自带昵称）
+  # 推荐：房间开着时用 ["theirs", "room"] 把两者分开，避免混在一起分不清谁在说
+  split_content: ["theirs", "room"]
+  split_labels: ["别人（附近）", "房间（远端）"]   # 每栏顶部小标题（空 = 不画）
 
 # 第三条腿：译音输出（模型译音 → 虚拟声卡 → VRChat 麦克风 → 对方听到）
 output:

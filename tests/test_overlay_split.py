@@ -228,12 +228,48 @@ def test_no_split_keeps_old_path() -> bool:
     return ok
 
 
+def test_room_local_aliases() -> bool:
+    """★ 「别人」与「房间」分开：`local`/`room` 别名必须等价于 `theirs`/`peer`。
+
+    诉求：房间里远端成员的话，和**本地采集那条腿**说的人的话，混在同一栏会分不清谁在说 ——
+    分成两栏就不会。这里断言别名渲染结果与正式名**逐像素相同**，且两栏内容确实不串。
+    """
+    ok = True
+    mixed = [
+        ("theirs", "近くの人が話している", "旁边的人在说话"),
+        ("peer:p_ru", "Я из России", "房间里的俄罗斯人", "逆袭"),
+        ("peer:p_jp", "よろしく", "房间里的日本人", "小春"),
+        ("mine", "我说的", "what I said"),
+    ]
+    a = _make(None, split_content=["theirs", "peer"], split_labels=["别人（附近）", "房间（远端）"])
+    b = _make(None, split_content=["local", "room"], split_labels=["别人（附近）", "房间（远端）"])
+    ia, ib = render_split(mixed, a), render_split(mixed, b)
+    same = ia.tobytes() == ib.tobytes()
+    print(f"  别名等价：local/room 与 theirs/peer 渲染{'一致 ✅' if same else '不一致 ✗'}")
+    ok &= same
+
+    boxes = _pane_boxes(LEFT_X, RIGHT_X + 1, a.split_panes, a.split_gap_px)
+    (p1x0, p1x1), (p2x0, p2x1) = boxes
+    # 第 1 栏（别人=本地）：左缘应有 theirs 灰条，且**没有**任何房间成员的调色板竖条
+    left_local = bool(_col_ys(ia, p1x0, a.color_theirs))
+    left_room = bool(_col_ys(ia, p1x0, peer_color("p_ru")))
+    # 第 2 栏（房间）：左缘应有房间成员的调色板竖条，且**没有** theirs 灰条
+    right_room = bool(_col_ys(ia, p2x0, peer_color("p_ru")))
+    right_local = bool(_col_ys(ia, p2x0, a.color_theirs))
+    cond = left_local and not left_room and right_room and not right_local
+    print(f"  分栏：第1栏(别人) 本地条={left_local} 房间条={left_room}；"
+          f"第2栏(房间) 房间条={right_room} 本地条={right_local}  {'OK' if cond else '✗'}")
+    ok &= cond
+    return ok
+
+
 def main() -> int:
     print("手腕屏分栏（方案 A）测试：")
     results = [
         ("宽度可自定义", test_widths_customizable()),
         ("像素写法等价", test_pixel_weights_equivalent()),
         ("内容不串栏", test_content_filtering()),
+        ("别人/房间可分开", test_room_local_aliases()),
         ("标题与分隔线", test_labels_and_divider()),
         ("脏配置回落", test_dirty_config_falls_back()),
         ("分派正确", test_no_split_keeps_old_path()),
