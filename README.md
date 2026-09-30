@@ -17,8 +17,8 @@
 [@Sand-85](https://github.com/Sand-85) 维护 —— 上游保持原样，这里维护的是一组「让译音真正可用」和 增加更多激进改动 的增强，和上游同步更新且大部分功能互通
 **基础全部来自上游原作者 [nixi-agent](https://github.com/nixi-agent)，协议沿用 MIT（见 `LICENSE`，版权归原作者）。**
 
-**上游代码同时支持 Windows 10/11 与 Linux**（同一份 `config.yaml`、配置语义一致）；
-本仓库发布的是 **Windows 版**（exe），Linux 侧请按上游文档自行安装。
+**本仓库只发布 Windows 版（exe）**，配置、文档与测试都以 Windows 为准 —— 不提供 Linux 构建/安装支持。
+（仓库里跟随上游代码一并带来了 Linux 侧的实现与 `docs/GUIDE.linux.md`，那是上游的东西，本仓库不对它做验证或承诺。）
 
 相对上游多出来的部分：
 
