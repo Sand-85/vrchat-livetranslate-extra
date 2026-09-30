@@ -24,8 +24,7 @@ from pathlib import Path
 from PIL import Image
 
 from ..paths import APP_DIR as ROOT
-from .overlay import (_unpack_entry, OverlayConfig, render_conversation, render_panel,
-                      render_split, split_enabled)
+from .overlay import _unpack_entry, OverlayConfig, render_conversation, render_panel
 
 def build_matrix(pos: tuple[float, float, float], rot_deg: tuple[float, float, float]):
     """构造 OpenVR 的 3x4 位姿矩阵（行主序）。需要 openvr 才能返回其 ctypes 类型。"""
@@ -211,9 +210,6 @@ class WristOverlay:
 
         与 `update()` 的区别：`update()` 是"当前这一句"（CLI 单腿场景够用），
         `update_entries()` 是"最近几句对话"——手腕上只有一块屏，内容应该像 GUI 的聊天区。
-
-        分栏（`overlay.split` / `overlay.split_three`）开着时改走 `render_split()`：
-        同一块面板里并排 N 个「窗口」，每栏宽度可自定义。
         """
         key = tuple((w, (s or "").strip(), (t or "").strip(), (lab or "").strip())
                     for w, s, t, lab in (_unpack_entry(e) for e in (entries or [])))
@@ -221,7 +217,7 @@ class WristOverlay:
             return
         self._last_entries = key
         self._last_text_at = time.monotonic()
-        img = render_split(entries, self.cfg) if split_enabled(self.cfg) else render_conversation(entries, self.cfg)
+        img = render_conversation(entries, self.cfg)
         if self.dry_run:
             self.frames_updated += 1
             self._frames_dir.mkdir(parents=True, exist_ok=True)

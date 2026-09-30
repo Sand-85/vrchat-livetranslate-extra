@@ -55,33 +55,6 @@ def resolve_font_path(configured: str) -> str | None:
 # ---------------------------------------------------------------- 配置
 
 
-def _as_float_tuple(raw, default: tuple[float, ...]) -> tuple[float, ...]:  # noqa: ANN001
-    """配置里的数字列表 → float 元组；空 / 脏值 / 非正数整组回落到默认（绝不抛异常）。"""
-    try:
-        vals = tuple(float(x) for x in raw)
-    except Exception:  # noqa: BLE001
-        return default
-    if not vals or any(v <= 0 for v in vals):
-        return default
-    return vals
-
-
-def _as_str_tuple(raw, default: tuple[str, ...]) -> tuple[str, ...]:  # noqa: ANN001
-    """配置里的字符串列表 → str 元组；脏值回落默认。
-
-    只写一个字符串时按「一个元素」处理（`split_content: mine` 等价于 `[mine]`），
-    否则会被逐字符拆成 ('m','i','n','e')，栏内容筛选就全空 —— 实测容易踩。
-    """
-    if raw is None:
-        return default
-    if isinstance(raw, str):
-        return (raw,)
-    try:
-        return tuple(str(x) for x in raw)
-    except Exception:  # noqa: BLE001
-        return default
-
-
 @dataclass
 class OverlayConfig:
     enabled: bool = True
@@ -116,22 +89,6 @@ class OverlayConfig:
     # 刻意只支持这两个 —— 强行指定具体后端会让平台隔离破功
     # （两端产物的依赖集会在共享代码里被打通），见 vlt/platform/__init__.py 的说明。
     backend: str = "auto"
-    # ---- 分栏（一块面板里并排 N 个「窗口」，各自宽度可自定义）----
-    # split=true → 走 render_split()：仍是**同一块 overlay、同一张贴图**，只在画面里分区。
-    split: bool = False
-    # 每栏宽度：全 ≤1 视为**比例**（[0.3, 0.7]）；有 >1 的视为**像素/份数**（[300, 700]）——
-    # 两种写法都行，内部一律按权重归一化到面板内宽，所以多一栏少一栏都能用。
-    split_panes: tuple[float, ...] = (0.5, 0.5)
-    split_gap_px: int = 10                           # 栏间空隙（像素）
-    split_divider: bool = True                       # 栏间竖分隔线
-    split_content: tuple[str, ...] = ("theirs", "mine")   # 每栏放谁的内容：mine / theirs(=local) / peer(=room) / all
-    split_labels: tuple[str, ...] = ("", "")         # 每栏顶部小标题（空 = 不画）
-    # ---- 三栏：**独立开关**，与两栏互不影响（开了就用下面这组三栏自己的配置）----
-    split_three: bool = False
-    split3_panes: tuple[float, ...] = (0.34, 0.33, 0.33)
-    split3_content: tuple[str, ...] = ("theirs", "room", "mine")
-    split3_labels: tuple[str, ...] = ("别人（附近）", "房间（远端）", "我")
-
     @staticmethod
     def from_dict(d: dict) -> "OverlayConfig":
         d = d or {}
@@ -162,16 +119,6 @@ class OverlayConfig:
             fade_after_s=float(d.get("fade_after_s", 0.0)),
             overlay_key=d.get("overlay_key", "vlt.wrist.panel"),
             backend=str(d.get("backend", "auto") or "auto"),
-            split=bool(d.get("split", False)),
-            split_panes=_as_float_tuple(d.get("split_panes"), (0.5, 0.5)),
-            split_gap_px=int(d.get("split_gap_px", 10)),
-            split_divider=bool(d.get("split_divider", True)),
-            split_content=_as_str_tuple(d.get("split_content"), ("theirs", "mine")),
-            split_labels=_as_str_tuple(d.get("split_labels"), ("", "")),
-            split_three=bool(d.get("split_three", False)),
-            split3_panes=_as_float_tuple(d.get("split3_panes"), (0.34, 0.33, 0.33)),
-            split3_content=_as_str_tuple(d.get("split3_content"), ("theirs", "room", "mine")),
-            split3_labels=_as_str_tuple(d.get("split3_labels"), ("别人（附近）", "房间（远端）", "我")),
         )
 
 
@@ -365,7 +312,7 @@ def _draw_entries(d, entries, cfg: OverlayConfig, *, x0: int, x1: int, y_bottom:
                   budget: int, tf, sf) -> int:  # noqa: ANN001
     """在一块矩形区域里**从下往上**排「最近几句对话」，返回实际占用高度。
 
-    整块面板（`render_conversation`）与分栏里的每一栏（`render_split`）共用这一段 ——
+    整块面板（`render_conversation`）走这一段 ——
     两处必须逐像素一致，否则同一份内容在开/关分栏时会跳。
 
     x0 / x1  : 可绘制区左右边界（同时也是「我说的」右缘竖条 / 「别人说的」左缘竖条的位置）
@@ -423,122 +370,6 @@ def _draw_entries(d, entries, cfg: OverlayConfig, *, x0: int, x1: int, y_bottom:
             yy += asc_t
         y += blk_h
     return used
-
-def _pane_boxes(x0: int, x1: int, panes, gap: int) -> list[tuple[int, int]]:  # noqa: ANN001
-    """把 [x0, x1] 按配置切成 N 栏，返回每栏的 (左, 右)。
-
-    宽度两种写法都吃：**全 ≤1 视为比例**（[0.3, 0.7]），**有 >1 的视为像素/份数**（[300, 700]）——
-    内部一律按权重归一化到「内宽 − 空隙」，所以改栏数不用改配置的语义。
-    """
-    weights = [float(p) for p in (panes or (1.0,))]
-    n = max(1, len(weights))
-    gap = max(0, int(gap))
-    if x1 <= x0:                                 # 面板比留白还窄：退化成一个 1px 宽的区
-        return [(x0, x0 + 1)]
-    total = (x1 - x0) - gap * (n - 1)
-    if total <= n:                               # 面板太窄：退化成不切分，别算出负宽度
-        return [(x0, x1)]
-    s = sum(weights) or float(n)
-    boxes: list[tuple[int, int]] = []
-    x = x0
-    for i, wt in enumerate(weights):
-        wpx = int(round(total * wt / s))
-        if i == n - 1:                           # 最后一栏吃掉取整误差，保证正好铺满
-            wpx = x1 - x
-        wpx = max(1, wpx)
-        boxes.append((x, min(x1, x + wpx)))
-        x = x + wpx + gap
-    return boxes
-
-def _content_at(seq, i: int, default: str = "all") -> str:  # noqa: ANN001
-    """取第 i 栏的配置值；配置里的栏数少于实际栏数时回落默认。"""
-    try:
-        return str(seq[i])
-    except Exception:  # noqa: BLE001
-        return default
-
-def _filter_entries(entries, sel: str) -> list:  # noqa: ANN001
-    """按栏的内容筛选。
-
-    选择器（识别不区分大小写，别名为了配置好读）：
-      `all` / `*`            : 全部
-      `mine`                 : 我的话
-      `theirs` / `local`     : **本地采集那条腿**说的人（周围真实在场的人）
-      `peer` / `room`        : **房间里**的远端成员（房间文字中继，条目自带昵称）
-    """
-    sel = (sel or "all").strip().lower()
-    if sel in ("", "all", "*"):
-        return list(entries or [])
-    if sel == "local":
-        sel = "theirs"
-    elif sel == "room":
-        sel = "peer"
-    out = []
-    for e in entries or []:
-        who = _unpack_entry(e)[0]
-        if sel == "peer":
-            if _peer_id_of(who) is not None:
-                out.append(e)
-        elif str(who).strip().lower() == sel:
-            out.append(e)
-    return out
-
-def _active_panes(cfg: OverlayConfig) -> tuple[tuple[float, ...], tuple[str, ...], tuple[str, ...]]:
-    """当前生效的 `(栏宽, 每栏内容, 每栏标题)` —— **三栏开关优先**（它有自己的那组配置）。"""
-    if cfg.split_three:
-        return cfg.split3_panes, cfg.split3_content, cfg.split3_labels
-    return cfg.split_panes, cfg.split_content, cfg.split_labels
-
-def split_enabled(cfg: OverlayConfig) -> bool:
-    """分栏总开关：**两栏 `split` 与三栏 `split_three` 是两个独立开关**，任一为真即分栏。"""
-    return bool(cfg.split or cfg.split_three)
-
-def render_split(entries, cfg: OverlayConfig | None = None) -> Image.Image:
-    """**一块面板、左右两栏**（方案 A）：每栏宽度可自定义，内容按栏筛选。
-
-    与 `render_conversation` 只差「分区」——外框、配色、字号、换行规则、溢出策略全部沿用，
-    所以同一份内容在开/关分栏时观感一致；换行宽度取**该栏**宽度，不是整块面板。
-    仍然是**同一块 SteamVR overlay**：不新增 handle，也就不引入新的失败面。
-    """
-    cfg = cfg or OverlayConfig()
-    w, h = cfg.size_px
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-
-    pad = 12
-    d.rounded_rectangle([pad, pad, w - pad, h - pad], radius=28,
-                        fill=(*cfg.color_bg, cfg.bg_alpha),
-                        outline=(*cfg.color_border, cfg.border_alpha), width=3)
-
-    def _f(size: int) -> ImageFont.FreeTypeFont:
-        path = resolve_font_path(cfg.font)
-        if path:
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:  # noqa: BLE001
-                pass
-        return ImageFont.load_default()
-
-    tf, sf = _f(cfg.font_size), _f(cfg.source_font_size)
-    panes, contents, labels = _active_panes(cfg)
-    boxes = _pane_boxes(pad * 2, w - pad * 2, panes, cfg.split_gap_px)
-    has_label = any(str(s).strip() for s in (labels or ()))
-    label_h = (cfg.source_font_size + 10) if has_label else 0
-
-    for i, (x0, x1) in enumerate(boxes):
-        if i and cfg.split_divider:              # 栏间竖线（画在两栏之间那条空隙的中线）
-            gx = (boxes[i - 1][1] + x0) // 2
-            d.line([gx, pad * 2 + 4, gx, h - pad * 2 - 4],
-                   fill=(*cfg.color_border, max(40, cfg.border_alpha // 2)), width=2)
-        lab = _content_at(labels, i, "").strip()
-        if lab:
-            d.text(((x0 + x1) // 2, pad * 2), lab, font=sf,
-                   fill=(*cfg.color_source, cfg.source_alpha), anchor="ma")
-        _draw_entries(d, _filter_entries(entries, _content_at(contents, i, "all")),
-                      cfg, x0=x0, x1=x1, y_bottom=h - pad * 2,
-                      budget=(h - 3 * pad) - label_h, tf=tf, sf=sf)
-    return img
-
 
 def render_conversation(entries, cfg: OverlayConfig | None = None) -> Image.Image:
     """把「最近的对话」渲染成**一块**面板 —— 镜像 GUI 的聊天区（别人在左、我在右）。

@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .overlay import OverlayConfig, render_conversation, render_panel, render_split, split_enabled
+from .overlay import OverlayConfig, render_conversation, render_panel
 
 log = logging.getLogger(__name__)
 
@@ -869,23 +869,18 @@ class OpenXrOverlay:
         self._queue_frame(render_panel(text, source, self.cfg))
 
     def update_entries(self, entries: list, force: bool = False) -> None:
-        """渲染会话面板并交给后台帧循环 —— **立即返回，不阻塞调用方**。
-
-        分栏（`overlay.split` / `overlay.split_three`）开着时改走 `render_split()` —— 与
-        Windows 后端（`openvr_overlay.py`）保持同一套行为：同一块面板里并排 N 个「窗口」。
-        """
+        """渲染会话面板并交给后台帧循环 —— **立即返回，不阻塞调用方**。"""
         entries = list(entries or [])
         self._last_entries_cached = tuple(entries)
-        render = render_split if split_enabled(self.cfg) else render_conversation
         if self.dry_run:
-            self._write_demo(render(entries, self.cfg))
+            self._write_demo(render_conversation(entries, self.cfg))
             return
         key = tuple(map(tuple, entries))
         if not force and self._last_entries == key:
             return
         self._last_entries = key
         self._last_render = None
-        self._queue_frame(render(entries, self.cfg))
+        self._queue_frame(render_conversation(entries, self.cfg))
 
     def _queue_frame(self, img) -> None:  # noqa: ANN001
         """把一帧放进「待显示」槽（线程安全、立即返回）。
