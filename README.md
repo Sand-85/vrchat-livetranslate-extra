@@ -4,8 +4,8 @@
 
 [![CI](https://github.com/Sand-85/vrchat-livetranslate-extra/actions/workflows/ci.yml/badge.svg)](https://github.com/Sand-85/vrchat-livetranslate-extra/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Sand-85/vrchat-livetranslate-extra?label=release)](https://github.com/Sand-85/vrchat-livetranslate-extra/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](docs/GUIDE.md#一前置条件)
-[![Python](https://img.shields.io/badge/python-3.11-blue)](docs/GUIDE.md#一前置条件)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](docs/GUIDE.md#一前置条件windows)
+[![Python](https://img.shields.io/badge/python-3.11-blue)](docs/GUIDE.md#一前置条件windows)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 在 VRChat 里做**实时同声传译**：采集麦克风 / 游戏音频 → 千问云实时同传模型 →
