@@ -201,6 +201,12 @@ SETTINGS_WIDTH = 760
 SETTINGS_WRAP = 660            # 长说明的换行宽 = 窗宽 - 左右留白(40) - 滚动条(~12) - 余量
 SETTINGS_MIN_H = 360           # 再小的屏也至少给这么多高（内容靠页面滚动兜底）
 SETTINGS_MAX_H = 900           # 上限：1080p 屏（可用高约 1040）也必须整窗看得见
+# 点「停止翻译」后等引擎收尾的上限（**在后台线程里等**，绝不冻界面）。
+# 实测正常路径：会话关闭 ≤1.8s + chatbox 排空 ≤2s → 单个引擎基本 2s 内收尾完。
+STOP_WAIT_S = 5.0              # 单个引擎；收尾线程**逐个**等，两个引擎最坏 10s（但在后台）
+CLOSE_WAIT_STOP_S = 6.0        # 关窗时**界面最多**等这么久，等不到就直接关
+#                              （上面的收尾线程是 daemon，进程退出会释放麦克风/虚拟声卡）
+
 SETTINGS_CHROME_H = 66         # tab 条 + 页面上下留白：算窗高时在内容高度上加这一份
 # 每页内容 frame 的左右内边距（内容区位置固定，不随标签条动）
 TAB_INSET_X = 20
@@ -502,6 +508,9 @@ class TranslationGUI:
         self._sinks: set[str] = set()
         self._pending_starts = 0
         self._start_job: str | None = None
+        # 停止收尾的完成信号：_stop() 起后台线程等引擎退出，关窗路径靠它做**有界**等待
+        self._stop_done_evt = threading.Event()
+        self._stop_done_evt.set()                # 初值 = 「当前没有收尾在进行」
         self._preview_busy = False               # 一次只试听一个音色（避免两条音频叠着放）
         self._speech_preview_btn = None
         self._tts_preview_btn = None
@@ -3712,6 +3721,15 @@ class TranslationGUI:
             print(f"[gui] 手腕屏刷新失败：{type(exc).__name__}: {exc}", flush=True)
 
     def _stop(self) -> None:
+        """停止翻译：**绝不在界面线程等引擎收尾**（真机实测冻 20s = 窗口无响应）。
+
+        之前的写法是 `for eng in self._engines: eng.stop()`，两处致命：
+        ① `Engine.stop()` 在**调用它的线程**上等收尾，而调用者正是 Tk 主线程；
+        ② 顺序调用 → 第二个引擎在前一个收尾期间继续采集/上送（用户日志里
+        `[mic] 采集结束` 之后 loopback 腿还打了 8 秒的 `[gate]`）。
+        现在：先对**所有**引擎并发下发停止信号（采集立刻停），收尾交给后台线程，
+        界面只留一行「正在停止…」，收尾完成由 `_poll` 从队列里收到通知再恢复。
+        """
         self._pending_starts = 0
         self._specs = []
         if self._start_job is not None:
@@ -3720,28 +3738,70 @@ class TranslationGUI:
             except Exception:
                 pass
             self._start_job = None
-        for eng in self._engines:
-            eng.stop()
+
+        engines = list(self._engines)
+        for eng in engines:
+            try:
+                eng.request_stop()      # 只发信号：并发下发，谁都不等谁
+            except Exception as exc:    # noqa: BLE001
+                print(f"[gui] 下发停止信号失败（忽略）：{type(exc).__name__}: {exc}", flush=True)
         self._stop_overlay()
         self._stop_room()          # 关窗 / 停止都连房间一起停（幂等、≤5s，绝不拖住退出）
         self._refresh_room_status_label()
-        self._engines = []
+        self._engines = []          # 立刻移走：收尾由后台线程负责，_poll 不再看它们
         self._engine_dirs = []
-        self._start_btn.configure(state=tk.NORMAL)
-        self._stop_btn.configure(state=tk.DISABLED)
         self._set_text_input_enabled(False)
-        self._set_status("info", t("已停止"))
+        if not engines:
+            # 没有引擎在手：但可能还有上一次的收尾在飞（只有 _on_close 这条重复调用路径会走到），
+            # 那就别把「开始翻译」放开 —— 旧引擎还在关麦克风/虚拟声卡。
+            if self._stop_done_evt.is_set():
+                self._start_btn.configure(state=tk.NORMAL)
+                self._stop_btn.configure(state=tk.DISABLED)
+            self._set_status("info", t("已停止"))
+            return
+        # 收尾期间**禁掉「开始翻译」**：旧引擎还在关麦克风/虚拟声卡，立刻重启会抢设备。
+        self._start_btn.configure(state=tk.DISABLED)
+        self._stop_btn.configure(state=tk.DISABLED)
+        self._set_status("info", t("正在停止…"))
+        self._stop_done_evt.clear()
+        threading.Thread(target=self._wait_stop_done, args=(engines,), daemon=True,
+                         name="vlt-stop-wait").start()
+
+    def _wait_stop_done(self, engines: list) -> None:
+        """（**后台线程**）等引擎真正收尾完，再入队让 `_poll` 恢复界面。绝不碰 Tk。"""
+        t0 = time.monotonic()
+        stuck: list[int] = []
+        for i, eng in enumerate(engines):
+            try:
+                if not eng.wait_stopped(STOP_WAIT_S):
+                    stuck.append(i)
+            except Exception as exc:            # noqa: BLE001
+                print(f"[gui] ⚠️ 等引擎收尾出错（忽略）：{type(exc).__name__}: {exc}", flush=True)
+        elapsed = time.monotonic() - t0
+        if stuck:
+            print(f"[gui] ⚠️ 停止收尾超时（{STOP_WAIT_S:.0f}s）：第 {stuck} 个引擎还没退出"
+                  "（界面已恢复，可再点「开始翻译」）", flush=True)
+        self._q.put(("stop_done", elapsed, len(engines)))
+        self._stop_done_evt.set()
 
     def _on_close(self) -> None:
-        """关窗口：先停引擎（会在超时内等采集线程真正退出），再销毁窗口。
+        """关窗口：先停引擎（**有界**等采集线程真正退出），再销毁窗口。
 
         顺序很重要——如果先销毁窗口再去等引擎，主线程会阻塞在一个已经失效的
         Tk 事件循环上，界面看起来就是"卡死后闪退"。
+        这里和按钮那条路不同：退出时等一等是对的（要关干净麦克风/虚拟声卡），
+        但同样给上限 —— 等不到也得走，绝不把窗口吊在那儿。
         """
         try:
             self._stop()
         except Exception as exc:
             print(f"[gui] 停止引擎时出错（继续关闭）：{exc}", file=sys.stderr)
+        try:
+            if not self._stop_done_evt.wait(CLOSE_WAIT_STOP_S):
+                print(f"[gui] ⚠️ 退出时等引擎收尾超过 {CLOSE_WAIT_STOP_S:.0f}s，"
+                      f"直接关闭（进程退出会释放设备）", flush=True)
+        except Exception:
+            pass
         try:
             # 「稍后更新」的另一半：正常退出时替换（绝不自动拉起新版）。
             # 放在销毁窗口之前：失败提示需要有地方弹；bat 自己会等本程序退出再动手。
@@ -4081,6 +4141,16 @@ class TranslationGUI:
                     self._set_status(level, txt)
                 elif kind == "voice_preview":
                     self._on_voice_preview_done(item[1], item[2], item[3])
+                elif kind == "stop_done":
+                    # 引擎收尾完成（后台线程入队）→ 恢复「开始翻译」。
+                    # item = ("stop_done", 收尾用时, 引擎数)
+                    self._start_btn.configure(state=tk.NORMAL)
+                    self._stop_btn.configure(state=tk.DISABLED)
+                    print(f"[gui] 停止收尾完成：{item[2]} 个引擎，用时 {item[1]:.2f}s",
+                          flush=True)
+                    # 引擎失败时状态栏已有 error 消息，别用"已停止"盖掉
+                    if self._last_status_level != "error":
+                        self._set_status("info", t("已停止"))
         except queue.Empty:
             pass
         if (self._pending_starts == 0 and self._engines

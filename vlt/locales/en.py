@@ -98,6 +98,7 @@ STRINGS: dict[str, str] = {
     "正在启动（双向）…": "Starting (both directions)…",
     "正在启动…": "Starting…",
     "已停止": "Stopped",
+    "正在停止…": "Stopping…",
     "已切换为{target} → 中文": "Switched to {target} → Chinese",
 
     # ---- 设备扫描 / 选择 ----

@@ -23,6 +23,15 @@ import websockets
 
 from .base import AudioHandler, LiveTranslateSession, SessionConfig, TextDelta, TextHandler, UsageHandler
 
+# 关闭握手的上限（秒）。**真链路实测（2026-09-30）：百炼服务端不回 close 帧** ——
+# `ws.close()` 稳吃 10.01s（两次测量一致），也就是 websockets 的默认 close_timeout，
+# 于是 `Engine._cleanup() → Session.close()` 让引擎线程在「停止翻译」后还活 10.3s，
+# 而 `Engine.stop()` 又在调用方（Tk 主线程）上等这个线程 → 界面「未响应」。
+# 对端正常回 close 帧时这个值不起作用（握手一完成就返回），只有对端装死才走兜底。
+CLOSE_TIMEOUT_S = 1.5
+# `ws.close()` 自身的硬上限（比 close_timeout 略宽一点，只用来兜底/留痕）。
+CLOSE_WAIT_S = 2.0
+
 
 def is_fatal_server_error(payload: dict) -> bool:
     """服务端 `error` 事件是否属于**已判定的致命类**（纯函数，离线可测）。
@@ -98,6 +107,7 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             self.cfg.url,
             additional_headers={"Authorization": f"Bearer {self.cfg.api_key}"},
             open_timeout=15,
+            close_timeout=CLOSE_TIMEOUT_S,
             ping_interval=20,
             ping_timeout=20,
             max_size=None,
@@ -179,6 +189,13 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         return f"{type(exc).__name__}: {exc}"[:200]
 
     async def close(self) -> None:
+        """关会话：正常路径（对端回 close 帧）秒回；对端装死时有界 + **留痕**。
+
+        为什么要有界：实测百炼服务端不回 close 帧 → `ws.close()` 走 websockets 的
+        `close_timeout` 默认 10s，白等会让「停止翻译」多花 10 秒（界面线程同步等它 =
+        窗口「未响应」，用户真机复现）。这里两道闸：建连时给 `close_timeout`，
+        外层再套一层 `wait_for` —— 前者管协议层握手，后者保证任何实现都不会卡住收尾。
+        """
         self._closing = True
         if self._ws is not None:
             try:
@@ -186,10 +203,22 @@ class QwenLiveTranslateSession(LiveTranslateSession):
                 await asyncio.sleep(0.3)
             except Exception:
                 pass
+            t0 = time.perf_counter()
             try:
-                await self._ws.close()
+                await asyncio.wait_for(self._ws.close(), timeout=CLOSE_WAIT_S)
+            except asyncio.TimeoutError:
+                # 降级路径必须留痕（本仓库禁静默降级）：否则「停止怎么要好几秒」无从查起。
+                print(f"[session] 服务端 {CLOSE_WAIT_S:.1f}s 内没回 close 帧 → 放弃等待"
+                      f"（已发 session.finish，不影响停止）", flush=True)
             except Exception:
                 pass
+            else:
+                ms = (time.perf_counter() - t0) * 1000
+                if ms >= CLOSE_TIMEOUT_S * 1000 * 0.9:
+                    # 没到硬上限、但已贴到 close_timeout：握手不完整，同样要留痕。
+                    print(f"[session] close 握手用了 {ms:.0f}ms"
+                          f"（服务端未回 close 帧，已按 close_timeout={CLOSE_TIMEOUT_S}s 收尾）",
+                          flush=True)
         if self._recv_task is not None:
             self._recv_task.cancel()
 
