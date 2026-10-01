@@ -59,6 +59,13 @@ VOICE_DUP_WINDOW_S = 1.0
 VOICE_SEGMENT_SPLIT = "。！？；，!?;,."      # 中英都认（译文是**目标语言**）
 VOICE_SEGMENT_MIN_CHARS = 4                 # 太短的片段先攒着（别念「嗯。」这种碎片）
 
+# B 模式出声流水线：允许几段**同时合成**（往虚拟声卡写永远只有一个写者、按顺序）。
+# 实测（2026-10-01）服务端接受 3 路并发且首包不退化（2 路 617/637ms；3 路 620/588/635ms），
+# 所以并发不是瓶颈；默认 2 足够把「下一段的首包」藏进「上一段的播放」里。
+TTS_PARALLEL_DEFAULT = 2
+TTS_PARALLEL_MAX = 4
+VOICE_SLOT_POLL_S = 0.01        # 写入线程取分片的轮询间隔（合成侧是流式到达的）
+
 
 def _common_prefix_len(a: str, b: str) -> int:
     """两个字符串的公共前缀长度（用来识别"同一句在续写"）。"""
@@ -475,6 +482,43 @@ class _SessionProxy:
             return
 
 
+class _VoiceSlot:
+    """B 模式出声流水线的一段：**合成线程往里追加分片，写入线程按顺序取走**。
+
+    为什么要这个（2026-10-01 实测）：分段合成之后每段都要付一次 TTS 首包（~0.6s），
+    而原来的单飞 worker 是「合成完一段才开始下一段」，于是每段的首包都**裸露**在延迟里；
+    连续说话时还会积压，撞上虚拟声卡 `max_buffer_ms` 的整句丢弃 → 听起来漏句。
+
+    现在：**合成并发（可提前几段）、写入永远单写者且按顺序** —— 分片不会交错（这是当初
+    必须串行的原因），但下一段的首包被藏在前一段的播放里。
+    """
+
+    __slots__ = ("text", "_lock", "_chunks", "_done", "truncated", "error")
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._lock = threading.Lock()
+        self._chunks: list[bytes] = []
+        self._done = False
+        self.truncated = False           # 中途断流（已拿到的分片照样念）
+        self.error: str | None = None    # 合成失败的原因（留痕用）
+
+    def append(self, pcm: bytes) -> None:
+        with self._lock:
+            self._chunks.append(pcm)
+
+    def finish(self) -> None:
+        with self._lock:
+            self._done = True
+
+    def take(self, i: int) -> tuple[bytes | None, bool]:
+        """取第 i 个分片 → (分片或 None, 是否已合成结束)。线程安全。"""
+        with self._lock:
+            if i < len(self._chunks):
+                return self._chunks[i], self._done
+            return None, self._done
+
+
 class Engine:
     """可编程启停的同传引擎。
 
@@ -543,6 +587,8 @@ class Engine:
         # 这里用「待念队列 + 单飞 worker」：并发请求被合并成一次念，不会交错。
         self._voice_pending: list[str] = []
         self._voice_speaking = False
+        # 出声流水线：已排队/在合成的段（顺序 = 播放顺序）；写入侧永远按这个顺序单写者消费。
+        self._voice_slots: deque[_VoiceSlot] = deque()
         # ---- 黑匣子：断线定位用（不影响功能，只在断线时打出来）----
         self._audio_in_chunks = 0      # 发送出去的输入音频块数
         self._silent_chunks = 0        # 其中判为静音的块数
@@ -1305,10 +1351,11 @@ class Engine:
         self._schedule_voice_speak(seg.strip())
 
     def _schedule_voice_speak(self, text: str) -> None:
-        """把 B 模式的增量文本排进**串行**队列（已在念就先攒着，念完一起念下一段）。
+        """把 B 模式的一段译文排进出声流水线（已在跑就攒着，由 worker 按顺序取）。
 
-        ⚠️ 绝不能每个增量各起一个任务：前缀扩展的终版会在 0.1s 内连着来，两路流式分片
-        交错进同一个抖动缓冲 → 听感就是整段反复重念（实测踩过）。
+        ⚠️ 分片**绝不能交错**写入抖动缓冲（实测：两路同时写 → 听感「整段反复重念」，
+        而总时长与 ASR 都看不出问题）。所以：合成可以并发（`tts_parallel`），
+        **写入永远只有一个写者、严格按排队顺序**（见 `_voice_speak_worker`）。
         """
         if not text:
             return
@@ -1318,13 +1365,85 @@ class Engine:
         self._voice_speaking = True
         asyncio.run_coroutine_threadsafe(self._voice_speak_worker(), self._loop)
 
-    async def _voice_speak_worker(self) -> None:
-        """单飞 worker：把排队中的增量合并成一次 TTS 念出去（顺序严格不乱）。"""
+    def _tts_parallel(self) -> int:
+        """允许几段同时合成（`output.audio.tts_parallel`，默认 2，钳在 1..4）。"""
+        audio_cfg = (self._cfg.output or {}).get("audio") or {}
         try:
-            while self._voice_pending:
-                text = "".join(self._voice_pending)
-                self._voice_pending.clear()
-                await self._speak_for_voice_leg(text)
+            n = int(audio_cfg.get("tts_parallel", TTS_PARALLEL_DEFAULT))
+        except (TypeError, ValueError):
+            n = TTS_PARALLEL_DEFAULT
+        return max(1, min(TTS_PARALLEL_MAX, n))
+
+    def _dispatch_voice_slots(self) -> None:
+        """把攒着的文本变成「合成任务」：**同时在合成的段数 ≤ tts_parallel**。
+
+        `_voice_slots` 里的每一段都对应一个已启动的合成任务，所以直接用它限流：
+        队首那段（正在往虚拟声卡写）通常已合成完毕，其余就是**提前量** ——
+        趁前一段还在播时把下一段合成好，它的首包就被藏进播放里。
+        超出上限的留在 `_voice_pending` 攒着（不无限堆任务、也不丢内容）。
+        """
+        cap = self._tts_parallel()
+        while self._voice_pending and len(self._voice_slots) < cap:
+            slot = _VoiceSlot(self._voice_pending.pop(0))
+            self._voice_slots.append(slot)
+            self._loop.create_task(self._synth_slot(slot))       # type: ignore[union-attr]
+
+    async def _synth_slot(self, slot: _VoiceSlot) -> None:
+        """合成一段（在工作线程里跑：迭代 SSE 是阻塞 IO）。分片边到边进 slot。"""
+        try:
+            await asyncio.to_thread(self._synth_slot_blocking, slot)
+        except Exception as exc:                     # noqa: BLE001  兜底：不让任务静默死掉
+            slot.error = f"{type(exc).__name__}: {exc}"
+            slot.finish()
+
+    def _synth_slot_blocking(self, slot: _VoiceSlot) -> None:
+        try:
+            for pcm24 in synthesize_stream(slot.text, **self._speak_kwargs()):
+                slot.append(pcm24)
+        except TtsStreamTruncated:
+            slot.truncated = True                    # 已拿到的分片照样念（少半句，不整句丢）
+        except Exception as exc:                     # noqa: BLE001
+            slot.error = f"{type(exc).__name__}: {exc}"
+        finally:
+            slot.finish()
+
+    def _drain_slot_to_mic(self, slot: _VoiceSlot) -> None:
+        """把 slot 的分片**按到达顺序**推进虚拟声卡（在写入线程里跑，调用方持有出声锁）。"""
+        sent = 0
+        while True:
+            chunk, finished = slot.take(sent)
+            if chunk is not None:
+                self._virtualmic.push(resample_24k_mono_to_48k_stereo(chunk))
+                sent += 1
+            if finished and chunk is None:
+                break
+            time.sleep(VOICE_SLOT_POLL_S)
+        self._virtualmic.end_sentence()
+
+    async def _voice_speak_worker(self) -> None:
+        """单写者：按排队顺序把各段写出去；合成由 `_synth_slot` 并发提前做掉。
+
+        顺序由 `_voice_slots` 这个 deque 保证（先入先出），写入时持 `_speak_lock` → 与打字腿
+        不会同时写同一个虚拟声卡（分片绝不交错）。
+        """
+        try:
+            while True:
+                self._dispatch_voice_slots()
+                if not self._voice_slots:
+                    if not self._voice_pending:
+                        break
+                    await asyncio.sleep(VOICE_SLOT_POLL_S)
+                    continue
+                slot = self._voice_slots[0]
+                async with self._speak_lock():
+                    await asyncio.to_thread(self._drain_slot_to_mic, slot)
+                self._voice_slots.popleft()
+                if slot.error:
+                    self._events.on_status(
+                        "warn", f"语音译音失败：{slot.error}（文字输出不受影响）")
+                elif slot.truncated:
+                    self._events.on_status(
+                        "warn", f"语音译音只念了一半（网络/服务端中断）：「{slot.text[:20]}」")
         finally:
             self._voice_speaking = False
 
@@ -1368,20 +1487,6 @@ class Engine:
             return delta or None
         self._voice_spoken, self._voice_spoken_ts = text, time.monotonic()
         return text
-
-    async def _speak_for_voice_leg(self, text: str) -> None:
-        """把语音腿的终版译文送进流式 TTS（分片直推，首段 ~0.5s 起播）。
-
-        与打字腿共用同一把锁 → 同一时刻只有一路在往虚拟声卡写，分片绝不交错。
-        """
-        try:
-            async with self._speak_lock():
-                await asyncio.to_thread(self._speak_stream, text, self._speak_kwargs())
-        except TtsError as exc:
-            self._events.on_status("warn", f"语音译音失败：{exc}（文字输出不受影响）")
-        except Exception as exc:  # noqa: BLE001
-            self._events.on_status("warn",
-                f"语音译音异常：{type(exc).__name__}: {exc}（文字输出不受影响）")
 
     def _on_audio(self, pcm: bytes) -> None:
         if self._virtualmic is None or self._voice_mode() == "tts":

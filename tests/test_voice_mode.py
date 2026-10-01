@@ -147,12 +147,23 @@ def test_engine_routing() -> bool:
               f"模型音频被丢弃={len(b._virtualmic.pushed) == 0}  {'OK' if cond else '✗'}")
         ok &= cond
 
-        # B 模式出声：直接驱动协程（等价于 _maybe_speak_final 调度到的那条路）
-        asyncio.run(b._speak_for_voice_leg("你好"))
+        # B 模式出声：走真实的出声流水线（调度 → 合成 → 单写者写入）
+        async def _speak_once() -> None:
+            b._loop = asyncio.get_running_loop()
+            b._maybe_speak_final("你好")
+            for _ in range(200):                    # 等 worker 把这一段写完
+                if not b._voice_speaking and not b._voice_slots:
+                    break
+                await asyncio.sleep(0.01)
+
+        asyncio.run(_speak_once())
+        # 封句 2 次是对的：`_maybe_speak_final` 在**新一句**开头先给上一句封尾（预封），
+        # 段末 `_drain_slot_to_mic` 再封一次（这一段的音频归属）。两次之间没有新分片，
+        # 重复标记同一个队尾是无害的。
         cond = (calls == ["你好"] and len(b._virtualmic.pushed) == 1
-                and b._virtualmic.sentences == 1)
+                and b._virtualmic.sentences == 2)
         print(f"  B 模式出声：TTS 调用={calls}，推入 {len(b._virtualmic.pushed)} 段，"
-              f"封句 {b._virtualmic.sentences} 次  {'OK' if cond else '✗'}")
+              f"封句 {b._virtualmic.sentences} 次（新句预封 + 段末封）  {'OK' if cond else '✗'}")
         ok &= cond
 
         # B 模式但方向级 output_audio 关着 → 不出声
@@ -233,10 +244,17 @@ def test_voice_delta_dedupe() -> bool:
 
 
 def test_voice_serialized() -> bool:
-    """并发防交错：两段增量几乎同时到 → 必须串行（甚至合并成一次），绝不并发写同一虚拟声卡。
+    """出声流水线的核心不变量：**合成可以并发，写入永远单写者且不交错**。
 
     实测踩过：前缀扩展的终版相隔 0.09s 到来，两路流式分片交错进抖动缓冲 →
     听感是"整段反复重念"，而总时长与 ASR 都看不出问题。
+
+    2026-10-01 起改为流水线（分段合成后每段都要付一次首包，串行会把首包全裸露在延迟里）：
+    合成允许并发（`output.audio.tts_parallel`，默认 2），但**往虚拟声卡写只有一个写者、
+    严格按排队顺序** —— 所以判据从「TTS 调用最多 1 路」改成下面三条：
+      ① 合成并发数 ≤ tts_parallel（并发确实发生了，说明提前量生效）；
+      ② 推入虚拟声卡的分片**按段的先后排列、段与段不交错**（这才是真正要守的东西）；
+      ③ 段内的分片顺序与合成产出顺序一致。
     """
     ok = True
     inflight = 0
@@ -246,6 +264,7 @@ def test_voice_serialized() -> bool:
 
     def slow_stream(text, **kw):
         nonlocal inflight, max_inflight
+        idx = ord(text[0])                     # 「1你好」「2你好」… 首字符当段号
         inflight += 1
         max_inflight = max(max_inflight, inflight)
         calls.append(text)
@@ -255,7 +274,8 @@ def test_voice_serialized() -> bool:
             try:
                 for _ in range(3):
                     time.sleep(0.05)           # 模拟流式合成耗时
-                    yield b"\x01\x02" * 1200
+                    # 整段填同一个样本值 = 段号 → 重采样后首样本仍是它（升采样是线性插值，首样本保留）
+                    yield idx.to_bytes(2, "little") * 1200
             finally:
                 inflight -= 1
 
@@ -267,24 +287,33 @@ def test_voice_serialized() -> bool:
 
     async def scenario():
         eng._loop = asyncio.get_running_loop()
-        eng._maybe_speak_final("你好，")
-        eng._maybe_speak_final("你好，我是逆袭。")      # 紧接着的增量：应排队而不是并发
-        await asyncio.sleep(0.8)
+        eng._maybe_speak_final("1你好，")
+        eng._maybe_speak_final("2你好，我是逆袭。")     # 紧接着的第二段：应并发合成、顺序写入
+        for _ in range(200):
+            if not eng._voice_speaking and not eng._voice_slots:
+                break
+            await asyncio.sleep(0.01)
 
     try:
         asyncio.run(scenario())
     finally:
         engine_mod.synthesize_stream = real_stream
 
-    cond = max_inflight == 1
-    print(f"  同时进行的 TTS 调用上限={max_inflight}（必须 1）  {'OK' if cond else '✗'}")
+    cond = 1 <= max_inflight <= eng._tts_parallel()
+    print(f"  合成并发上限={max_inflight}（应 ≥1 且 ≤ tts_parallel={eng._tts_parallel()}）"
+          f"  {'OK' if cond else '✗'}")
     ok &= cond
-    # 排队中的增量应与前一段**合并**成一次念（顺序不乱、接缝更少）
-    cond = calls in (["你好，我是逆袭。"], ["你好，", "我是逆袭。"]) or len(calls) == 1
-    print(f"  TTS 调用序列={calls}（应合并或严格串行）  {'OK' if cond else '✗'}")
+
+    # ②③ 推进虚拟声卡的分片：按段分组后必须「一段一块、互不交错」
+    pushed = eng._virtualmic.pushed                    # FakeVirtualMic 记的是 48k 立体声分片
+    order = [int.from_bytes(p[:2], "little") for p in pushed]      # 首样本 = 段号
+    grouped = [k for i, k in enumerate(order) if i == 0 or order[i - 1] != k]
+    cond = sorted(grouped) == [ord("1"), ord("2")] and len(grouped) == 2
+    print(f"  推入分片的段序={[chr(k) for k in grouped]}（应恰好 1、2 各一段块，绝不交错）"
+          f"  {'OK' if cond else '✗'}")
     ok &= cond
     cond = len(eng._virtualmic.pushed) > 0 and eng._virtualmic.sentences >= 1
-    print(f"  推入 {len(eng._virtualmic.pushed)} 段 / 封句 {eng._virtualmic.sentences} 次  "
+    print(f"  推入 {len(eng._virtualmic.pushed)} 段分片 / 封句 {eng._virtualmic.sentences} 次  "
           f"{'OK' if cond else '✗'}")
     ok &= cond
     return ok
