@@ -34,19 +34,23 @@ What this repository adds on top of upstream:
 |---|---|
 | **A/B voice source for the speech leg** | Hot-switch in Settings → "Voice: source and timbre": **A** = the realtime model's own voice (lowest latency) / **B** = local streaming TTS (timbre **identical** to the typing leg) |
 | **Adjustable speech rate** | `text_input.tts.speech_rate` (measured, monotonic), voice-language locking, the cosyvoice backend and other details are in `docs/GUIDE.md` |
-| **Fix: ticking "Room" did nothing on first use** | The `room:` section was only written to the file, the in-memory config was never refreshed → symptom: "the room checkbox does nothing, it works only after a restart"
+| **Fix: ticking "Room" did nothing on first use** | The `room:` section was only written to the file, the in-memory config was never refreshed → symptom: "the room checkbox does nothing, it works only after a restart" (first submitted here, since merged upstream ✅) |
 
 > **Prebuilt exe is on [Releases](https://github.com/Sand-85/vrchat-livetranslate-extra/releases)**
 > (single file, no installation); to run from source see `docs/GUIDE.md`.
 
-> **Synced with upstream**: current baseline = upstream **v0.5.1** (`4088ddb`) + the merged
-> "Stop no longer freezes the UI" fix (PR #38, submitted from this repository; the author then added
-> honest wrap-up logging and a wall-clock chatbox drain budget).
-> This repository's matching version is **v0.5.2**; the Room (multi-user text relay) is still a
-> feature **exclusive to this repository** and is **off by default** — ignore it and nothing changes.
-> Upstream capabilities that arrived with 0.5.x: **desktop subtitles** (an overlay window that sticks
-> to the VRChat window in PC mode), wrist-display pose stored per anchor (switching to the left hand
-> no longer overwrites the right one), a live input-gate level meter, and various AppImage/Linux fixes.
+> **Synced with upstream**: current baseline = upstream **v0.6.0** — upstream merged the **Room**
+> (multi-user text relay) into main (#41, including the "first tick takes effect immediately" fix we
+> had submitted as #5), and both our "stop no longer freezes the UI" fix and the author's follow-ups
+> are in it (#38 / #40).
+> This repository's matching version is **v0.6.1**; **both lines now speak the same room protocol**,
+> the Room stays off by default, and ignoring it changes nothing.
+> Beyond 0.5.x this upstream release also brings: the Room entry moved to **`⚙ Settings → Room`**
+> (connect/disconnect button + "generate random" room code), desktop subtitles showing each room
+> member's nickname, a right-click menu in the text input (cut / copy / paste / select all), and a
+> packaging fix that keeps `vlt/room/sinks` in the built artifact (AppImage module accounting gate).
+> The 0.5.x batch is in the package too: **desktop subtitles**, wrist-display pose stored per anchor,
+> live input-gate level.
 **This repository ships the Windows build only (exe)**: the Linux column in the platform table below
 is a capability **upstream's code already has**; this repository does not build, verify or promise it
 (see above). Both lines share the same `config.yaml` semantics.
@@ -72,6 +76,7 @@ is a capability **upstream's code already has**; this repository does not build,
 | ② Others speak → **VR wrist display** | ✅ Implemented | Captures VRChat's playback output (WASAPI loopback) → translates into Chinese → renders to a SteamVR overlay, **pushed to the screen as soon as there's an update** |
 | ③ I speak → **translated voice into their ears** | ✅ Implemented, off by default | The model outputs translated audio directly → resampled to 48 kHz → written to a virtual sound card → picked up as your VRChat microphone. Requires your own virtual sound card (VoiceMeeter / VB-Cable etc.) |
 | ④ I speak → **type instead of talking** | ✅ Implemented, on by default | Input box in the bottom bar, **Enter sends**: use the keyboard instead of the microphone when you don't want to talk. The translation goes through the **exact same** downstream as ① (bubble / wrist display); with "Audio output" ticked it also **speaks the translation via TTS** into the virtual sound card (the other person hears it) |
+| ⑤ A few people → **see each other's subtitles (room)** | ✅ Done, off by default | Everyone runs their own copy and enters the **same room code** to see **what the others are saying** on their own wrist overlay / desktop subtitles. Only your own speech is broadcast (game audio is never relayed). Entry: `⚙ Settings → Room` |
 
 ### Platform support
 
@@ -81,6 +86,7 @@ is a capability **upstream's code already has**; this repository does not build,
 | ② VR wrist display | ✅ SteamVR overlay | ✅ Built-in OpenXR overlay (Monado / WiVRn) |
 | ③ Translated voice into their ears | ✅ Needs your own virtual sound card (VoiceMeeter / VB-Cable) | ✅ **None needed** — the app declares a virtual mic at runtime |
 | ④ Type instead of talking (with TTS) | ✅ | ✅ |
+| ⑤ Room (see each other's subtitles) | ✅ | ✅ |
 
 Linux install & usage: **[GUIDE.linux.md](GUIDE.linux.md)** ·
 Design rationale and dead ends: **[docs/平台约束记录.md](平台约束记录.md)** (Chinese)

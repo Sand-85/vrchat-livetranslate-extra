@@ -220,58 +220,58 @@ only that one line changes; **comments, blank lines, and key order are all prese
 
 ```yaml
 session:
-  model: qwen3.8-livetranslate-flash-realtime   # 也可换 qwen3.5-*（事件名按代次自动分派）
+  model: qwen3.8-livetranslate-flash-realtime   # also works with qwen3.5-* (event names are dispatched per generation)
   base_url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
-  voice: Tina                 # ⚠️ 必须显式指定，不填会报 Voice 'Chelsie' is not supported
-  turn_detection: null        # 留空 = 服务端默认
-  final_silence_s: 3.0        # ⚠️ 必须 > 服务端增量间隔（实测最大 2.3s），调小会让最终版在句子中间抢跑
-  max_new_sessions_per_minute: 4   # RPM 10 预算：每次 WS 连接算一次请求
+  voice: Tina                 # ⚠️ must be given explicitly — leaving it unset raises Voice 'Chelsie' is not supported
+  turn_detection: null        # empty = server default
+  final_silence_s: 3.0        # ⚠️ must be > the server's delta interval (measured max 2.3 s); a smaller value makes the final version jump the gun mid-sentence
+  max_new_sessions_per_minute: 4   # RPM 10 budget: every WS connection counts as one request
   reconnect_backoff: [2, 5, 10, 30]
 
-capture:                      # 空字符串 = 自动检测
+capture:                      # empty string = auto-detect
   mic_device: ""
   loopback_device: ""
 
 directions:
-  mine:   { source_lang: zh,   target_lang: en, output_audio: false }   # 我说 → 气泡
-  theirs: { source_lang: null, target_lang: zh, output_audio: false }   # 别人说 → 手腕屏（null = 自动识别）
+  mine:   { source_lang: zh,   target_lang: en, output_audio: false }   # I speak → bubble
+  theirs: { source_lang: null, target_lang: zh, output_audio: false }   # others speak → wrist overlay (null = auto-detect)
 
 chatbox:
-  interval_s: 2.0             # 增量刷新节奏（漏桶 5 条/5 秒 → 2 秒一条余量充足）
-  max_chars: 144              # 官方上限（字符，不是字节）
+  interval_s: 2.0             # first delta sent immediately, then a snapshot every 2 s, final version always flushed at end of sentence
+  max_chars: 144              # official limit (characters, not bytes)
 
-text_input:                   # 打字输入（底栏输入框，回车发送）
-  enabled: true               # false = 界面不显示输入行
-  model: qwen-mt-flash        # 打字走的**文本**翻译模型，也可换 qwen-mt-plus
-                              # ⚠️ 别填 qwen3-livetranslate-flash：实测它的文本接口会原样回吐
-  timeout_s: 20               # 单次翻译超时（秒）
-  tts:                        # 打字也要出声（译文经 TTS 合成 → 虚拟声卡 → 对方能听到）
-    enabled: true             # 需勾选「译音输出」且方向含「我说」；没开译音时这步自动跳过，只出文字
-    model: qwen3-tts-flash    # 也可换 qwen3-tts-instruct-flash
-    voice: Cherry             # 多语言音色（中/英/日实测都能读）
+text_input:                   # typing input (bottom-bar box, Enter sends)
+  enabled: true               # false = the input row isn't shown in the UI
+  model: qwen-mt-flash        # typing goes through the **text** translation model; qwen-mt-plus also works
+                              # ⚠️ don't use qwen3-livetranslate-flash here: measured, its text endpoint just echoes the input back
+  timeout_s: 20               # per-translation timeout (seconds)
+  tts:                        # typed input speaks too (translation → TTS → virtual sound card → the other person hears it)
+    enabled: true             # requires "Voice Output" ticked and a direction including "Me"; with voice output off this step is skipped and only text comes out
+    model: qwen3-tts-flash    # qwen3-tts-instruct-flash also works
+    voice: Cherry             # multilingual voice (measured working for Chinese / English / Japanese)
     timeout_s: 30
 
 merger:
-  interval_s: 2.0             # 首 delta 立即发，之后每 2 秒一次快照，句末必刷最终版
-  carry_over: false           # true = 把上一段最终译文作为前缀保留（连续字幕观感）
+  interval_s: 2.0             # first delta sent immediately, then a snapshot every 2 s, final version always flushed at end of sentence
+  carry_over: false           # true = keep the previous final translation as a prefix (gives a continuous-subtitle feel)
 
 overlay:
-  interval_s: 0               # 0 = 有更新立刻上屏（本地显示不受 chatbox 限流约束）
+  interval_s: 0               # 0 = push to screen as soon as there's an update (local display isn't bound by the chatbox rate limit)
   anchor: right_hand          # left_hand | right_hand | tracker | hmd
-  offsets:                    # ★ 每个锚点各存一套位姿（切锚点自动载入，互不覆盖）
+  offsets:                    # ★ each anchor keeps its own pose (switching anchors loads it; they never overwrite each other)
     right_hand: {pos: [0.0, 0.06, 0.02], rot: [-47, -16, 0]}
-    left_hand:  {pos: [0.0, 0.06, 0.02], rot: [-47, 16, 0]}   # 左手 = 右手镜像
-  offset:                     # 兜底：某锚点没单独存过时用这一份（面板属性也在这里）
+    left_hand:  {pos: [0.0, 0.06, 0.02], rot: [-47, 16, 0]}   # left hand = mirror of the right
+  offset:                     # fallback: used when an anchor has no pose of its own (panel properties live here too)
     width_m: 0.23
   size_px: [1024, 320]
-  font_size: 42               # 译文字号
-  source_font_size: 30        # 原文字号
-  show_source: true           # 双行显示（3.8 默认就返回源文识别结果，零额外成本）
+  font_size: 42               # translation font size
+  source_font_size: 30        # source font size
+  show_source: true           # two-line display (3.8 returns the recognized source text anyway, at no extra cost)
 
 output:
   audio:
-    enabled: false            # 译音总开关：与 directions.<X>.output_audio 是「与」关系
-    device_name: ""           # 手选的虚拟声卡名（非空时优先于回退链）
+    enabled: false            # master switch for voice output: ANDed with directions.<X>.output_audio
+    device_name: ""           # manually picked virtual sound card name (when non-empty it wins over the fallback chain)
 ```
 
 ### Wrist-display fine-tune panel (14 sliders, live while dragging)
@@ -326,6 +326,55 @@ as SteamVR's `setOverlayAlpha` on Windows.
 > In exclusive fullscreen any third-party topmost window gets covered — that's not a bug of this app.
 > Preview the rendering offline: `python -m vlt.output.desktop_overlay --demo --out out/desktop_frames`.
 
+### Multiplayer room (a few people watching each other's subtitles)
+
+**For when a group plays together but the voice channel is taken over by the players around you
+speaking their own language**: several people **each** run their own copy of this app and enter the
+**same room code** to join the same room, and then see **what the others are saying** on their own
+wrist overlay / desktop subtitles.
+
+* **How to turn it on**: `⚙ Settings → Room` → enter the **room code** (8 characters, both ends must
+  match; if you can't be bothered coming up with one, click "Generate" and read the code out to the
+  other person) and a **nickname** (leave it empty to use the system user name) → close Settings →
+  click **"Join Room"** on the third row of the main window. Once connected the button turns into a
+  **reddish-brown "Disconnect"**, with `Status: Connected · N online` shown on the right.
+* **To be heard you have to click "Start" first**: what travels through the room is the **recognized
+  source text of what you say** (no translation), and that source text comes from the microphone leg —
+  if you aren't translating you only receive the others' text and send nothing yourself. The direction
+  has to include "Me".
+* **Room code**: 8 characters of Crockford Base32, with the **easily misread `I / L / O / U` taken out**.
+  Typing is forgiving: `I` and `L` are read as `1`, `O` as `0`, and hyphens and spaces are ignored.
+  To get into the same room, everyone has to have the **same code**.
+* **Only your own speech is broadcast**: the leg that captures game audio (loopback) is explicitly
+  excluded — what the others say is never relayed on by you, so no loop can form.
+* **Wrist overlay colour-coded per person + nickname shown**: with several people talking at once you
+  can still tell who is speaking; the chat area and the desktop subtitles show the same.
+* **Changes take effect immediately**: the room code / nickname are written to `config.yaml` right away;
+  if you are already connected it **reconnects** with the new settings.
+* **Config**: the `room:` section of `config.yaml` (the UI only exposes the room code and the nickname,
+  the rest you can edit by hand)
+
+  ```yaml
+  room:
+    enabled: true                      # set to true once you have clicked "Join Room"; remembered next launch
+    server_url: "wss://vlt-room.kcm-nixi.cn/ws"
+    room_code: "TESTTEST"              # 8 characters, both ends must match
+    nickname: ""                       # empty = use the system user name
+    broadcast_source: true             # send what "I" say into the room
+    show_remote: true                  # show what others say on the wrist overlay / in the chat area
+  ```
+* **Server**: the Cloudflare Worker in `server/` (one Durable Object per room) — **text only**: it
+  doesn't translate, doesn't store anything, and reclaims the room once it's empty. To host your own,
+  deploy it as described in [server/README.md](../server/README.md) and point `server_url` at your
+  own address.
+* **This version moves text only, no audio**: the interface for feeding TTS back is already reserved,
+  but not opened up in this version.
+
+> ⚠️ Known limitation: the **member number of each person in the room is generated randomly by the server
+> on every connection**, so "the same person keeps the same colour after reconnecting" **does not hold** —
+> when someone disconnects and rejoins, they come back in a different colour on your screen.
+> In practice, just identify people by **nickname** (nicknames are stable).
+
 ---
 
 ## 7. Troubleshooting
@@ -352,30 +401,37 @@ as SteamVR's `setOverlayAlpha` on Windows.
 
 ```
 vlt/
-├── app.py                CLI 入口（音频源 → 会话 → 节流 → 输出）
-├── engine.py             可编程引擎：会话 + 看门狗重连 + 节流 + chatbox/overlay/译音的启停
-├── gui.py                Tkinter 图形界面（含 --self-test 无头验收）
-├── config.py             配置加载；凭据解析顺序；写坏自愈
-├── textin.py             打字输入：文本翻译（实时模型不接受文本入口，故走 compatible-mode）
-├── tts.py                打字出声：译文经 qwen3-tts 合成成音频，喂给虚拟声卡那条腿
-├── credentials.py        API key 的保存 / 清除 / 打码
-├── devices.py            音频设备枚举与「按名字解析回索引」
-├── paths.py              可写目录决策（源码 / exe / 绿色版）+ 旧文件迁移
-├── crashlog.py           崩溃捕获 + 日志切段/清理 + 脱敏导出
+├── app.py                CLI entry point (audio source → session → throttling → output)
+├── engine.py             Programmable engine: session + watchdog reconnect + throttling + start/stop of chatbox/overlay/voice output
+├── gui.py                Tkinter GUI (includes the headless --self-test acceptance run)
+├── config.py             Config loading; credential resolution order; self-healing after a bad write
+├── textin.py             Typing input: text translation (the realtime model takes no text entry, hence compatible-mode)
+├── tts.py                Spoken typing: the translation is synthesized by qwen3-tts and fed to the virtual-sound-card leg
+├── credentials.py        Save / clear / mask the API key
+├── devices.py            Audio device enumeration and "resolve a name back to an index"
+├── paths.py              Writable-directory decision (source / exe / portable) + migration of old files
+├── crashlog.py           Crash capture + log rotation/cleanup + redacted export
+├── platform/             Platform abstraction layer (win / linux / audio; shared code goes through the facade only)
+├── room/                 Multiplayer room text relay: protocol / model / client / uplink publisher / reserved hooks
 ├── session/
-│   ├── base.py           TextDelta / SessionConfig / create_session（按模型代次分派）
-│   └── qwen38.py         3.8 与 3.5 的事件分派 + 连接预算 + 静默兜底 + 事件埋点
+│   ├── base.py           TextDelta / SessionConfig / create_session (dispatched by model generation)
+│   └── qwen38.py         3.8 and 3.5 event dispatch + connection budget + silence fallback + event instrumentation
 └── output/
-    ├── merger.py         首 delta 立即发 → 2s 快照 → 句末 flush
-    ├── chatbox.py        OSC ,sTT + 令牌桶 + 最终版补发队列
-    ├── overlay.py        SteamVR 手腕屏：渲染 + 锚点 + 热重载 + 两级自愈
-    └── virtualmic.py     译音回灌：24k→48k 重采样 + 抖动缓冲（整句丢弃，绝不切句）
+    ├── merger.py         First delta sent immediately → 2 s snapshot → flush at end of sentence
+    ├── chatbox.py        OSC ,sTT + token bucket + resend queue for the final version
+    ├── overlay.py        **Shared rendering** for both subtitle legs (the wrist overlay and the desktop subtitles both use it)
+    ├── openvr_overlay.py Windows: SteamVR wrist-overlay backend (anchor / hot-reload / two-level self-healing)
+    ├── openxr_overlay.py Linux: built-in OpenXR wrist-overlay backend
+    ├── desktop_overlay.py Desktop subtitle window (pinned to the VRChat window; draggable, adjustable opacity)
+    └── virtualmic.py     Voice feed-back: 24k→48k resampling + jitter buffer (whole utterances dropped, never cut mid-sentence)
 
-scripts/                  探针与调试工具（probe_* / osc_listen / verify_release）
-tests/                    23 个文件、148 个测试函数（离线可跑，CI 逐文件执行）
-docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
-testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
-assets/                   图标、界面截图与赞助收款码
+server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
+scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
+tests/                    50 files, 411 test functions (all run offline; CI runs them file by
+                          file, and does not include tests/test_engine.py, which needs a real API key)
+docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
+testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
+assets/                   Icon, UI screenshots and the sponsor QR codes
 ```
 
 ---
@@ -416,13 +472,13 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
 - **CI** (`.github/workflows/ci.yml`, on push to main / PR / manual):
   syntax check → credential scan → all offline tests file by file → then a separate **packaging-pipeline** check (artifact exists and is ≥ 20 MB)
 - **Release** (`.github/workflows/release.yml`, triggered by pushing a `v*` tag):
-  first reconciles the tag against `__version__` in `vlt/__init__.py` (mismatch = hard fail) → packages →
-  creates the Release with the **exe** and `SHA256SUMS.txt` attached (GitHub shows a `sha256:…` digest next to every asset; the checksum file is a transition aid for clients up to v0.2.0, which only look for it)
+  first reconciles the tag against `__version__` in `vlt/__init__.py` (mismatch = hard fail) → packages the **exe and the Linux AppImage** →
+  creates the Release with the **exe**, **`VRChatLiveTranslate-x86_64.AppImage`** and `SHA256SUMS.txt` attached (GitHub shows a `sha256:…` digest next to every asset; the checksum file is a transition aid for clients up to v0.2.0, which only look for it)
 - **Want to verify a download yourself**: `scripts/verify_release.py` pulls the Release assets and reconciles them
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.5.1 "LevelProbe"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.6.0 "RoomClient"
   ```
 
 ---
@@ -440,6 +496,12 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   so the other person hears it a second or two after you see it in the bubble; the voice is a TTS voice (default `Cherry`), **not the same** as the realtime-model voice of the speech path.
   Same conditions as the third leg: "Audio output" ticked and a virtual sound card available, otherwise it's skipped automatically and only text is produced
 - **Typing replaces the microphone**: so it's only available when the direction includes "I speak", and only after you've clicked "Start translation"
+- **What the room carries is the recognized source text of what *you* say, not the translation**, and it
+  only goes out after you click "Start"; the people in the room see your source text (a different
+  interface language on their side doesn't translate it automatically)
+- **A room member's colour changes when they reconnect**: the member number is generated randomly by
+  the server on every connection, so "same colour after reconnecting" doesn't hold — identify people
+  by nickname instead
 - **The chatbox only carries translations of what *I* say**: translations of what others say don't go into the chatbox bubble — watch the wrist display or the GUI chat area instead
 
 ---

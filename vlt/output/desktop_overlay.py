@@ -30,7 +30,7 @@ from PIL import Image
 
 # 调试帧是"跑完要看"的产物 → 可写目录（exe 旁），与手腕屏的 dry-run 同一个口径
 from ..paths import APP_DIR
-from .overlay import OverlayConfig, render_conversation, render_panel
+from .overlay import OverlayConfig, _unpack_entry, render_conversation, render_panel
 
 # 色键：窗口底色与贴图底色必须是**同一个**颜色，Tk 才会把那一片抠成透明。
 # 选 (1,2,3) 是因为它离面板配色足够远（不会被误抠），又不是纯黑（纯黑会与文字抗锯齿边打架）。
@@ -493,16 +493,22 @@ class DesktopOverlay:
         self._touch(force)
 
     def update_entries(self, entries: Any, force: bool = False) -> None:
-        """刷新成对话视图：entries = [(who, source, translation), ...]，**最后一条最新**。"""
-        rows: list[tuple[str, str, str]] = []
+        """刷新成对话视图：entries = [(who, source, translation[, label]), ...]，**最后一条最新**。
+
+        `label` = 说话人昵称（房间里的远端成员才有），小字画在译文上方、与手腕屏一致。
+        ⚠️ 必须走 `_unpack_entry`：**只解 3 个会把 4 元组整条丢掉**（原来那个 `try: who, source,
+        text = item` 就是这么写的）—— 表现为「房间里别人说的话在桌面字幕上凭空消失」，
+        而手腕屏那条腿好好的（它一直收 4 元组）。两条腿共用同一份 `render_conversation`，
+        形状也必须共用同一套口径。
+        """
+        rows: list[tuple[str, str, str, str]] = []
         for item in (entries or []):
-            try:
-                who, source, text = item
-            except (TypeError, ValueError):
-                continue                             # 形状不对的条目丢掉，别把整屏搞没
+            who, source, text, label = _unpack_entry(item)
             text = (text or "").strip()
-            if text:
-                rows.append((str(who or "theirs"), (source or "").strip(), text))
+            if not text:
+                continue                             # 空内容丢掉（但不清屏）
+            rows.append((str(who or "theirs"), (source or "").strip(), text,
+                         (label or "").strip()))
         if not rows:
             return                                   # 空内容不清屏
         self._entries = rows

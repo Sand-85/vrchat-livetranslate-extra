@@ -1,12 +1,19 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.5.2 "LevelProbe"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.6.1 "RoomClient"
+
+⚠️ **本仓库只发 Windows 版**：没有 AppImage / Linux 附件，所以本脚本就是全部验收面
+（上游那份里的 `verify_appimage.py` 流程不适用于本仓库）。本版新增「多人房间文本中继」，
+needle 取新模块的类名 `RoomClient`（`vlt/room/client.py`，解包后在 `vlt/room/client.pyc` 里命中）。
 
 第二个参数 = 本版代码里必定出现的字符串。判据是「在解包出来的字节码里搜得到」——
 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.6.1 "RoomClient"
+
 ⚠️ **本仓库只发 Windows 版**：没有 AppImage / Linux 附件，所以本脚本就是全部验收面
-（上游那份里的 `verify_appimage.py` 流程不适用于本仓库）。
+（上游那份里的 `verify_appimage.py` 流程不适用于本仓库）。本版新增「多人房间文本中继」，
+needle 取新模块的类名 `RoomClient`（`vlt/room/client.py`，解包后在 `vlt/room/client.pyc` 里命中）。
 修复型发布没有新文案可挑时，用**修复引入的符号名**最可靠。
 
 复核项：

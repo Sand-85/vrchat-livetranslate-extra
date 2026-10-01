@@ -307,8 +307,8 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         overlay=raw.get("overlay") or {},
         output=output,
         ui=raw.get("ui") or {},
-        desktop_overlay=raw.get("desktop_overlay") or {},
         room=raw_room,
+        desktop_overlay=raw.get("desktop_overlay") or {},
         text_input={
             "enabled": bool(raw_textin.get("enabled", True)),
             # 默认 qwen-mt-flash：实测 qwen3-livetranslate-flash 的**文本**接口会原样回吐

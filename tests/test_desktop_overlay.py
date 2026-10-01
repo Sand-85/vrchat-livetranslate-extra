@@ -1075,6 +1075,50 @@ def test_gui_alpha_slider_inherits_and_only_saves_on_touch() -> None:
           "按钮文案与提示如实 OK")
 
 
+def test_update_entries_keeps_room_label() -> None:
+    """★ 4 元组条目（房间成员的昵称）不许被丢 —— 桌面字幕与手腕屏共用一套渲染。
+
+    真实缺口（main 的桌面字幕 × 房间分支的 4 元组，合并时才暴露）：`update_entries()` 原本
+    写的是 `try: who, source, text = item / except: continue`，**只解 3 个** ——
+    房间链路传进来的 4 元组会整条被 continue 掉，症状是「房间里别人说的话在桌面字幕上
+    凭空消失」，而手腕屏那条腿好好的（它一直收 4 元组）。两条腿共用
+    `overlay.render_conversation`，形状口径也必须共用。
+    """
+    import tempfile
+
+    from PIL import Image
+
+    from vlt.output.desktop_overlay import DesktopOverlay, DesktopOverlayConfig
+
+    cfg = DesktopOverlayConfig(enabled=True, mode="conversation", size_px=(640, 240),
+                               font_size=30, source_font_size=22, max_lines=3)
+    ov = DesktopOverlay(cfg, dry_run=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        ov._frames_dir = Path(tmp)      # 指到临时目录，别把仓库 out/ 弄脏
+        assert ov.start() is True
+
+        n0 = ov.frame_count
+        # 4 元组：房间成员的条目（who="peer:<id>"，第 4 项是昵称）
+        room_entries = [("peer:p_abc123", "", "我这边能听到你", "小明")]
+        ov.update_entries(room_entries, force=True)
+        assert ov.frame_count == n0 + 1, (
+            f"4 元组条目被整条丢掉了：帧数没有增加（{n0} → {ov.frame_count}）—— "
+            "症状就是「房间里别人的话在桌面字幕上不显示」")
+        assert len(ov._entries) == 1, f"条目没进渲染队列：{ov._entries!r}"
+        assert ov._entries[0][3] == "小明", f"昵称被丢掉了：{ov._entries[0]!r}"
+
+        # 昵称必须**真的画进图里**：同一句话，带 label 与不带 label 出的图必须不同
+        img_with = Image.open(sorted(Path(tmp).glob("frame_*.png"))[-1]).convert("RGB")
+        ov._entries = []
+        ov._last_sig = None
+        ov.update_entries([("peer:p_abc123", "", "我这边能听到你")], force=True)
+        img_without = Image.open(sorted(Path(tmp).glob("frame_*.png"))[-1]).convert("RGB")
+        assert img_with.tobytes() != img_without.tobytes(), \
+            "带昵称与不带昵称渲染出的图一模一样 —— 昵称根本没被画出来"
+        ov.close()
+    print("  4 元组条目（房间昵称）不再被丢，且昵称真的画进了桌面字幕 OK")
+
+
 if __name__ == "__main__":
     print("test_desktop_overlay:")
     test_compute_position_nine_anchors()
@@ -1099,4 +1143,5 @@ if __name__ == "__main__":
     test_drag_moves_window_and_snaps_to_anchor()
     test_own_window_excluded_from_game_search()
     test_gui_alpha_slider_inherits_and_only_saves_on_touch()
+    test_update_entries_keeps_room_label()
     print("ALL PASSED")

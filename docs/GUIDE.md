@@ -457,6 +457,43 @@ Nekoya=猫屋
 > 独占全屏时任何第三方置顶窗都会被盖住 —— 那不是本程序的 bug。
 > 离线看渲染效果：`python -m vlt.output.desktop_overlay --demo --out out/desktop_frames`。
 
+### 多人房间（几个人互相看字幕）
+
+**给「一群人一起玩、但语音频道被本地玩家语言占掉」的场合**：几个人**各自**跑一份本程序，
+填**同一个房间码**连上同一个房间，就能在各自的手腕屏 / 桌面字幕上看到**彼此说的话**。
+
+* **怎么开**：`⚙ 设置 → 房间` → 填**房间码**（8 位，两端必须一致；懒得想就点「随机生成」，
+  把生成的码念给对方）与**昵称**（留空则用系统用户名）→ 关掉设置 → 主界面第三行点
+  **「连接房间」**。连上后按钮会变成**红棕色的「断开连接」**，右侧显示 `状态：已连接 · N 人`。
+* **要说话得先点「开始翻译」**：房间里传的是**你自己说的话的识别原文**（不做翻译），
+  而原文来自麦克风那条腿 —— 没在翻译就只会收到别人的话、自己发不出去。方向要含「我说」。
+* **房间码**：8 位 Crockford Base32，字符集**去掉了容易念错的 `I / L / O / U`**。
+  手输很宽容：`I`、`L` 会被当成 `1`，`O` 当成 `0`，连字符与空格会被忽略。
+  别人要进同一个房间，必须拿到**同一个码**。
+* **只广播你自己说的话**：采集游戏声音那条腿（loopback）被显式排除 ——
+  别人说的话不会被你二次转播出去，也就不会形成回环。
+* **手腕屏按人分色 + 显示昵称**：房间里几个人同时说话也能分清谁在说；聊天区与桌面字幕同样显示。
+* **改动即时生效**：房间码 / 昵称改完立刻写进 `config.yaml`；已经连着时会按新设置**重连**。
+* **配置**：`config.yaml` 的 `room:` 段（界面上只暴露房间码与昵称，其余手改即可）
+
+  ```yaml
+  room:
+    enabled: true                      # 点过「连接房间」后会写成 true，下次启动记忆它
+    server_url: "wss://vlt-room.kcm-nixi.cn/ws"
+    room_code: "TESTTEST"              # 8 位，两端必须一致
+    nickname: ""                       # 空 = 用系统用户名
+    broadcast_source: true             # 把「我」说的话发到房间
+    show_remote: true                  # 把别人说的话显示在手腕屏 / 聊天区
+  ```
+* **服务端**：`server/` 里的 Cloudflare Worker（每个房间一个 Durable Object），**只搬文字**：
+  不翻译、不落库、房间空了自动回收。想自己搭就照 [server/README.md](../server/README.md) 部署，
+  再把 `server_url` 指向自己的地址。
+* **本版只搬文字、不出声**：TTS 回灌的接口已经预留，本版未开放。
+
+> ⚠️ 已知限制：房间里每个人的**成员编号由服务端在每次连接时随机生成**，
+> 所以「同一个人重连后颜色不变」**不成立** —— 有人断开再连，他在你屏上会换一个颜色。
+> 实际按**昵称**认人即可（昵称是稳定的）。
+
 ---
 
 ## 七、排障
@@ -493,17 +530,24 @@ vlt/
 ├── devices.py            音频设备枚举与「按名字解析回索引」
 ├── paths.py              可写目录决策（源码 / exe / 绿色版）+ 旧文件迁移
 ├── crashlog.py           崩溃捕获 + 日志切段/清理 + 脱敏导出
+├── platform/             平台抽象层（win / linux / audio；共享代码只走门面）
+├── room/                 多人房间文本中继：协议 / 模型 / 客户端 / 上行发布器 / 预留口子
 ├── session/
 │   ├── base.py           TextDelta / SessionConfig / create_session（按模型代次分派）
 │   └── qwen38.py         3.8 与 3.5 的事件分派 + 连接预算 + 静默兜底 + 事件埋点
 └── output/
     ├── merger.py         首 delta 立即发 → 2s 快照 → 句末 flush
     ├── chatbox.py        OSC ,sTT + 令牌桶 + 最终版补发队列
-    ├── overlay.py        SteamVR 手腕屏：渲染 + 锚点 + 热重载 + 两级自愈
+    ├── overlay.py        两条字幕腿的**共享渲染**（手腕屏 / 桌面字幕都用它）
+    ├── openvr_overlay.py Windows：SteamVR 手腕屏后端（锚点 / 热重载 / 两级自愈）
+    ├── openxr_overlay.py Linux：自建 OpenXR 手腕屏后端
+    ├── desktop_overlay.py 桌面字幕窗（贴 VRChat 窗口，可拖可调透明度）
     └── virtualmic.py     译音回灌：24k→48k 重采样 + 抖动缓冲（整句丢弃，绝不切句）
 
-scripts/                  探针与调试工具（probe_* / osc_listen / verify_release）
-tests/                    23 个文件、148 个测试函数（离线可跑，CI 逐文件执行）
+server/                   多人房间的服务端（Cloudflare Worker + Durable Object，独立部署）
+scripts/                  探针与调试工具（probe_* / osc_listen / verify_release / room_e2e_local）
+tests/                    50 个文件、411 个测试函数（离线可跑，CI 逐文件执行；
+                          不含需要真 API key 的 tests/test_engine.py）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
 assets/                   图标、界面截图与赞助收款码
@@ -547,13 +591,13 @@ build_exe.bat                                              :: 打包 + 打完自
 - **CI**（`.github/workflows/ci.yml`，push 到 main / PR / 手动）：
   语法检查 → 凭据扫描 → 逐文件跑全部离线测试 → 再单独验一次**打包链路**（产物存在且 ≥20MB）
 - **Release**（`.github/workflows/release.yml`，推 `v*` tag 触发）：
-  先对账 tag 与 `vlt/__init__.py` 的 `__version__`（不一致直接失败）→ 打包 →
-  建 Release，附件是 **exe** 与 `SHA256SUMS.txt`：校验值 GitHub 会在附件旁直接显示 `sha256:…`，而那份摘要文件是过渡期给 **v0.2.0 及更早客户端**用的（它们只认这个附件，缺了会静默查不到更新）
+  先对账 tag 与 `vlt/__init__.py` 的 `__version__`（不一致直接失败）→ 打包 **exe 与 Linux AppImage** →
+  建 Release，附件是 **exe**、**`VRChatLiveTranslate-x86_64.AppImage`** 与 `SHA256SUMS.txt`：校验值 GitHub 会在附件旁直接显示 `sha256:…`，而那份摘要文件是过渡期给 **v0.2.0 及更早客户端**用的（它们只认这个附件，缺了会静默查不到更新）
 - **下载后想自己复核**：`scripts/verify_release.py` 会把 Release 附件拉下来对账
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.5.1 "LevelProbe"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.6.0 "RoomClient"
   ```
 
 ---
@@ -573,6 +617,10 @@ build_exe.bat                                              :: 打包 + 打完自
   音色是 TTS 音色（默认 `Cherry`），与语音腿的实时模型音色**不是同一个**。
   条件与第三条腿一致：勾了「译音输出」且虚拟声卡可用，否则自动跳过、只出文字
 - **打字替代的是麦克风**：所以只在方向含「我说」时可用，且需要先点「开始翻译」
+- **房间传的是「你自己说的话的识别原文」，不是译文**，而且要**先点「开始翻译」**才发得出去；
+  房间里的人看到的是你的原文（各人界面语言不同也不会自动翻译）
+- **房间成员的颜色会在重连后变化**：成员编号由服务端每次连接随机生成，
+  「重连保持同色」不成立 —— 按昵称认人即可
 - **chatbox 只发『我说的话』的译文**：对方说的话的译文不进 chatbox 气泡，看手腕屏或界面聊天区即可
 - **输入门限只能按响度过滤，不能按玩家身份或距离过滤**：VRChat 输出里没有逐玩家通道，
   所以近处的人贴着麦小声说（耳语）一样会被滤掉，远处的人吼一嗓子照样通过；

@@ -10,3 +10,10 @@
 
 ⚠️ 接线（engine → publish、远端条目 → 手腕屏、GUI 房间行）是批次 2，本包**不碰**既有模块。
 """
+
+# ⚠️ 下面这行 import 是**必须的**，不是多余的：`sinks` 是「本期只定义口子」的模块，
+# 没有任何运行时代码引用它 —— 打包器（PyInstaller）会直接把没人 import 的模块剪掉，
+# 而 AppImage 的「磁盘上的 vlt 模块一个不许少」门禁会因此判红（实测：CI 报
+# `磁盘上有、包里没有的 vlt 模块：['vlt.room.sinks']`）。它只依赖 typing，
+# 不会把 websockets / 网络拉进来，所以放在 `__init__` 里是安全的。
+from . import sinks  # noqa: E402,F401
