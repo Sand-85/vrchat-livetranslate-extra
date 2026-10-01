@@ -24,11 +24,9 @@
 
 | 能力 | 说明 |
 |---|---|
-| **流式合成（SSE）** | 打字腿「开口」从 ~1.7s 降到 **~0.52s**；源语言=目标语言时直接跳过翻译请求| 已合并上游
 | **语音腿译音音源 A/B** | 设置「译音：音源与音色」里热切换：**A** 实时模型自带音色（延迟最低）/ **B** 本地流式 TTS（音色与打字腿**完全一致**） |
 | **语速可调** | `text_input.tts.speech_rate`（实测单调可控），音色语言锁定、cosyvoice 后端等细节见 `docs/GUIDE.md` |
-| **修复：整段反复重念** | 多路流式 TTS 并发写同一虚拟声卡导致分片交错 —— 改为单飞队列 + 合并 |已合并上游✅
-| **修复：房间首次勾选不生效** | 补建 `room:` 段只写了文件、内存里的配置没刷新 → 表现为「勾了房间没反应、重启一次才好」（已回馈上游） |
+| **修复：房间首次勾选不生效** | 补建 `room:` 段只写了文件、内存里的配置没刷新 → 表现为「勾了房间没反应、重启一次才好」
 
 > **预编译 exe 在 [Releases](https://github.com/Sand-85/vrchat-livetranslate-extra/releases)**（单文件、免安装）；
 > 想从源码跑见 `docs/GUIDE.md`。
@@ -121,12 +119,16 @@ Linux 的安装与用法：**[GUIDE.linux.md](docs/GUIDE.linux.md)** ·
 **请给我报销 token** 🙏 
 
 - ☕ **Ko-fi**（海外 / 信用卡 / PayPal）：
-
+-- 原作者链接
   [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/kcmnixi)
+-- Extra分支
+  [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/sand85)
 
 - 国内：微信 / 支付宝扫码
-
+--原作者
 ![收款码](assets/sponsor-qrcodes.png)
+--Extra分支
+![收款码](assets/sponsor-qrcodes-Sand.png)
 
 - 🔑 还没开通千问云？**[点此开通「千问云」▸](https://www.qianwenai.com/)**
 

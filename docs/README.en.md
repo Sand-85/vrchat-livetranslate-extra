@@ -1,10 +1,10 @@
 > [中文](../README.md) | **English** | [日本語](README.ja.md) | [한국어](README.ko.md) | [Русский](README.ru.md)
 
-# vrchat-livetranslate
+# VRChat Live Interpretation
 
-[![CI](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml/badge.svg)](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/nixi-agent/vrchat-livetranslate?label=release)](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20%7C%20Linux-blue)](GUIDE.en.md#1-prerequisites-windows)
+[![CI](https://github.com/Sand-85/vrchat-livetranslate-extra/actions/workflows/ci.yml/badge.svg)](https://github.com/Sand-85/vrchat-livetranslate-extra/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Sand-85/vrchat-livetranslate-extra?label=release)](https://github.com/Sand-85/vrchat-livetranslate-extra/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](GUIDE.en.md#1-prerequisites-windows)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](GUIDE.en.md#1-prerequisites-windows)
 [![License](https://img.shields.io/badge/license-MIT-green)](../LICENSE)
 
@@ -13,8 +13,43 @@ Qwen Cloud real-time interpretation model → translation goes to the **chatbox 
 **VR wrist display**, with an optional path that feeds the translated voice back into a virtual
 microphone so the other person **hears it directly**.
 
-**Supported on Windows 10/11 and Linux.** Both share the same `config.yaml`; the configuration
-semantics are identical across platforms.
+## 📌 About this repository
+
+This repository is a **standalone enhanced build** of
+**[nixi-agent/vrchat-livetranslate](https://github.com/nixi-agent/vrchat-livetranslate)** (MIT),
+maintained by [@Sand-85](https://github.com/Sand-85) — upstream stays untouched; what is maintained
+here is a set of enhancements that "make the translated voice actually usable" plus further,
+more aggressive changes. It is kept in sync with upstream, and most features work on both sides.
+**Everything here is built on the original author's work [nixi-agent](https://github.com/nixi-agent);
+the licence stays MIT (see `LICENSE`, copyright belongs to the original author).**
+
+**This repository ships the Windows build only (exe)** — configuration, documentation and tests all
+target Windows; no Linux build or installation support is provided.
+(The Linux-side implementation and `docs/GUIDE.linux.md` come along with upstream's code — that is
+upstream's work; this repository neither verifies nor promises anything about it.)
+
+What this repository adds on top of upstream:
+
+| Capability | Details |
+|---|---|
+| **A/B voice source for the speech leg** | Hot-switch in Settings → "Voice: source and timbre": **A** = the realtime model's own voice (lowest latency) / **B** = local streaming TTS (timbre **identical** to the typing leg) |
+| **Adjustable speech rate** | `text_input.tts.speech_rate` (measured, monotonic), voice-language locking, the cosyvoice backend and other details are in `docs/GUIDE.md` |
+| **Fix: ticking "Room" did nothing on first use** | The `room:` section was only written to the file, the in-memory config was never refreshed → symptom: "the room checkbox does nothing, it works only after a restart"
+
+> **Prebuilt exe is on [Releases](https://github.com/Sand-85/vrchat-livetranslate-extra/releases)**
+> (single file, no installation); to run from source see `docs/GUIDE.md`.
+
+> **Synced with upstream**: current baseline = upstream **v0.5.1** (`4088ddb`) + the merged
+> "Stop no longer freezes the UI" fix (PR #38, submitted from this repository; the author then added
+> honest wrap-up logging and a wall-clock chatbox drain budget).
+> This repository's matching version is **v0.5.2**; the Room (multi-user text relay) is still a
+> feature **exclusive to this repository** and is **off by default** — ignore it and nothing changes.
+> Upstream capabilities that arrived with 0.5.x: **desktop subtitles** (an overlay window that sticks
+> to the VRChat window in PC mode), wrist-display pose stored per anchor (switching to the left hand
+> no longer overwrites the right one), a live input-gate level meter, and various AppImage/Linux fixes.
+**This repository ships the Windows build only (exe)**: the Linux column in the platform table below
+is a capability **upstream's code already has**; this repository does not build, verify or promise it
+(see above). Both lines share the same `config.yaml` semantics.
 
 ![UI](../assets/gui.png)
 
@@ -29,12 +64,6 @@ semantics are identical across platforms.
 > - **Linux users**: see **[GUIDE.linux.md](GUIDE.linux.md)** (install, dependencies, virtual mic,
 >   wrist display and troubleshooting are all Linux-specific); you can skip the Windows details below.
 
-## Interface language
-
-The UI is available in **Simplified Chinese**, **English**, **日本語**, **한국어** and
-**Русский**. It follows your Windows display language by default, and you can switch it
-manually in **⚙ Settings**. **A restart is required for the change to take effect.**
-
 ## What it can do
 
 | Feature | Status | Details |
@@ -43,7 +72,6 @@ manually in **⚙ Settings**. **A restart is required for the change to take eff
 | ② Others speak → **VR wrist display** | ✅ Implemented | Captures VRChat's playback output (WASAPI loopback) → translates into Chinese → renders to a SteamVR overlay, **pushed to the screen as soon as there's an update** |
 | ③ I speak → **translated voice into their ears** | ✅ Implemented, off by default | The model outputs translated audio directly → resampled to 48 kHz → written to a virtual sound card → picked up as your VRChat microphone. Requires your own virtual sound card (VoiceMeeter / VB-Cable etc.) |
 | ④ I speak → **type instead of talking** | ✅ Implemented, on by default | Input box in the bottom bar, **Enter sends**: use the keyboard instead of the microphone when you don't want to talk. The translation goes through the **exact same** downstream as ① (bubble / wrist display); with "Audio output" ticked it also **speaks the translation via TTS** into the virtual sound card (the other person hears it) |
-
 
 ### Platform support
 
@@ -56,8 +84,6 @@ manually in **⚙ Settings**. **A restart is required for the change to take eff
 
 Linux install & usage: **[GUIDE.linux.md](GUIDE.linux.md)** ·
 Design rationale and dead ends: **[docs/平台约束记录.md](平台约束记录.md)** (Chinese)
-
----
 
 ---
 
@@ -110,12 +136,16 @@ It doesn't have to be perfect — sparing one person a single footgun already co
 **Help cover my token bill** 🙏
 
 - ☕ **Ko-fi** (international / credit card / PayPal):
-
-  [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/kcmnixi)
+  - Original author (upstream):
+    [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/kcmnixi)
+  - This fork (Extra):
+    [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/sand85)
 
 - In China: scan with WeChat / Alipay
-
-![QR codes](../assets/sponsor-qrcodes.png)
+  - Original author:
+    ![QR codes](../assets/sponsor-qrcodes.png)
+  - This fork (Extra):
+    ![QR codes](../assets/sponsor-qrcodes-Sand.png)
 
 - 🔑 Haven't signed up for Qwen Cloud yet? **[Sign up for Qwen Cloud ▸](https://www.qianwenai.com/)**
 
