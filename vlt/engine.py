@@ -51,6 +51,14 @@ CHATBOX_DRAIN_TICK_S = 0.05     # 隔一会儿再问一次令牌桶；刻意不�
 # 超过这个间隔又出现同样的文本 → 当成用户真的又说了一遍，照念。（本仓库的 B 音源增强）
 VOICE_DUP_WINDOW_S = 1.0
 
+# ---- B 模式「分段合成」：不等终版，累计译文一出现完整分句就先合成 ----
+# 为什么能提前（2026-10-01 真链路实测，3 句样本）：服务端在用户**还没说完**时就开始下发译文分片，
+# 且累计文本**只增不改**（前缀扩展，0 次改写）；而终版 `response.text.done` 要等到说完后
+# **~3.5s**（判停 + 响应结束）。等到终版才合成 = 白等这 3.5s —— 真机端到端 4~5s 就是这么来的。
+# 切段只认**分句符号**、且只念已经在累计文本里 verbatim 出现过的部分，所以不会念错。
+VOICE_SEGMENT_SPLIT = "。！？；，!?;,."      # 中英都认（译文是**目标语言**）
+VOICE_SEGMENT_MIN_CHARS = 4                 # 太短的片段先攒着（别念「嗯。」这种碎片）
+
 
 def _common_prefix_len(a: str, b: str) -> int:
     """两个字符串的公共前缀长度（用来识别"同一句在续写"）。"""
@@ -59,6 +67,38 @@ def _common_prefix_len(a: str, b: str) -> int:
     while i < n and a[i] == b[i]:
         i += 1
     return i
+
+
+def voice_segment_from_partial(confirmed: str, spoken: str, *,
+                               split: str = VOICE_SEGMENT_SPLIT,
+                               min_chars: int = VOICE_SEGMENT_MIN_CHARS) -> str | None:
+    """从**流式分片**的累计译文里切出「现在就能合成」的一段（相对已念过的 `spoken`）。
+
+    返回 None = 现在还不用念（还没到分句边界 / 太短 / 模型改写了已念过的部分）。
+
+    ⚠️ 返回的是**原文切片**（可能带前导空格）：调用方必须**按原样**推进游标
+    `spoken += 返回值`，只把 `返回值.strip()` 交给 TTS —— 否则游标不再是累计文本的精确前缀，
+    下一段就再也切不出来了（本仓库真踩过这个坑）。
+
+    三条保守规则（宁可晚一点，也不念错）：
+    1. 只切到**最后一个分句符号**处 —— 不切碎句子；
+    2. 累计文本必须**以 `spoken` 为前缀**（含标点与空白）—— 模型一旦改写已念过的部分就停下，
+       既不重念也不猜（实测前缀不会被改写，这条是护栏）；
+    3. 新片段（去掉空白后）短于 `min_chars` 先攒着 —— 避免把「嗯。」「对，」这种碎片单独合成。
+    """
+    text = (confirmed or "").strip()
+    if not text:
+        return None
+    if spoken and not text.startswith(spoken):
+        return None
+    fresh = text[len(spoken):]
+    cut = max((fresh.rfind(ch) for ch in split), default=-1)
+    if cut < 0:
+        return None
+    seg = fresh[:cut + 1]
+    if len(seg.strip()) < max(1, int(min_chars)):
+        return None
+    return seg
 
 
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
@@ -1133,6 +1173,9 @@ class Engine:
             # 一句译音出完了 → 下一段音频起始处给它封句尾（虚拟麦整句丢弃的依据）
             self._pending_seal = True
             self._maybe_speak_final(text)
+        else:
+            # 还没到终版，但累计译文里可能已经有「完整的分句」了 → 先合成那一段（省 ~3.5s 开口）
+            self._maybe_speak_partial(text)
         if self._overlay is not None:
             self._overlay.update(text, d.source or "")
         if self._merger is not None and self._chatbox_wanted:
@@ -1206,12 +1249,7 @@ class Engine:
         （`你好，` → `你好，我是逆袭。` → `你好，我是逆袭。今天…`）。所以这里只念**增量后缀**，
         否则同一段话被念好几遍（实测踩过：ASR 转写「你好你好我是我是逆袭逆袭…」）。
         """
-        if self._voice_mode() != "tts" or self._virtualmic is None:
-            return
-        if not self._audio_out_enabled():
-            return
-        dd = self._cfg.directions.get(self._direction)
-        if dd is None or not dd.output_audio:
+        if not self._voice_leg_speaking_ready():
             return
         text = (text or "").strip()
         if not text or self._loop is None or not self._loop.is_running():
@@ -1223,6 +1261,48 @@ class Engine:
             # 新的一句：先给上一句封句尾（虚拟麦整句丢弃的依据）
             self._virtualmic.end_sentence()
         self._schedule_voice_speak(delta)
+
+    def _voice_leg_speaking_ready(self) -> bool:
+        """B 模式语音腿出声的前置条件（`_maybe_speak_final` / `_maybe_speak_partial` 共用一份）。
+
+        四道：音源是 B、虚拟麦在、译音输出总开关开、该方向勾了 output_audio。
+        """
+        if self._voice_mode() != "tts" or self._virtualmic is None:
+            return False
+        if not self._audio_out_enabled():
+            return False
+        dd = self._cfg.directions.get(self._direction)
+        return bool(dd is not None and dd.output_audio)
+
+    def _segment_tts_enabled(self) -> bool:
+        """分段合成开关（`output.audio.segment_tts`，**默认开**；关掉就退回「等终版才念」）。"""
+        audio_cfg = (self._cfg.output or {}).get("audio") or {}
+        return bool(audio_cfg.get("segment_tts", True))
+
+    def _maybe_speak_partial(self, text: str) -> None:
+        """B 模式**不等终版**：累计译文里一出现完整分句就先合成（实测可提前 ~3.5s 开口）。
+
+        与 `_maybe_speak_final` 的关系：这里念「已经定型的分句」，终版那条路念**剩下的尾巴**
+        （`_voice_spoken` 是两者共用的游标，所以同一段文本不会被念两遍）。
+        护栏见 `voice_segment_from_partial`（只在分句符号处切、只念 verbatim 已出现过的文本）。
+        """
+        if not self._segment_tts_enabled() or not self._voice_leg_speaking_ready():
+            return
+        if self._loop is None or not self._loop.is_running():
+            return
+        audio_cfg = (self._cfg.output or {}).get("audio") or {}
+        try:
+            min_chars = int(audio_cfg.get("segment_min_chars", VOICE_SEGMENT_MIN_CHARS))
+        except (TypeError, ValueError):
+            min_chars = VOICE_SEGMENT_MIN_CHARS
+        seg = voice_segment_from_partial(text, self._voice_spoken, min_chars=min_chars)
+        if not seg or not seg.strip():
+            return
+        # ⚠️ 游标按**原文切片**推进（含前导空白），只把 strip 后的文本交给 TTS：
+        #    否则游标不再是累计文本的精确前缀，后一段就再也切不出来。
+        self._voice_spoken = self._voice_spoken + seg
+        self._voice_spoken_ts = time.monotonic()
+        self._schedule_voice_speak(seg.strip())
 
     def _schedule_voice_speak(self, text: str) -> None:
         """把 B 模式的增量文本排进**串行**队列（已在念就先攒着，念完一起念下一段）。
