@@ -503,7 +503,6 @@ class Engine:
         # 这里用「待念队列 + 单飞 worker」：并发请求被合并成一次念，不会交错。
         self._voice_pending: list[str] = []
         self._voice_speaking = False
-        self._speak_lock_obj: asyncio.Lock | None = None
         # ---- 黑匣子：断线定位用（不影响功能，只在断线时打出来）----
         self._audio_in_chunks = 0      # 发送出去的输入音频块数
         self._silent_chunks = 0        # 其中判为静音的块数
@@ -1225,12 +1224,6 @@ class Engine:
             self._virtualmic.end_sentence()
         self._schedule_voice_speak(delta)
 
-    def _speak_lock(self) -> asyncio.Lock:
-        """所有 TTS 出声共用一把锁（打字腿 + 语音腿 B 模式都写同一个虚拟声卡）。"""
-        if self._speak_lock_obj is None:
-            self._speak_lock_obj = asyncio.Lock()
-        return self._speak_lock_obj
-
     def _schedule_voice_speak(self, text: str) -> None:
         """把 B 模式的增量文本排进**串行**队列（已在念就先攒着，念完一起念下一段）。
 
@@ -1347,28 +1340,6 @@ class Engine:
             return False
         asyncio.run_coroutine_threadsafe(self._async_send_text(text), self._loop)
         return True
-
-    def _speak_stream(self, text: str, kw: dict) -> tuple[float, bool]:
-        """把流式合成的分片**就地**喂给虚拟声卡，返回 `(推入的秒数, 是否中途断了)`。
-
-        在**工作线程**里跑（`asyncio.to_thread`）：迭代 SSE 是阻塞 IO。
-        虚拟声卡自带抖动缓冲（攒到 buffer_ms 起播 / 停更 0.35s 强制起播），
-        所以第一个分片就能让它开口 —— 这就是打字腿"开口时间"从 ~1.9s 降到 ~0.4s 的原因。
-
-        中途断流（`TtsStreamTruncated`）**保留已推入的部分**（宁可少说半句），
-        把「断了」交给调用方去提示 —— 用户听出「这句好像没说完」时，界面上不能什么都不说。
-        """
-        total = 0
-        truncated = False
-        try:
-            for pcm24 in synthesize_stream(text, **kw):
-                self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
-                total += len(pcm24)
-        except TtsStreamTruncated:
-            truncated = True
-        finally:
-            self._virtualmic.end_sentence()
-        return total / 2 / 24000, truncated
 
     async def _async_send_text(self, text: str) -> None:
         d = self._cfg.directions.get(self._direction) or Direction()
