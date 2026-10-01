@@ -416,21 +416,28 @@ def download_and_verify(info: ReleaseInfo, dest_dir: Path,
 def update_mode() -> str:
     """'frozen' | 'appimage' | 'source' —— 决定「立即更新」怎么换、甚至能不能换。
 
-    - `frozen`  ：Windows 单文件 exe（PyInstaller）→ 换 exe 自己（换不了就靠更新器 bat）；
+    - `frozen`  ：**Windows** 单文件 exe（PyInstaller）→ 换 exe 自己（换不了就靠更新器 bat）；
     - `appimage`：Linux AppImage（`$APPIMAGE` 指向那个文件）→ 换那个 `.AppImage`；
-    - `source`  ：仓库里直接跑（`run_gui.sh`）、或 `--appimage-extract-and-run` 这种
-      **没有单文件可换**的形态 → 只给指引，绝不动任何东西。
+    - `source`  ：仓库里直接跑（`run_gui.sh`）、`--appimage-extract-and-run`、或
+      **Linux 的 PyInstaller 目录产物**（没有单文件可换）→ 只给指引，绝不动任何东西。
 
     ⚠️ AppImage 必须单独一类，别并进 source：它的**源码目录**确实是只读挂载（不能改），
     但 AppImage **文件本身**通常可写，而且 Linux 允许「运行中的可执行文件被 rename 顶替」
     （旧 inode 继续活着，见 `install_appimage()`）—— 所以它和 exe 一样能自更新。
     以前这里只有 frozen/source，AppImage 用户会被当成源码：界面弹「在仓库目录跑 git pull」，
     而 AppImage 用户根本没有仓库。
+
+    ⚠️ 判定顺序：**先 APPIMAGE 再看 frozen**。现在 Linux 侧的 AppImage 是「PyInstaller
+    打包的产物再包一层 AppImage」——进程里 `sys.frozen=True` 且 `$APPIMAGE` 有值，
+    如果先判 frozen 会被当成 Windows 形态：查更新**去下 Windows 的 exe**，
+    替换目标还指向只读挂载里的可执行文件（实测踩过，见 tests 的对应用例）。
     """
-    if is_frozen():
-        return "frozen"
     if appimage_path() is not None:
         return "appimage"
+    if is_frozen():
+        # Linux 的 frozen 目录形态（onedir 直接运行）：没有可替换的单文件，
+        # 归 source（只给指引）；只有 Windows 单文件 exe 才是真正的 frozen。
+        return "frozen" if sys.platform == "win32" else "source"
     return "source"
 
 

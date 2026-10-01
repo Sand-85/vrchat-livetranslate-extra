@@ -2,39 +2,89 @@
 # 把 VRChat 实时同传打成 **AppImage**（Linux：双击即用，不需要装 Python / 依赖）。
 #
 # 用法：
-#     ./scripts/build_appimage.sh              # 构建
-#     ./scripts/build_appimage.sh --no-verify  # 只构建，不做冒烟检查
+#     ./scripts/build_appimage.sh              # 构建 + 构建后自检 + 独立验收
+#     ./scripts/build_appimage.sh --no-slim    # 跳过 pyopenxr 瘦身（产物大 ~100 MB 未压缩）
+#     ./scripts/build_appimage.sh --no-verify  # 只构建、不做独立验收（产物未验证，别发布）
 #
 # 产物：dist/VRChatLiveTranslate-x86_64.AppImage
+#
+# ## 路线（2026-10 起）：PyInstaller onedir → AppDir → appimagetool
+#
+# 取代旧路线（把 uv 的独立 Python + 整个 site-packages 拷进 AppDir）。理由：
+#   * 与 Windows 侧（scripts/build_exe.py）同一条打包工具链，排除清单/坑只有一套要懂；
+#   * 依赖按 import 图收集，不再整份 site-packages 搬运；
+#   * 产物体积略小（实测 58 MB → ~54 MB 压缩）。
 #
 # ## 打进去什么、不打包什么
 #
 # | 内容 | 来源 | 说明 |
 # |---|---|---|
-# | Python 解释器 | uv 的独立 3.11 | **整份拷进去**，不依赖宿主机的 Python（实测可搬运） |
-# | 第三方依赖 | `.venv` 的 site-packages | 剔掉 PyInstaller 之类只在打包时用的 |
-# | 程序源码 | 仓库 | `vlt/` + `run_gui.py` + `assets/` + `config.example.yaml` + `testdata/` |
+# | 解释器 + 依赖 | PyInstaller 按 import 图收集（`.venv`） | onedir：`_internal/` 明文目录 |
+# | 程序源码 | `run_gui.py` + `vlt/` | 字节码进 PYZ（不再是明文 .py） |
+# | 数据 | `assets/` + `config.example.yaml` + `testdata/` | `--add-data` |
+# | Tk | **自编**：Xft + 关 CUPS | 见下 |
 #
-# **不打进包**：glibc / libGL / libEGL / libwayland / tk / libportaudio ——
-# 这些是系统基础库，AppImage 的惯例是依赖宿主机（各发行版版本差异太大，自带反而更容易崩）。
+# ## Tk：为什么要自编，而且还要关掉 CUPS
+#
+# 两个都跟 uv / python-build-standalone 的 Tk 有关：
+#   1. 它可能**不认 fontconfig**（`--enable-xft` 没吃到）→ Tk 只认 X 核心字体，
+#      界面上一排**没有文字的控件**（不是「难看」而是「废掉」）。
+#   2. 它的 Unix 构建默认 `--enable-libcups`（打印支持），于是 Tk 硬链 `libcups`，
+#      顺着 `libcups → libgnutls → p11-kit/nettle/gmp/unistring → avahi/dbus/systemd`
+#      拖进 **14 个库（11.8 MB 解压 / ~4.6 MB 压缩）** —— 我们根本不打印。
+# 所以构建期用 `--enable-xft --disable-libcups` 编一份同版本 `libtcl9tk9.0.so`
+# （缓存到 `build/tools/tk-xft-nocups-<ver>/`），用 `--add-binary` 顶掉 PyInstaller
+# 收进来的那份；构建后断言：**必须链 Xft、必须不链 CUPS**。
+# （解释器自带的 Tk 只有同时满足这两条才会被直接采用。）
+#
+# ⚠️ 注意与「打不打包字体」是**两件事**：
+#   * Xft 版 Tk —— 让 Tk 看得见 fontconfig 里的字体（本脚本负责）；
+#   * 打包字体   —— 保证机器上存在可用的中日韩字体（2026-10 起交给宿主机，见下）。
+#
+# ## 哪些系统库交给宿主机（反向裁剪）
+#
+# PyInstaller 默认把 ELF 依赖闭包全带进 `_internal/`（「自包含」）。但桌面基础栈
+# 机器上必然有，带一份只是白胖；所以构建后**反向删掉**下面两组（见第 4 步）：
+#   * **X11 客户端栈**：libX11 / libXext / libXrender / libXau / libXdmcp / libXss / libXft
+#     —— 这套 Wayland 会话（XWayland）也必须有，没有的话 GUI 本来就跑不起来；
+#   * **音频链路**：libportaudio / libasound / libjack / libpipewire ——
+#     麦克风走 sounddevice→PortAudio（GUIDE.linux 前置条件第 5 条要求宿主装 portaudio；
+#     sounddevice 是惰性导入的，宿主缺它只掉麦克风，不影响启动）；
+#     **整个音频依赖都交还给宿主**：程序对 PipeWire 只用 `pw-dump/pw-record/pw-cat`
+#     命令行，包里那份 libpipewire 没有任何代码调用（构建期有「无引用者」断言兜底）。
+#   * **保留**：fontconfig/freetype/png/expat/brotli（字体渲染）、libstdc++/libgcc
+#     （numpy/OpenBLAS 的 ABI，不赌宿主版本）。
+# 裁剪后会做两道断言：① 宿主的 ldconfig 真的能提供这些 soname；② 包里其余 ELF 的
+# `ldd` 没有 `not found`。⚠️ 运行机缺哪个，症状都是「那一层加载失败」，见 GUIDE.linux。
 #
 # ## 数据写在哪
 #
-# AppImage 里源码是**只读**的 squashfs 挂载。所以 `vlt/paths.py` 认 `APPIMAGE`/`APPDIR`
-# 环境变量，把 config.yaml / logs 写到 `$XDG_DATA_HOME/vrchat-livetranslate`
-# （缺省 `~/.local/share/vrchat-livetranslate`）。见 tests/test_paths.py 的 AppImage 用例。
+# AppImage 里是只读 squashfs。`vlt/paths.py` 认 `APPIMAGE`/`APPDIR`，把 config.yaml / logs
+# 写到 `$XDG_DATA_HOME/vrchat-livetranslate`（缺省 `~/.local/share/vrchat-livetranslate`）。
+#
+# ## 独立验收（第 6 步）
+#
+# 构建完**转调** `scripts/verify_appimage.py`（平台纯度 + 包内导入/反向排除/xr 瘦身 +
+# 离线渲染 + Tk 字体）。包内探针做在产物里（`vlt/selfcheck.py` 的 `--verify-*`），
+# 因为 PyInstaller 布局下包里没有独立解释器了；那个脚本也能单独对着任意 AppImage 跑
+# （CI 就是直接调它，不必重新构建）。
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 APP_ID="vrchat-livetranslate"
 APP_NAME="VRChatLiveTranslate"
-PYVER="3.11"
 OUT_DIR="${REPO}/dist"
-WORK="${REPO}/build/appimage"
+WORK="${REPO}/build/pyi-appimage"
 APPDIR="${WORK}/AppDir"
+BUNDLE="${WORK}/pyi/${APP_NAME}"
 TOOLS="${REPO}/build/tools"
+VENV_PY="${REPO}/.venv/bin/python"
+XFT_TK=""                       # ensure_xft_tk() 的产出：要注入包里的 Tk .so
 die() { echo "[X] $*" >&2; exit 1; }
 step() { echo; echo "=== $* ==="; }
+# ⚠️ 别写 `ldd … | grep -q …`：`set -o pipefail` 下 grep -q 提前退出会给左边的命令发
+#    SIGPIPE（141），整条管道被当成失败（ldconfig -p 的输出够大时**必中**，实测踩过）。
+_ldd_has() { local out; out="$(ldd "$1" 2>/dev/null || true)"; grep -qi -- "$2" <<<"$out"; }
 
 VERIFY=1
 SLIM=1
@@ -48,31 +98,21 @@ done
 unset _arg
 
 # ---------------------------------------------------------------- 0. 前置检查
-step "0/6 检查前置条件"
+step "0/7 检查前置条件"
 
-VENV_PY="${REPO}/.venv/bin/python"
 [ -x "$VENV_PY" ] || die "没有 .venv —— 先跑 ./setup.sh"
 
-# 独立 Python：**必须**是 uv 管理的那份 standalone 解释器。
-#
-# ⚠️ 不能用 `uv python find` —— 在项目目录里它返回的是 **.venv 的解释器**，
-#    而 venv **不可搬运**：`bin/python` 是指向 `~/.local/share/uv/...` 的绝对软链，
-#    还带 pyvenv.cfg。打进 AppImage 后换台机器就起不来（本机测却「正常」，很难发现）。
-#    所以直接去 uv 的 python 目录里找真身（加 --no-project 也没用，这里实测过）。
-HOST_PY=""
-if command -v uv >/dev/null 2>&1; then
-    HOST_PY="$(find "$HOME/.local/share/uv/python" -maxdepth 3 -type f \
-               -name "python${PYVER}" -path "*cpython-${PYVER}*" 2>/dev/null | sort -r | head -1 || true)"
+# PyInstaller：只在构建机需要（不进产物）；没装就按项目一贯的装法装进 .venv。
+if ! "$VENV_PY" -m PyInstaller --version >/dev/null 2>&1; then
+    echo "    未装 PyInstaller → 装进 .venv"
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$VENV_PY" "pyinstaller>=6.6" || die "uv 装 PyInstaller 失败"
+    else
+        "$VENV_PY" -m pip install "pyinstaller>=6.6" || die "pip 装 PyInstaller 失败（.venv 没带 pip？装个 uv 更省事）"
+    fi
 fi
-[ -n "$HOST_PY" ] && [ -x "$HOST_PY" ] || die \
-    "找不到独立的 Python ${PYVER}。装个 uv（pacman -S uv）后先跑：
-       uv python install ${PYVER}"
-# 再确认一次「它真的是独立解释器」而不是 venv 的软链
-if [ -f "$(dirname "$HOST_PY")/../pyvenv.cfg" ] || [ -L "$HOST_PY" ]; then
-    die "找到的 Python 看着像 venv/软链（$HOST_PY）—— 这样打进包不可搬运，请检查"
-fi
-echo "    Python   : $HOST_PY"
-echo "    虚拟环境 : $VENV_PY"
+echo "    PyInstaller : $("$VENV_PY" -m PyInstaller --version)"
+echo "    解释器      : $("$VENV_PY" -c 'import sys; print(sys.base_prefix)')"
 
 # appimagetool：本机没有就下官方 release 到 build/tools（**不动系统**）
 APPIMAGETOOL=""
@@ -94,152 +134,50 @@ resolve_appimagetool() {
 resolve_appimagetool || die "拿不到 appimagetool（网络不通？也可以手动装 appimagetool 包后重跑）"
 echo "    appimagetool: $APPIMAGETOOL"
 
-# ---------------------------------------------------------------- 1. 组装 AppDir
-step "1/6 组装 AppDir"
-rm -rf "$APPDIR"
-mkdir -p "$APPDIR/usr/python" "$APPDIR/usr/app" "$OUT_DIR"
+# ---------------------------------------------------------------- 1. Xft 版 Tk
+step "1/7 准备 Xft 版 Tk（换掉包里的 libtcl9tk9.0.so）"
 
-# 1a. 独立 Python（整份拷，实测可搬运）
-cp -r "$(dirname "$(dirname "$HOST_PY")")/." "$APPDIR/usr/python/"
-# uv 的目录名带版本/架构，里面才是 bin/ lib/ —— 兼容两种布局
-[ -x "$APPDIR/usr/python/bin/python${PYVER}" ] || {
-    find "$APPDIR/usr/python" -maxdepth 3 -type f -name "python${PYVER}" | head -1 | \
-        while read -r f; do cp -r "$(dirname "$(dirname "$f")")/." "$APPDIR/usr/python/"; done
-}
-[ -x "$APPDIR/usr/python/bin/python${PYVER}" ] || die "独立 Python 布局不是我预期的，请检查"
-# ★ 关键断言：打进包的必须是**真解释器**，不能是 venv / 软链 ——
-#   否则在别的机器上会因为软链指向不存在的路径而起不来（本机却测不出来）。
-[ -f "$APPDIR/usr/python/bin/python${PYVER}" ] && [ ! -L "$APPDIR/usr/python/bin/python${PYVER}" ] \
-    || die "打进 AppDir 的 python 是软链 —— 不可搬运，构建脚本有问题"
-[ ! -e "$APPDIR/usr/python/pyvenv.cfg" ] \
-    || die "打进 AppDir 的是 venv（有 pyvenv.cfg）—— 不可搬运，构建脚本有问题"
-echo "    Python 解释器已就位（独立解释器，非 venv/软链 ✓）"
-
-# 1b. 依赖（从 venv 拷，剔掉只在打包时用的）
-SITE_SRC="$("$VENV_PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-SITE_DST="$APPDIR/usr/python/lib/python${PYVER}/site-packages"
-mkdir -p "$SITE_DST"
-cp -r "$SITE_SRC/." "$SITE_DST/"
-# 只在**打包时**用到的（进了包纯属白占体积）；__pycache__ 也一并清掉，构建时再生成
-for junk in PyInstaller pyinstaller _pyinstaller_hooks_contrib pyinstaller_hooks_contrib \
-            setuptools pkg_resources pip wheel; do
-    rm -rf "${SITE_DST:?}/${junk}" "${SITE_DST:?}/${junk}".* 2>/dev/null || true
-done
-find "$SITE_DST" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-rm -rf "$SITE_DST"/*.dist-info/RECORD 2>/dev/null || true
-echo "    依赖已就位（$(du -sh "$SITE_DST" | cut -f1)）"
-
-# 1c. 程序源码
-cp -r "$REPO/vlt" "$APPDIR/usr/app/"
-cp "$REPO/run_gui.py" "$REPO/config.example.yaml" "$REPO/LICENSE" "$APPDIR/usr/app/"
-cp -r "$REPO/assets" "$APPDIR/usr/app/"
-cp -r "$REPO/testdata" "$APPDIR/usr/app/"
-find "$APPDIR/usr/app" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-echo "    源码已就位"
-
-# 1d. ★ 反向排除：删掉 **Windows 独占实现**
-#
-# 这是 Windows 版 `--exclude-module` 的镜像操作，必须做，而且必须在这里做：
-# AppImage 里的 `vlt/` 是**明文 .py**，整份拷进去就等于把 Windows 那套也发出去了。
-#   * vlt/platform/win.py        —— WASAPI / Win32（`platform/__init__.py`
-#                                   只在 IS_WINDOWS 时才 import 它，删掉安全）
-#   * vlt/output/openvr_overlay.py —— SteamVR 手腕屏后端
-# 漏删的后果不是「变胖」而是**边界破功**：`scripts/check_platform_purity.py
-# --platform linux` 会判红（历史上这条判据从没跑过，所以泄漏一直存在）。
-for _win_mod in "vlt/platform/win.py" "vlt/output/openvr_overlay.py"; do
-    rm -f "$APPDIR/usr/app/$_win_mod"
-    [ -e "$APPDIR/usr/app/$_win_mod" ] && die "反向排除失败：$_win_mod 还在 AppDir 里"
-done
-find "$APPDIR/usr/app" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-echo "    已反向排除 Windows 独占实现（vlt/platform/win.py、vlt/output/openvr_overlay.py）"
-
-# 1e. ★ 瘦身：pyopenxr（`xr`）只留 **linux x86_64** 用得到的部分
-#
-# 为什么值得做：pyopenxr 的 wheel 里带着给 **7 个平台**预编译的 API layer 与 loader ——
-# 光 `api_layer/android/` 一份就 56MB（core_validation 24MB + api_dump 22MB），
-# 而我们只用 `xr.*` 的接口，从不 enable 调试层。未压缩能省 ~1.3 亿字节。
-#
-# ⚠️ 保留集不是凭感觉定的，是**由 pyopenxr 自己的代码钉死**的：
-#   * `xr/library/__init__.py`   —— linux + x86_64 时 `LoadLibrary(xr.library.x86_64/
-#     libopenxr_loader.so)`，而且 `xr/raw_functions.py` 在 **import 时**就 dlopen 它；
-#   * `xr/api_layer/__init__.py` —— **import 时**就调 `expose_packaged_api_layers()`，
-#     而它要 `xr.api_layer.x86_64` 这个**目录**存在（`importlib.resources.as_file`）。
-#   所以这两个必须留；`api_layer/linux/`、顶层 `library/libopenxr_loader.so` 都没有
-#   任何代码引用（x86_64 那份才是被选中的）。
-_XR="$APPDIR/usr/python/lib/python${PYVER}/site-packages/xr"
-if [ "$SLIM" -eq 1 ]; then
-    [ -d "$_XR" ] || die "找不到 $_XR —— pyopenxr 的布局变了？瘦身规则要跟着改"
-    rm -rf "$_XR/api_layer"/{android,aarch64,win32,windows,linux}
-    rm -rf "$_XR/library"/{aarch64,android,win32}
-    rm -f  "$_XR/library/openxr_loader.dll"
-    # 断言保留集没被误删：错了就在这里炸，而不是发到用户手里才「启动即崩」
-    [ -f "$_XR/library/x86_64/libopenxr_loader.so" ] \
-        || die "瘦身误删：library/x86_64/libopenxr_loader.so 不见了（import xr 会直接失败）"
-    [ -d "$_XR/api_layer/x86_64" ] \
-        || die "瘦身误删：api_layer/x86_64 目录不见了（import xr 会直接失败）"
-    echo "    ✅ xr 已瘦身：只留 linux x86_64（$(du -sh "$_XR" | cut -f1)）"
-else
-    echo "    （已按 --no-slim 跳过 xr 瘦身：产物会大 ~30MB）"
-fi
-
-
-# ---------------------------------------------------------------- Xft 版 Tk
-
-# ⚠️ 为什么必须自己编一份 Tk（这不是洁癖，是实测结论）：
-#
-#   uv 打包的 Python 自带 Tcl/Tk 9.0.4，但那份 **libtcl9tk9.0.so 完全没有 Xft/fontconfig**
-#   （`ldd` 只链 libc/libdl/libm/libpthread）。后果是 Tk 只认 X 服务器的核心字体，
-#   而现代 Wayland/XWayland 基本不提供核心字体 → **任何中日韩文字都是豆腐块**。
-#
-#   实测证据（同一份只含一张 Noto CJK 的 fontconfig 配置）：
-#       系统 Tk 8.6        → 10 个族，其中**有** Noto Sans CJK
-#       uv 的 Tk 9.0       → 65 个族，中日韩 **0 个**（它根本不看 fontconfig）
-#   ⇒ 所以「把字体打包进去」本身**不解决问题**；必须先让 Tk 会读 fontconfig。
-#
-#   修法：编一份 `--enable-xft` 的 Tk，**只替换 `libtcl9tk9.0.so`**。
-#   Tcl 不动（uv 那份留着）—— 因为：
-#     * 字体是 Tk 的事，与 Tcl 无关；
-#     * 自己编的 Tcl 与 uv 的 Tcl 内部符号不一致，会把 `_tkinter` 打成
-#       `undefined symbol: TclBN_mp_to_ubin`（实测踩过）。
-#
-#   替换后实测：689 个族 / 65 个中日韩族，与系统 Tk 完全一致。
-#
-# 构建依赖（只在**构建机**需要，运行机不需要）：
-#     gcc make + libxft/freetype2/fontconfig/X11 协议头的开发文件
-#     （Ubuntu 24.04 起 X11 协议头叫 `x11proto-dev`，由 `libx11-dev` 自动带入；
-#      别再写 `xorgproto` —— noble 已无此包名）
-build_xft_tk() {
-    local bundled="$APPDIR/usr/python/lib/libtcl9tk9.0.so"
-    [ -f "$bundled" ] || die "AppDir 里没有 libtcl9tk9.0.so，Python 布局可能变了"
-
-    # 版本由 uv 那份 Tcl/Tk 决定 —— 必须同版本，否则 ABI 对不上
+ensure_xft_tk() {
+    # 1) PyInstaller 会收哪份 Tk？—— 构建解释器的 base_prefix 下那份。
+    local base tk_lib
+    base="$("$VENV_PY" -c 'import sys; print(sys.base_prefix)')"
+    tk_lib="$(find "$base/lib" -maxdepth 1 -name 'libtcl9tk9.0.so' -print -quit 2>/dev/null || true)"
+    [ -n "$tk_lib" ] && [ -f "$tk_lib" ] \
+        || die "找不到解释器自带的 libtcl9tk9.0.so（$base/lib）—— Tk 布局变了？"
     local ver
-    ver="$(strings -a "$bundled" 2>/dev/null | grep -oE '^9\.[0-9]+\.[0-9]+' | head -1)"
-    [ -n "$ver" ] || die "认不出打包的 Tcl/Tk 版本"
-    local tag="core-$(echo "$ver" | tr '.' '-')"      # 9.0.4 → core-9-0-4
+    ver="$(strings -a "$tk_lib" 2>/dev/null | grep -oE '^9\.[0-9]+\.[0-9]+' | head -1)"
+    [ -n "$ver" ] || die "认不出解释器 Tk 的版本（$tk_lib）"
 
-    # ⚠️ 缓存目录**必须按 Tcl/Tk 版本分**，复用前还要再校验一次。
-    #    历史教训：目录不区分版本时，`uv python install 3.11` 一旦把 uv 自带的
-    #    Tcl/Tk 从 9.0.4 升到 9.0.5，脚本会读到 ver=9.0.5，却直接拿缓存里
-    #    9.0.4 的 .so 盖到 9.0.5 的 Python 上 —— ABI 不匹配，可能在用户机器上崩，
-    #    而 CI 全绿。版本目录 + 复用前校验（版本号 + 真的链了 Xft）把这堵死。
-    local cache="${TOOLS}/tk-xft-${ver}"
+    # 情况 A：解释器自带的 Tk 同时满足「认 fontconfig」+「不链 CUPS」→ 直接注入。
+    if _ldd_has "$tk_lib" xft && ! _ldd_has "$tk_lib" cups; then
+        XFT_TK="$tk_lib"
+        echo "    解释器 Tk ${ver} 已链 Xft 且不链 CUPS → 直接用，无需自编"
+        return 0
+    fi
+
+    # 情况 B：缓存里有同版本、且「链了 Xft + 没链 CUPS」的自编 Tk（复用前双重校验）。
+    # ⚠️ 缓存**必须按 Tcl/Tk 版本分**：uv 升级了 Tcl/Tk 却命中旧缓存 = ABI 不匹配，
+    #    可能在用户机器上崩而 CI 全绿（历史上踩过）。
+    # ⚠️ 目录名带 `nocups`：旧缓存是带 CUPS 的版本，绝不能命中（否则 14 个库又回来了）。
+    local cache="${TOOLS}/tk-xft-nocups-${ver}"
     local cached_ok=0
     if [ -f "${cache}/libtcl9tk9.0.so" ]; then
         local cver
         cver="$(strings -a "${cache}/libtcl9tk9.0.so" 2>/dev/null \
                 | grep -oE '^9\.[0-9]+\.[0-9]+' | head -1)"
-        if [ "$cver" = "$ver" ] && ldd "${cache}/libtcl9tk9.0.so" 2>/dev/null | grep -qi Xft; then
+        if [ "$cver" = "$ver" ] \
+           && _ldd_has "${cache}/libtcl9tk9.0.so" Xft \
+           && ! _ldd_has "${cache}/libtcl9tk9.0.so" cups; then
             cached_ok=1
         else
-            echo "    ⚠️ 缓存里的 Tk 版本/特性不符（要 ${ver}，实际 ${cver:-未知}）→ 重新编译"
+            echo "    ⚠️ 缓存里的 Tk 版本/特性不符（要 ${ver}、链 Xft、不链 CUPS）→ 重新编译"
         fi
     fi
 
     if [ "$cached_ok" -eq 0 ]; then
-        echo "    编译带 Xft 的 Tcl/Tk ${ver}（首次较慢，之后会缓存）"
-        # 源码目录同样按版本分：老版本解出来的 tcl-*/tk-* 留着会让 find 抓到错的源，
-        # 老 tarball 也会被 `[ -f ... ]` 当成「已下载」而复用。
+        echo "    需要自编 Tk ${ver}（Xft + 关 CUPS；首次较慢，之后缓存）"
+        # 源码目录同样按版本分：老版本解出来的 tcl-*/tk-* 留着会让 find 抓到错的源。
+        local tag="core-$(echo "$ver" | tr '.' '-')"      # 9.0.4 → core-9-0-4
         local src="${TOOLS}/tcltk-src-${ver}"
         mkdir -p "$src"
         for pkg in tcl tk; do
@@ -254,60 +192,309 @@ build_xft_tk() {
         local pfx="${TOOLS}/tcltk-prefix"
         rm -rf "$pfx"; mkdir -p "$pfx"
         # Tcl 只是 Tk 的构建依赖 —— 编出来**不进包**，所以装到 build/tools 里
+        # ⚠️ configure 后必须 `make clean`：源码目录是复用的，上一轮（可能带 CUPS）编出来的
+        #    .o 还在，不清理会拿旧目标文件去链接 → `undefined reference to cups*`（实测踩过）。
         ( cd "${tdir}/unix" && ./configure --prefix="$pfx" --enable-shared --enable-threads >/dev/null 2>&1 \
+          && make clean >/dev/null 2>&1 \
           && make -j"$(nproc)" >/dev/null 2>&1 && make install >/dev/null 2>&1 ) \
-          || die "编译 Tcl 失败（构建机缺 X11/freetype 开发头文件？）"
-        # ★ 关键：--enable-xft
+          || die "编译 Tcl 失败（构建机缺 X11/freetype/fontconfig 开发头文件？）"
+        # ★ 关键 1：--enable-xft；★ 关键 2：--disable-libcups（不打印，别拖 14 个库进来）
         ( cd "${kdir}/unix" && ./configure --prefix="$pfx" --enable-shared --enable-threads \
-            --with-tcl="$pfx/lib" --enable-xft >/dev/null 2>&1 \
+            --with-tcl="$pfx/lib" --enable-xft --disable-libcups >/dev/null 2>&1 \
+          && make clean >/dev/null 2>&1 \
           && make -j"$(nproc)" >/dev/null 2>&1 && make install >/dev/null 2>&1 ) \
-          || die "编译 Tk 失败"
+          || die "编译 Tk 失败（构建机缺 X11/freetype/fontconfig 开发头文件？）"
         [ -f "${pfx}/lib/libtcl9tk9.0.so" ] || die "编完了却没产出 libtcl9tk9.0.so"
-        # 自检：编出来的这份确实带 Xft，否则换了也白换
-        ldd "${pfx}/lib/libtcl9tk9.0.so" | grep -qi Xft \
-            || die "编出来的 Tk 没有链 Xft —— configure 没吃到 --enable-xft"
+        _ldd_has "${pfx}/lib/libtcl9tk9.0.so" xft \
+            || die "编出来的 Tk 没链 Xft —— configure 没吃到 --enable-xft"
+        if _ldd_has "${pfx}/lib/libtcl9tk9.0.so" cups; then
+            die "编出来的 Tk 还链着 CUPS —— configure 没吃到 --disable-libcups"
+        fi
         mkdir -p "$cache"
         cp "${pfx}/lib/libtcl9tk9.0.so" "${cache}/"
     else
-        echo "    用缓存的 Xft 版 Tk（${cache}，Tcl/Tk ${ver}）"
+        echo "    用缓存里编好的 Tk（${cache}，Tcl/Tk ${ver}，Xft+无 CUPS）"
     fi
-    cp "${cache}/libtcl9tk9.0.so" "$bundled"
-    echo "    ✅ 已换成带 Xft 的 Tk（字体走 fontconfig）"
+    XFT_TK="${cache}/libtcl9tk9.0.so"
 }
 
-# ---------------------------------------------------------------- 中日韩字体
+ensure_xft_tk
+echo "    注入的 Tk   : $XFT_TK"
 
-# Tk 会读 fontconfig 之后，**打包字体才有意义**（否则它根本看不见）。
-# 打包的收益：机器上一套中日韩字体都没装时，界面也不会是豆腐块。
-# NotoSansCJK-Regular.ttc 一份就覆盖中日韩（正好够我们五种界面语言），OFL 许可可再分发。
-bundle_cjk_font() {
-    local dest="$APPDIR/usr/share/fonts"
-    local cand=""
-    for f in /usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc \
-             /usr/share/fonts/noto-cjk/NotoSansCJK-Regular.otf \
-             /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc; do
-        [ -f "$f" ] && { cand="$f"; break; }
-    done
-    if [ -z "$cand" ]; then
-        # 构建机没装中日韩字体 → 不阻断构建，但要说清楚（运行机得自己有）
-        echo "    ⚠️ 构建机上找不到 NotoSansCJK，**不打包字体**（运行机需自带中日韩字体）"
-        return 0
-    fi
-    mkdir -p "$dest"
-    cp "$cand" "$dest/"
-    # 许可一起带上（OFL 要求随附）
-    for lic in /usr/share/licenses/noto-fonts-cjk/*; do
-        [ -f "$lic" ] && { cp "$lic" "$dest/NotoSansCJK-LICENSE.txt"; break; }
-    done
-    echo "    ✅ 已打包中日韩字体：$(basename "$cand")（$(du -h "$dest" | cut -f1)）"
+# ---------------------------------------------------------------- 2. PyInstaller onedir
+step "2/7 PyInstaller onedir 打包"
+
+rm -rf "$WORK"
+mkdir -p "$WORK/pyi" "$WORK/work" "$WORK/spec"
+
+# 动态导入的模块（静态分析看不到）——磁盘上的 vlt 模块**全部**列在这里；
+# 漏一个 = 用户拿到手 ImportError。第 3 步有一次「磁盘 vs 包内」对账断言兜底。
+HIDDEN=(
+    vlt vlt.app vlt.config vlt.config_io vlt.crashlog vlt.credentials vlt.devices
+    vlt.engine vlt.gui vlt.i18n vlt.level_probe vlt.paths vlt.textin vlt.tts
+    vlt.update_check vlt.voices
+    vlt.selfcheck                      # --verify-* 自检入口（验收脚本用；run_gui.py 按需导入）
+    # 界面语言是 importlib 按语言码动态加载的（vlt/i18n.py）—— 不列就会静默回落中文
+    vlt.locales vlt.locales.en vlt.locales.ja vlt.locales.ko vlt.locales.ru
+    vlt.output vlt.output.chatbox vlt.output.merger vlt.output.overlay
+    vlt.output.virtualmic
+    vlt.output.openxr_overlay          # Linux 手腕屏后端（由 vlt/platform/linux.py 收）
+    vlt.platform vlt.platform.audio vlt.platform.base vlt.platform.linux
+    vlt.session vlt.session.base vlt.session.qwen38
+    # 第三方：按需导入 / 运行时加载
+    sounddevice miniaudio _miniaudio pythonosc websockets yaml
+    PIL PIL.Image PIL.ImageDraw PIL.ImageTk numpy xr
+    # ★ Wayland 下 PyOpenGL 会挑 `egl` 平台插件（OpenGL/platform/__init__.py 的
+    #   plugin 匹配：XDG_SESSION_TYPE=wayland / WAYLAND_DISPLAY → "wayland"→EGLPlatform）。
+    #   而 PyInstaller 官方的 hook-OpenGL 只收 `OpenGL.platform.glx` —— 少了这个模块，
+    #   `import OpenGL.platform` 会走 `plugin.load() → None` 再 `None()` →
+    #   `TypeError: 'NoneType' object is not callable`，把 `import xr` 整条链拖死
+    #   （实测：用户 Wayland 会话下 OpenXR 手腕屏直接起不来）。
+    OpenGL.platform.egl
+    # ★ `PIL._tkinter_finder` 是被 `PIL/features.py` 用**字符串**引用的
+    #   （importlib.import_module("PIL._tkinter_finder")），静态分析看不到 ——
+    #   少了它，ImageTk.PhotoImage 一用就 `ModuleNotFoundError`，
+    #   赞助弹窗的两张收款码会降级成「二维码图片缺失」（实测踩过）。
+    PIL._tkinter_finder
+)
+# 带二进制/数据文件的库 → 连数据一起收
+COLLECT_ALL=(xr sounddevice pythonosc)
+# Linux 产物里**不允许**出现 Windows 独占实现（与 build_exe.py 的 EXCLUDE_WIN 镜像）
+EXCLUDES=(vlt.platform.win vlt.output.openvr_overlay openvr pyaudiowpatch pycaw comtypes)
+
+PYI_ARGS=(
+    --noconfirm --clean --noupx --onedir
+    --name "$APP_NAME"
+    --distpath "$WORK/pyi" --workpath "$WORK/work" --specpath "$WORK/spec"
+    --paths "$REPO"
+    --add-data "${REPO}/assets:assets"
+    --add-data "${REPO}/testdata:testdata"
+    --add-data "${REPO}/config.example.yaml:."
+    --add-binary "${XFT_TK}:."          # 顶掉 PyInstaller 收到的解释器自带那份
+)
+for h in "${HIDDEN[@]}";      do PYI_ARGS+=(--hidden-import "$h"); done
+for c in "${COLLECT_ALL[@]}"; do PYI_ARGS+=(--collect-all "$c"); done
+for e in "${EXCLUDES[@]}";    do PYI_ARGS+=(--exclude-module "$e"); done
+
+PYI_LOG="${WORK}/pyinstaller.log"
+echo "    （日志：${PYI_LOG}）"
+if ! "$VENV_PY" -m PyInstaller "${PYI_ARGS[@]}" "$REPO/run_gui.py" >"$PYI_LOG" 2>&1; then
+    tail -60 "$PYI_LOG" >&2
+    die "PyInstaller 打包失败（完整日志：$PYI_LOG）"
+fi
+tail -4 "$PYI_LOG"
+[ -x "$BUNDLE/$APP_NAME" ] || die "PyInstaller 结束但没产出 $BUNDLE/$APP_NAME"
+
+# ---------------------------------------------------------------- 3. 构建后自检
+step "3/7 构建后自检（数据 / Tk / 模块对账）"
+_INT="$BUNDLE/_internal"
+
+for f in "assets/app.png" "config.example.yaml" "testdata/zh_test_16k.pcm"; do
+    [ -e "$_INT/$f" ] || die "包内缺数据文件：$_INT/$f"
+done
+echo "    ✅ 数据文件齐（assets / config.example.yaml / testdata）"
+
+[ -f "$_INT/libtcl9tk9.0.so" ] || die "包里没有 libtcl9tk9.0.so（--add-binary 没落地？）"
+_ldd_has "$_INT/libtcl9tk9.0.so" xft \
+    || die "包里的 Tk 不链 Xft/fontconfig —— 字体问题会直接废掉界面"
+if _ldd_has "$_INT/libtcl9tk9.0.so" cups; then
+    die "包里的 Tk 还链着 CUPS —— 会把 GnuTLS 那串（14 个库）拖回来（--disable-libcups 没生效？）"
+fi
+echo "    ✅ 包里的 Tk：认 fontconfig（Xft）、不链 CUPS"
+
+# 模块对账：① 禁列模块一个不许有；② 磁盘上的 vlt 模块一个不许少。
+# ② 才是关键：漏收模块（动态导入）不会在构建时炸，只会在用户机器上 ImportError。
+"$VENV_PY" - "$BUNDLE/$APP_NAME" "$REPO/vlt" <<'PY' || die "模块对账没通过"
+import pathlib, sys
+from PyInstaller.archive.readers import pkg_archive_contents
+
+exe, vlt_dir = sys.argv[1], pathlib.Path(sys.argv[2])
+names = set(pkg_archive_contents(exe))
+
+forbidden = {"vlt.platform.win", "vlt.output.openvr_overlay"}
+bad = sorted(n for n in names if any(n == f or n.startswith(f + ".") for f in forbidden))
+assert not bad, f"包里混进了 Windows 独占模块：{bad}"
+
+disk: set[str] = set()
+for p in vlt_dir.rglob("*.py"):
+    rel = p.relative_to(vlt_dir.parent).with_suffix("")
+    if rel.name == "__init__":
+        rel = rel.parent
+    name = ".".join(rel.parts)
+    if name not in forbidden:
+        disk.add(name)
+missing = sorted(disk - names)
+assert not missing, f"磁盘上有、包里没有的 vlt 模块（用户拿到手就是 ImportError）：{missing}"
+
+# 第三方里「靠运行时环境动态挑」的模块，PyInstaller 的 hook 覆盖不全 —— 单独钉住。
+# 加新项时写清「为什么静态分析看不到」。
+must_have = {
+    # Wayland 的 PyOpenGL 平台插件（hook-OpenGL 只收 glx；见 build 脚本 HIDDEN 注释）
+    "OpenGL.platform.egl",
+    # Pillow 的 features.py 用字符串引用（importlib.import_module）：
+    # 少了它，ImageTk.PhotoImage 直接 ModuleNotFoundError（赞助弹窗收款码降级）
+    "PIL._tkinter_finder",
 }
+missing_dynamic = sorted(must_have - names)
+assert not missing_dynamic, f"第三方动态模块缺失（运行期才会炸）：{missing_dynamic}"
 
-# ---------------------------------------------------------------- 2. 入口 / 桌面项 / 图标
-step "2/6 修 Tk 字体 + 打包中日韩字体"
-build_xft_tk
-bundle_cjk_font
+print(f"    ✅ 模块对账通过：{len(names)} 个条目，vlt 模块一个不少、Windows 独占一个不多")
+PY
 
-step "2.5/6 写 AppRun / .desktop / 图标"
+# ---------------------------------------------------------------- 4. 瘦身
+step "4/7 瘦身（pyopenxr 平台目录 / xr 调试层 / 系统库交还宿主机）"
+
+# ⚠️ 保留集**绝不能硬编码目录名**：pyopenxr 1.1.6302 把平台目录改了名
+#    （win32→windows_x86_64、aarch64→linux_aarch64、x86_64→linux_x86_64、
+#    android→android_arm_v8a）。硬编码的删法会静默变成空操作（v0.5.0 白胖 ~13MB）。
+#    为什么探针跑在**构建解释器**上而不是包内：包里的 pyopenxr 代码在 PYZ 归档里、
+#    只有平台目录是明文文件，没法用宿主解释器 import；venv 里的同名同版本包会给出
+#    同样的答案（两边都来自同一次 collect-all）。判据仍是「让 pyopenxr 自己说」。
+_XR="$_INT/xr"
+if [ "$SLIM" -eq 1 ]; then
+    [ -d "$_XR" ] || die "找不到 $_XR —— pyopenxr 的布局变了？瘦身规则要跟着改"
+
+    _KEEP_OUT="$(PYTHONPATH= "$VENV_PY" -P - <<'PY'
+import os
+from pathlib import Path
+import xr.api_layer, xr.library
+from xr.api_layer.layer_path import py_layer_library_path
+
+# api_layer：import 期要暴露的目录（若环境里已有 XR_API_LAYER_PATH 也应一并保留）
+api = {Path(py_layer_library_path()).parent.name}
+for _p in os.environ.get("XR_API_LAYER_PATH", "").split(os.pathsep):
+    if _p.strip():
+        api.add(Path(_p).name)
+# library：运行期 dlopen 的 loader 所在目录
+lib = Path(xr.library.openxr_loader_library._name).parent.name
+for _n in sorted(api):
+    print("API_KEEP=" + _n)
+print("LIB_KEEP=" + lib)
+PY
+)" || die "调 pyopenxr 探针拿平台目录失败（venv 里的 pyopenxr 能 import 吗？）"
+
+    mapfile -t XR_API_KEEP < <(printf '%s\n' "$_KEEP_OUT" | sed -n 's/^API_KEEP=//p')
+    mapfile -t XR_LIB_KEEP < <(printf '%s\n' "$_KEEP_OUT" | sed -n 's/^LIB_KEEP=//p')
+    [ "${#XR_API_KEEP[@]}" -gt 0 ] && [ "${#XR_LIB_KEEP[@]}" -gt 0 ] \
+        || die "pyopenxr 探针没给出平台目录：${_KEEP_OUT:-（无输出）}"
+    echo "    pyopenxr 自报当前平台目录：api_layer=${XR_API_KEEP[*]}  library=${XR_LIB_KEEP[*]}"
+
+    # 删掉两个目录下**除保留集以外**的所有子目录（保留 __pycache__ / 顶层文件）
+    _purge_other_platforms() {
+        local base="$1"; shift
+        local d name keep ok
+        for d in "$base"/*/; do
+            [ -d "$d" ] || continue
+            name="$(basename "$d")"
+            [ "$name" = "__pycache__" ] && continue
+            ok=0
+            for keep in "$@"; do [ "$name" = "$keep" ] && ok=1; done
+            [ "$ok" -eq 1 ] || { rm -rf "$d"; echo "       - 删平台目录 $name"; }
+        done
+    }
+    _purge_other_platforms "$_XR/api_layer" "${XR_API_KEEP[@]}"
+    _purge_other_platforms "$_XR/library"   "${XR_LIB_KEEP[@]}"
+    rm -f "$_XR/library/openxr_loader.dll" 2>/dev/null || true  # 顶层散落的 win loader（若有）
+
+    # ★ 再砍一刀：三个**调试用** API layer（api_dump / core_validation / best_practices）。
+    #   它们只在显式 `xr.api_layer.activate_*_layer()` / `XR_ENABLE_API_LAYERS` 时才被加载，
+    #   项目里零调用；但 .so 有 16.6MB 解压 / ~2.2MB 压缩。保留 python 层与 loader
+    #   （`import xr.api_layer` 期就要 `py_layer_library_path()` 指向的文件在）。
+    for _k in "${XR_API_KEEP[@]}"; do
+        _dir="$_XR/api_layer/$_k"
+        _before=$(du -sk "$_dir" | cut -f1)
+        rm -f "$_dir"/libXrApiLayer_{api_dump,core_validation,best_practices_validation}.so \
+              "$_dir"/XrApiLayer_{api_dump,core_validation,best_practices_validation}.json
+        _after=$(du -sk "$_dir" | cut -f1)
+        [ -f "$_dir/libXrApiLayer_python.so" ] \
+            || die "调试层瘦身误删：$_k/libXrApiLayer_python.so 不见了"
+        echo "       - 调试层瘦身 $_k：$(( _before / 1024 ))MB → $(( _after / 1024 ))MB"
+    done
+
+    # 断言保留集没被误删：错了就在这里炸，而不是发到用户手里才「启动即崩」
+    for _k in "${XR_API_KEEP[@]}"; do
+        [ -d "$_XR/api_layer/$_k" ] \
+            || die "瘦身误删：api_layer/$_k 目录不见了（import xr 会直接失败）"
+    done
+    for _k in "${XR_LIB_KEEP[@]}"; do
+        [ -f "$_XR/library/$_k/libopenxr_loader.so" ] \
+            || die "瘦身误删：library/$_k/libopenxr_loader.so 不见了（import xr 会直接失败）"
+    done
+
+    # ★ 体积门禁：光靠「上面断言还在」挡不住「该删的没删」。留一条硬上限兜底。
+    XR_SLIM_MAX_MB="${XR_SLIM_MAX_MB:-60}"   # 瘦身后实测 ~25MB；未瘦身 ~126MB
+    _xr_mb=$(( $(du -sk "$_XR" | cut -f1) / 1024 ))
+    [ "$_xr_mb" -le "$XR_SLIM_MAX_MB" ] || die \
+        "xr 瘦身后仍为 ${_xr_mb}MB（上限 ${XR_SLIM_MAX_MB}MB）—— 瘦身没生效？大概率是 pyopenxr 又改了平台目录名"
+    echo "    ✅ xr 已瘦身：只留 ${XR_API_KEEP[*]}（$(du -sh "$_XR" | cut -f1)）"
+else
+    echo "    （已按 --no-slim 跳过 xr 瘦身：产物会大 ~100MB 未压缩）"
+fi
+
+# ---- 系统库反向裁剪：桌面基础栈交给宿主机（理由见文件头「哪些系统库交给宿主机」）----
+# PyInstaller 默认把依赖闭包全带进 `_internal/`；这两组机器上必然有，带一份只是白胖。
+HOST_LIBS=(
+    libX11 libXext libXrender libXau libXdmcp libXss libXft   # X11 客户端栈（XWayland 也在用）
+    libportaudio libasound libjack                            # 音频链路（麦克风）—— 整条交宿主
+    libpipewire                                               # 同上：程序只用宿主 pw-* CLI
+)
+for _n in "${HOST_LIBS[@]}"; do
+    # ① 构建机必须真的能提供这个 soname —— 否则包在**任何**机器上都少一个库。
+    #    （用 grep 不带 -q：不能提前退出把 ldconfig 打成 SIGPIPE，见 _ldd_has 注释）
+    #    注意不能带尾部点号：PipeWire 的 soname 是 `libpipewire-0.3.so.0`，不是 `libpipewire.`
+    if ! ldconfig -p 2>/dev/null | grep -F -- "$_n" >/dev/null; then
+        die "构建机没有 $_n（ldconfig -p 查不到）—— 这台机器装不出「交宿主机」的包"
+    fi
+    shopt -s nullglob; _hit=( "$_INT/$_n"* ); shopt -u nullglob
+    if [ "${#_hit[@]}" -gt 0 ]; then
+        rm -f "${_hit[@]}"
+        echo "       - 交宿主机 $_n（${#_hit[@]} 个文件）"
+    else
+        # 没收集到也 OK（目标状态就是「包里没有」）；但留一行，方便对照构建日志
+        echo "       - 交宿主机 $_n（本来就没收集，跳过）"
+    fi
+done
+
+# ---- 清「孤儿」：PyInstaller 是照**解释器自带的 Tk**（带 CUPS）分析依赖的，
+#      我们 --add-binary 换成无 CUPS 的 Tk 后，libcups→GnuTLS→…→systemd 这 14 个库
+#      没有任何东西再引用 —— 纯死重（11.8MB 解压 / ~4.6MB 压缩）。
+#      PyInstaller 没有「不收集某个 .so」的选项，只能在构建后清；清完由下面的
+#      `ldd 无 not found` 断言证明真的没人需要它们。
+TK_ORPHANS=(
+    libcups libgnutls libp11-kit libunistring libgmp libnettle libhogweed
+    libidn2 libtasn1 libavahi-client libavahi-common libdbus-1 libleancrypto libsystemd
+)
+for _n in "${TK_ORPHANS[@]}"; do
+    shopt -s nullglob; _hit=( "$_INT/$_n"* ); shopt -u nullglob
+    if [ "${#_hit[@]}" -gt 0 ]; then
+        rm -f "${_hit[@]}"
+        echo "       - 清孤儿 $_n（${#_hit[@]} 个文件）"
+    fi
+done
+
+# ② 删干净没有（软链也要清掉，否则加载器还能从包里摸到）
+for _n in "${HOST_LIBS[@]}" "${TK_ORPHANS[@]}"; do
+    shopt -s nullglob; _left=( "$_INT/$_n"* ); shopt -u nullglob
+    [ "${#_left[@]}" -eq 0 ] || die "反向裁剪失败：$_n* 还在包里（${_left[*]}）"
+done
+echo "    ✅ 已交还宿主机：${HOST_LIBS[*]}"
+
+# ④ 剩下所有 ELF 的 ldd 不许有 not found（构建机上判；宿主缺库不在这里暴露）
+_missing=""
+while IFS= read -r -d '' _f; do
+    _bad="$(ldd "$_f" 2>/dev/null | grep 'not found' || true)"
+    [ -n "$_bad" ] && _missing+="$_f -> $_bad"$'\n'
+done < <(find "$_INT" "$BUNDLE" -type f \
+         \( -name '*.so' -o -name '*.so.*' -o -name "$APP_NAME" \) -print0)
+[ -z "$_missing" ] || die "反向裁剪后有 ELF 依赖缺失：
+$_missing"
+echo "    ✅ 包内 ELF 依赖完整（ldd 无 not found）"
+
+# ---------------------------------------------------------------- 5. AppDir + AppImage
+step "5/7 组装 AppDir 并生成 AppImage"
+
+mkdir -p "$APPDIR/usr/bin" "$OUT_DIR"
+cp -r "$BUNDLE" "$APPDIR/usr/bin/$APP_NAME"
 
 cat > "$APPDIR/AppRun" <<'RUN'
 #!/usr/bin/env bash
@@ -315,29 +502,10 @@ cat > "$APPDIR/AppRun" <<'RUN'
 # DASHSCOPE_API_KEY 等都能正常用）。
 set -euo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
-PY="$HERE/usr/python/bin/python3.11"
-APP="$HERE/usr/app"
-export PYTHONPATH="$APP:$HERE/usr/python/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUTF8=1
-
-# 让 fontconfig 认识**包内**打包的中日韩字体。
-# 配置在运行时生成：AppImage 的挂载路径是随机的，写死在文件里没法用。
-# 系统配置用 <include> 拉进来，这样宿主机自己的字体也照常可用。
-if [ -d "$HERE/usr/share/fonts" ]; then
-    FCCONF="${XDG_CACHE_HOME:-$HOME/.cache}/vrchat-livetranslate/fonts.conf"
-    mkdir -p "$(dirname "$FCCONF")" 2>/dev/null || FCCONF="$HERE/usr/share/fonts.conf"
-    cat > "$FCCONF" <<EOF
-<?xml version="1.0"?>
-<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
-<fontconfig>
-  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
-  <dir>$HERE/usr/share/fonts</dir>
-</fontconfig>
-EOF
-    export FONTCONFIG_FILE="$FCCONF"
-fi
-# 界面用 Tk：某些发行版把 tcl/tk 装在别处，这里不覆盖，交给系统
-exec "$PY" "$APP/run_gui.py" "$@"
+# 字体：AppImage **不自带任何字体**，直接用宿主机的 fontconfig（系统里已装的字体照常可用）。
+# 所以这里不注入 FONTCONFIG_FILE —— 运行机需要自带中日韩字体，详见脚本头部说明。
+exec "$HERE/usr/bin/VRChatLiveTranslate/VRChatLiveTranslate" "$@"
 RUN
 chmod +x "$APPDIR/AppRun"
 
@@ -355,38 +523,27 @@ Terminal=false
 StartupWMClass=Tk
 DESK
 cp "$REPO/assets/app.png" "$APPDIR/${APP_ID}.png"
+ln -sf "${APP_ID}.png" "$APPDIR/.DirIcon"
 
-# ---------------------------------------------------------------- 3. 构建前自检
-step "3/6 构建前自检（在 AppDir 里直接跑）"
-APP_PY="$APPDIR/usr/python/bin/python${PYVER}"
-export PYTHONPATH="$APPDIR/usr/app:$SITE_DST"
-# ⚠️ `-P` 不能省：`python -c` 会把当前目录放在 sys.path 最前，PYTHONPATH 排在后面，
-#    于是从仓库根跑构建时，下面的导入检查读的是**仓库源码**而不是刚组装好的 AppDir。
-if "$APP_PY" -P -c "
-import vlt.gui, vlt.engine, vlt.output.openxr_overlay, vlt.platform
-import numpy, PIL, websockets, yaml, sounddevice, pythonosc, xr, OpenGL
-print('    导入检查通过')
-" 2>&1 | tail -5; then
-    echo "    ✅ 依赖与模块都齐"
-else
-    die "AppDir 里的导入检查没通过（上面有原因）"
-fi
-
-# ---------------------------------------------------------------- 4. 打包
-step "4/6 生成 AppImage"
-mkdir -p "$OUT_DIR"
-ARCH=x86_64 "$APPIMAGETOOL" --no-appstream "$APPDIR" "$OUT_DIR/${APP_NAME}-x86_64.AppImage" 2>&1 | tail -5
 OUT_IMG="$OUT_DIR/${APP_NAME}-x86_64.AppImage"
+rm -f "$OUT_IMG"
+# 压缩参数：appimagetool 默认 zstd L15 + 128K 块；换 L19 + 1M 块实测 52.8MB → 49.2MB
+# （内容一字不改，只是压得更狠；1M 是 squashfs 允许的最大块，AppImage runtime 支持）。
+ARCH=x86_64 "$APPIMAGETOOL" --no-appstream \
+    --comp zstd \
+    --mksquashfs-opt -b --mksquashfs-opt 1M \
+    --mksquashfs-opt -Xcompression-level --mksquashfs-opt 19 \
+    "$APPDIR" "$OUT_IMG" 2>&1 | tail -5
 [ -f "$OUT_IMG" ] || die "没产出 AppImage"
 chmod +x "$OUT_IMG"
 echo "    ✅ $OUT_IMG（$(du -h "$OUT_IMG" | cut -f1)）"
 
-# ---------------------------------------------------------------- 5. 验收（转调独立脚本）
+# ---------------------------------------------------------------- 6. 独立验收
 #
 # 验收逻辑**不写在这里**：它要能单独对着任意 AppImage 跑（CI 直接调它，不必重新构建），
 # 见 scripts/verify_appimage.py。这一步只是构建流程里的自动转调。
 if [ "$VERIFY" -eq 1 ]; then
-    step "5/6 AppImage 独立验收（平台纯度 + 包内导入 + xr 瘦身 + 离线渲染 + 字体）"
+    step "6/7 AppImage 独立验收（平台纯度 + 包内导入 + xr 瘦身 + 离线渲染 + 字体）"
     if [ "$SLIM" -eq 1 ]; then
         "$VENV_PY" "$REPO/scripts/verify_appimage.py" "$OUT_IMG"
     else
@@ -394,21 +551,26 @@ if [ "$VERIFY" -eq 1 ]; then
         "$VENV_PY" "$REPO/scripts/verify_appimage.py" "$OUT_IMG" --allow-fat
     fi || die "AppImage 验收未通过（上面有明细）"
 else
-    step "5/6 验收已按 --no-verify 跳过"
+    step "6/7 独立验收已按 --no-verify 跳过"
     echo "    ⚠️ 跳过 = **未验证**：产物已生成，但平台隔离/导入/渲染都没检查过。"
     echo "       补跑：$VENV_PY scripts/verify_appimage.py $OUT_IMG"
 fi
 
-step "6/6 完成"
+# ---------------------------------------------------------------- 7. 完成
+step "7/7 完成"
 cat <<EOF
-产物：$OUT_IMG
+产物：$OUT_IMG（$(du -h "$OUT_IMG" | cut -f1)）
 
 双击即可运行（图形界面）。数据写在：
     \${XDG_DATA_HOME:-~/.local/share}/vrchat-livetranslate/   （config.yaml / logs / out）
 
 注意：
-  * 需要 **Wayland 会话**（手腕屏走 Wayland + EGL）
+  * 桌面会话 Wayland / X11 都行（手腕屏：Wayland 走 EGL、X11 走 GLX）
   * 手腕屏还需要 **OpenXR 运行时已起 + 头显已连**（Monado / WiVRn）
   * 译音虚拟声卡由程序运行时自己声明，**不需要**事先装 VB-Cable 之类
+  * 需要宿主自带一套中日韩字体
+  * X11 基础库、以及**整条音频链路**（portaudio/ALSA/JACK/PipeWire）都由宿主提供：
+    麦克风需要宿主装 portaudio（Arch: pacman -S portaudio / Debian: apt install libportaudio2），
+    少它只掉麦克风，不影响启动；系统声/虚拟声卡本来就走宿主的 PipeWire CLI（pw-*）
   * 详见 GUIDE.linux.md
 EOF

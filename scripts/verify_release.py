@@ -1,9 +1,13 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.4.2 "vlt-room.kcm-nixi.cn"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.5.2 "LevelProbe"
 
-第二个参数 = 本版新增功能里必定出现的字符串（默认「俄语」）。判据是「在解包出来的
-字节码里搜得到」——不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
+第二个参数 = 本版代码里必定出现的字符串。判据是「在解包出来的字节码里搜得到」——
+不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
+
+⚠️ **本仓库只发 Windows 版**：没有 AppImage / Linux 附件，所以本脚本就是全部验收面
+（上游那份里的 `verify_appimage.py` 流程不适用于本仓库）。
+修复型发布没有新文案可挑时，用**修复引入的符号名**最可靠。
 
 复核项：
   1. 附件下载（只认 exe）

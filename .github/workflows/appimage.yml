@@ -16,9 +16,10 @@ name: AppImage（可复用构建）
 # ## 它保证什么
 #
 # 「Linux 上只用 OpenXR、Windows 上只用 SteamVR」不能只写在文档里，这里把它变成红灯门禁：
-#   * 构建脚本反向删掉 Windows 独占实现（vlt/platform/win.py、openvr 手腕屏后端）；
-#   * scripts/verify_appimage.py 断言它们**真的不在**产物里，并跑包内导入（-P，防误读
-#     仓库源码）+ 离线渲染；
+#   * 构建脚本用 PyInstaller 的 `--exclude-module` 排除 Windows 独占实现
+#     （vlt/platform/win.py、openvr 手腕屏后端）；
+#   * scripts/verify_appimage.py 断言它们**真的不在**产物里（PyInstaller 布局下由产物
+#     自带的 `--verify-*` 探针跑包内导入）+ 离线渲染；
 #   * 字体检查挂在 xvfb 下**真跑**（无显示器时脚本会自己标「跳过 = 未验证」，不硬红）。
 #
 # 产出物：artifact `VRChatLiveTranslate-AppImage`（内含 dist/VRChatLiveTranslate-x86_64.AppImage）。
@@ -53,29 +54,40 @@ jobs:
       - name: 装系统依赖（构建 AppImage + 验收）
         run: |
           sudo apt-get update
-          # xvfb / fonts-noto-cjk  —— 验收里的字体检查与打包字体
-          # gcc make + Xft/freetype/fontconfig/X11 头文件 —— 构建脚本要现编 Xft 版 Tk
-          # libportaudio2 / libegl1 / libwayland-client0 —— 包内依赖的运行时
+          # xvfb / fonts-noto-cjk —— 验收里的字体检查（AppImage 不打包字体，
+          #                          这里装系统字体只为「Tk 看得见 fontconfig」能真跑）
+          # gcc make + Xft/freetype/fontconfig/X11 头文件 —— 构建脚本要现编 Xft+无 CUPS 的 Tk
+          # patchelf —— PyInstaller 在 Linux 上靠它改 ELF 的 rpath
+          # 宿主库：构建脚本会断言 ldconfig 找得到它们（AppImage 把它们全交还宿主），
+          # 且下面的冻结产物运行/验收也会真的用到：
+          #   X11 栈 libxss1/libxrender1/libxau6/libxdmcp6/libxft2
+          #   音频   libportaudio2/libjack-jackd2-0/libpipewire-0.3-0
+          #   OpenXR/EGL：libegl1/libwayland-client0
           #
           # ⚠️ 不要写 `xorgproto`：Ubuntu 24.04(noble) 起这个包名已不存在（apt 报
           #    E: Unable to locate package xorgproto → 整个 job 红）。X11 协议头在
           #    noble 由 `x11proto-dev` 提供，而它本来就是 `libx11-dev` 的依赖，会随下面
           #    这条自动装上 —— 不需要（也不能）单独列出来。
           sudo apt-get install -y --no-install-recommends \
-            xvfb fonts-noto-cjk tk libportaudio2 libegl1 libwayland-client0 \
-            gcc make libxft-dev libfreetype6-dev libfontconfig1-dev \
+            xvfb fonts-noto-cjk \
+            libxss1 libxrender1 libxau6 libxdmcp6 libxft2 libxss-dev \
+            libportaudio2 libjack-jackd2-0 libpipewire-0.3-0 \
+            libegl1 libwayland-client0 \
+            gcc make patchelf libxft-dev libfreetype6-dev libfontconfig1-dev \
             libx11-dev libxext-dev
 
-      - name: 装 uv 并拉独立 Python 3.11（构建脚本要求可搬运的解释器）
+      - name: 装 uv 并拉独立 Python 3.11（PyInstaller 的构建解释器）
         run: |
           python -m pip install --upgrade pip uv
           uv python install 3.11
 
       - name: 建 .venv 并装 Linux 依赖
         run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install -r requirements-linux.txt
+          # ⚠️ venv 必须基于 **uv 的 Python**：PyInstaller 收的是构建解释器的标准库/
+          #    Tcl/Tk —— 用 setup-python 那份建 venv 的话，收进来的就是另一套 Tk，
+          #    构建脚本按 uv Tk 版本编的 Xft 替换会版本不匹配。
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -r requirements-linux.txt "pyinstaller>=6.6"
 
       - name: 读 uv 自带 Tcl/Tk 的版本（做缓存 key 用）
         id: tcltk
@@ -90,11 +102,11 @@ jobs:
           echo "ver=${VER:-unknown}" >> "$GITHUB_OUTPUT"
           echo "Tcl/Tk 版本：${VER:-未知}"
 
-      # 缓存构建工具（appimagetool + 编好的 Xft 版 Tk）。cache key 里带 Tcl/Tk 版本 +
+      # 缓存构建工具（appimagetool + 编好的 Xft+无 CUPS 版 Tk）。cache key 里带 Tcl/Tk 版本 +
       # 构建脚本哈希：脚本改了或 Tk 版本变了就自动重建，不会拿旧缓存糊上去。
       # （打 tag 的 run 能命中 main 上建的缓存 —— GitHub 的默认分支缓存对 tag 可见；
       #   万一没命中只是慢一次：要现编 Tcl/Tk，~10 分钟，产物不受影响。）
-      - name: 缓存构建工具（appimagetool + 编好的 Xft 版 Tk）
+      - name: 缓存构建工具（appimagetool + 编好的 Xft+无 CUPS 版 Tk）
         uses: actions/cache@v4
         with:
           path: build/tools

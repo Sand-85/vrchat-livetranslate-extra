@@ -94,13 +94,17 @@ class Chatbox:
             return False
         return self._dispatch(text, is_final)
 
-    def flush_pending(self) -> int:
-        """把暂存的最终版逐条补发（受同一个令牌桶约束）。返回本次成功条数。"""
+    def flush_pending(self, newest_first: bool = False) -> int:
+        """把暂存的最终版逐条补发（受同一个令牌桶约束）。返回本次成功条数。
+
+        `newest_first=True` 只给停止收尾用：那儿的墙钟预算常常只够放一两条，
+        按 FIFO 就会先送最旧的那句、把用户**刚说完**的那句挤掉。
+        """
         sent = 0
         while self._pending:
             if not self.bucket.allow():
                 break
-            text = self._pending.pop(0)
+            text = self._pending.pop() if newest_first else self._pending.pop(0)
             self._dispatch(text, True)
             sent += 1
         return sent

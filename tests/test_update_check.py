@@ -522,6 +522,48 @@ def test_update_mode_and_target() -> None:
     print("  update_mode / update_target_path / asset_name_for OK")
 
 
+def test_update_mode_frozen_appimage() -> None:
+    """★ 回归钉：PyInstaller 版 AppImage（frozen + $APPIMAGE）必须判成 appimage。
+
+    只判 frozen 的话会被当成 Windows 形态：查更新去下 Windows 的 exe，
+    替换目标指向只读挂载里的可执行文件。真机上就这么踩过一次。
+    """
+    tmp = OUT / "mode-frozen"
+    tmp.mkdir(parents=True, exist_ok=True)
+    img = tmp / APPIMAGE_NAME
+    img.write_bytes(b"appimage")
+
+    real_frozen = uc.is_frozen
+    old_env = os.environ.get("APPIMAGE")
+    try:
+        uc.is_frozen = lambda: True                      # 假装是 PyInstaller 产物
+        os.environ.pop("APPIMAGE", None)
+        if sys.platform == "win32":
+            # Windows 的 frozen 本来就等于发行形态（单文件 exe）→ 仍是 frozen
+            assert uc.update_mode() == "frozen", f"Windows frozen 被判成 {uc.update_mode()}"
+            assert uc.can_self_update()
+        else:
+            # Linux 的 frozen 目录形态（onedir 直接跑）：没有单文件可换 → source（绝不能是 frozen！）
+            assert uc.update_mode() == "source", \
+                f"Linux frozen 目录形态被判成 {uc.update_mode()}（会去下 Windows exe）"
+            assert uc.update_target_path() is None
+            assert not uc.can_self_update()
+
+        # frozen + APPIMAGE（Linux 的真实发行形态）→ appimage，且目标就是那个文件
+        os.environ["APPIMAGE"] = str(img)
+        assert uc.update_mode() == "appimage", \
+            f"frozen AppImage 被判成 {uc.update_mode()}（先看 frozen 看的？）"
+        assert uc.update_target_path() == img
+        assert uc.asset_name_for() == APPIMAGE_NAME, "没按形态选对附件"
+    finally:
+        uc.is_frozen = real_frozen
+        if old_env is None:
+            os.environ.pop("APPIMAGE", None)
+        else:
+            os.environ["APPIMAGE"] = old_env
+    print("  frozen(AppImage/目录) 形态判定 OK")
+
+
 def test_install_appimage() -> None:
     """AppImage 就地替换：补可执行位、内容换成新版，**运行中的旧文件不受影响**。
 
@@ -810,6 +852,7 @@ def main() -> int:
         test_expected_sha256_prefers_github_digest,
         test_redirect_guard,
         test_update_mode_and_target,
+        test_update_mode_frozen_appimage,
         test_install_appimage,
         test_build_updater_bat,
         test_build_updater_bat_relaunch,

@@ -464,15 +464,30 @@ class WristOverlay:
                                                           self.cfg.curvature)
                     anchor_changed = (new_cfg.anchor != self.cfg.anchor
                                       or new_cfg.tracker_index != self.cfg.tracker_index)
-                    # 影响**贴图内容**的参数（字号 / 面板像素尺寸 / 行数 / 是否显示原文）：
-                    # 这些改了只重应用变换是不够的，必须重新渲染一帧，
-                    # 否则界面上拖字号滑块会「看着生效、屏上没变」。
+                    # 影响**贴图内容**的参数（字号 / 面板像素尺寸 / 行数 / 是否显示原文 /
+                    # 底板与原文的不透明度 / 配色 / 分隔线）：这些改了只重应用变换是不够的，
+                    # 必须重新渲染一帧，否则界面上拖字号或透明度滑块会「看着生效、屏上没变」。
+                    # ⚠️ 口径要与 Linux 侧 `openxr_overlay.should_rebuild()` 一致 ——
+                    #    同一个 config.yaml 两个平台的热重载行为必须一样。
                     render_changed = (new_cfg.font_size != self.cfg.font_size
                                       or new_cfg.source_font_size != self.cfg.source_font_size
                                       or new_cfg.size_px != self.cfg.size_px
                                       or new_cfg.max_lines != self.cfg.max_lines
-                                      or new_cfg.show_source != self.cfg.show_source)
-                    if geo_changed or anchor_changed or render_changed:
+                                      or new_cfg.show_source != self.cfg.show_source
+                                      or new_cfg.bg_alpha != self.cfg.bg_alpha
+                                      or new_cfg.source_alpha != self.cfg.source_alpha
+                                      or new_cfg.border_alpha != self.cfg.border_alpha
+                                      or new_cfg.separator != self.cfg.separator
+                                      or new_cfg.color_bg != self.cfg.color_bg
+                                      or new_cfg.color_border != self.cfg.color_border
+                                      or new_cfg.color_source != self.cfg.color_source
+                                      or new_cfg.color_translation != self.cfg.color_translation
+                                      or new_cfg.color_mine != self.cfg.color_mine
+                                      or new_cfg.color_theirs != self.cfg.color_theirs)
+                    # 淡出阈值只影响每帧算出来的 overlay alpha，不改几何也不改贴图 ——
+                    # 但配置对象要换掉，否则改 fade_after_s 存盘不生效。
+                    fade_changed = new_cfg.fade_after_s != self.cfg.fade_after_s
+                    if geo_changed or anchor_changed or render_changed or fade_changed:
                         last_entries = list(self._last_entries or [])
                         last_render = self._last_render
                         self.cfg = new_cfg

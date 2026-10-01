@@ -4,8 +4,8 @@
 
 [![CI](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml/badge.svg)](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/nixi-agent/vrchat-livetranslate?label=release)](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20%7C%20Linux-blue)](GUIDE.en.md#1-prerequisites)
-[![Python](https://img.shields.io/badge/python-3.11-blue)](GUIDE.en.md#1-prerequisites)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20%7C%20Linux-blue)](GUIDE.en.md#1-prerequisites-windows)
+[![Python](https://img.shields.io/badge/python-3.11-blue)](GUIDE.en.md#1-prerequisites-windows)
 [![License](https://img.shields.io/badge/license-MIT-green)](../LICENSE)
 
 Real-time simultaneous interpretation inside VRChat: capture your microphone / game audio →

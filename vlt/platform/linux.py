@@ -33,6 +33,7 @@ sounddevice 接受字符串设备名）。这样既干净，又不引入新的�
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
@@ -830,3 +831,470 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
     """
     from ..output.openxr_overlay import OpenXrOverlay
     return OpenXrOverlay(cfg, config_path=config_path, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------- 桌面叠加窗（issue #11）
+#
+# `vlt/output/desktop_overlay.py`（共享模块）通过 `vlt.platform` 门面要这组能力：
+# `find_window_by_title / window_client_rect / is_window / set_click_through /
+# set_tool_window / top_level_hwnd / screen_work_area`。
+# Windows 侧在 `win.py` 里用 Win32 扩展样式实现；这里用**纯 ctypes 直调
+# libX11 / libXext**（与 `openxr_overlay.py` 直调 libwayland/EGL 同款，不引入新依赖）。
+#
+# ⚠️ 三条实测结论（Xvfb + openbox 与 niri/XWayland 真机都验过，别踩回去）：
+#
+#   1. **Tk 的 `winfo_id()` 是内层客户窗**，合成器和命中测试看到的是外层包装窗
+#      （带 WM_CLASS 的那个；Tk 自己也把 WM 协议属性写在 wrapper 上）。
+#      形状 / 属性 / 位置一律落在 `top_level_hwnd()` 换出的顶层窗上——设错了的话
+#      「鼠标穿透」会设了个寂寞：穿透区的点击直接消失，上层下层谁都不收（实测）。
+#   2. **点击穿透 = `XShapeCombineRectangles(ShapeInput, 空)`**，实测点击会正确落到
+#      下层窗口；恢复 = `XShapeCombineMask(None)`（回到默认输入区）。
+#   3. Wayland 会话（Tk 走 XWayland）下这组调用**仍可用**（能找到窗口、能读几何），
+#      但**窗口位置 / 置顶 / 透明度由合成器决定**：niri 实测忽略位置请求（按平铺
+#      管理）、忽略 `_NET_WM_WINDOW_OPACITY`（属性写进去了、像素扫描仍不透明）。
+#      首次用到本组能力时打印一行说明；边界见 `docs/GUIDE.linux.md` 的「桌面字幕」。
+#
+# 语义与 Windows 侧对齐（facade 的文档就是契约）：
+#   * `find_window_by_title` 返回**客户窗口**（客户区矩形才准；WM 框会带上同样的
+#     标题，所以取「最深的可见匹配」）；
+#   * `top_level_hwnd` 返回「root 的直接子窗口」——覆盖窗场景就是我方的包装窗，
+#     被 WM 管理的窗口则是 WM 框（用于「排除自己」时同样正确）。
+
+_MAX_SEARCH_DEPTH = 6         # find_window_by_title 的树深上限（帧/客户一层就够，留余量）
+_SHAPE_INPUT = 2              # SHAPE_KIND：0=Bounding 1=Clip 2=Input
+_SHAPE_SET = 0                # SHAPE_OP：0=Set
+_IS_VIEWABLE = 2              # XWindowAttributes.map_state
+_XA_CARDINAL = 6              # 预定义 Atom：CARDINAL
+_INPUT_HINT = 1 << 0          # XWMHints.flags 的 InputHint
+
+_X11: Any = None
+_XEXT: Any = None
+_XDPY: Any = None
+_X11_DEAD = False             # 加载失败过就不再重试（没装 X / 沙盒里连不上）
+_ATOMS: dict[bytes, int] = {}
+_WAYLAND_NOTE_DONE = False
+
+
+class _XRect(ctypes.Structure):
+    """XRectangle（libXext 形状接口用）。"""
+
+    _fields_ = [("x", ctypes.c_short), ("y", ctypes.c_short),
+                ("width", ctypes.c_ushort), ("height", ctypes.c_ushort)]
+
+
+class _XWindowAttrs(ctypes.Structure):
+    """XWindowAttributes（字段顺序/对齐按 Xlib.h；只用 map_state 与宽高）。"""
+
+    _fields_ = [
+        ("x", ctypes.c_int), ("y", ctypes.c_int),
+        ("width", ctypes.c_int), ("height", ctypes.c_int),
+        ("border_width", ctypes.c_int), ("depth", ctypes.c_int),
+        ("visual", ctypes.c_void_p), ("root", ctypes.c_ulong),
+        ("input_class", ctypes.c_int), ("bit_gravity", ctypes.c_int),
+        ("win_gravity", ctypes.c_int), ("backing_store", ctypes.c_int),
+        ("backing_planes", ctypes.c_ulong), ("backing_pixel", ctypes.c_ulong),
+        ("save_under", ctypes.c_int), ("colormap", ctypes.c_ulong),
+        ("map_installed", ctypes.c_int), ("map_state", ctypes.c_int),
+        ("all_event_masks", ctypes.c_long), ("your_event_mask", ctypes.c_long),
+        ("do_not_propagate_mask", ctypes.c_long),
+        ("override_redirect", ctypes.c_int), ("screen", ctypes.c_void_p),
+    ]
+
+
+class _XWMHints(ctypes.Structure):
+    """XWMHints（只用到 input 字段：标记「不抢焦点」）。"""
+
+    _fields_ = [
+        ("flags", ctypes.c_long), ("input", ctypes.c_int),
+        ("initial_state", ctypes.c_int), ("icon_pixmap", ctypes.c_ulong),
+        ("icon_window", ctypes.c_ulong), ("icon_x", ctypes.c_int),
+        ("icon_y", ctypes.c_int), ("icon_mask", ctypes.c_ulong),
+        ("window_group", ctypes.c_ulong),
+    ]
+
+
+# XErrorHandler 的 ctypes 原型：int (*)(Display *, XErrorEvent *)
+_X_ERROR_CB = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+
+
+def _load_x11() -> tuple[Any, Any, Any] | None:
+    """惰性加载 libX11/libXext 并常驻一个 X 连接；任何一步失败 → None（整组能力降级）。
+
+    声明全部显式 `argtypes/restype`：ctypes 默认按 C int 传参会把 64 位指针截断，
+    这在 Xlib 这种处处 Pointer 的库上是必踩的坑。
+    """
+    global _X11, _XEXT, _XDPY, _X11_DEAD
+    if _X11_DEAD:
+        return None
+    if _X11 is not None and _XDPY:
+        return _X11, _XEXT, _XDPY
+    try:
+        x11 = ctypes.CDLL("libX11.so.6")
+        xext = ctypes.CDLL("libXext.so.6")
+    except OSError:
+        _X11_DEAD = True
+        return None
+    try:
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XDefaultRootWindow.restype = ctypes.c_ulong
+        x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        x11.XQueryTree.restype = ctypes.c_int
+        x11.XQueryTree.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_ulong)),
+            ctypes.POINTER(ctypes.c_uint)]
+        x11.XFree.argtypes = [ctypes.c_void_p]
+        x11.XGetWindowAttributes.restype = ctypes.c_int
+        x11.XGetWindowAttributes.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(_XWindowAttrs)]
+        x11.XTranslateCoordinates.restype = ctypes.c_int
+        x11.XTranslateCoordinates.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong)]
+        x11.XInternAtom.restype = ctypes.c_ulong
+        x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x11.XGetWindowProperty.restype = ctypes.c_int
+        x11.XGetWindowProperty.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte))]
+        x11.XFetchName.restype = ctypes.c_int
+        x11.XFetchName.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_char_p)]
+        x11.XSetWMHints.restype = ctypes.c_int
+        x11.XSetWMHints.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(_XWMHints)]
+        x11.XSync.restype = ctypes.c_int
+        x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x11.XSetErrorHandler.restype = ctypes.c_void_p
+        x11.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+        xext.XShapeCombineRectangles.restype = None
+        xext.XShapeCombineRectangles.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(_XRect), ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        xext.XShapeCombineMask.restype = None
+        xext.XShapeCombineMask.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_ulong, ctypes.c_int]
+        dpy = x11.XOpenDisplay(None)
+        if not dpy:
+            _X11_DEAD = True
+            return None
+    except (OSError, AttributeError):
+        _X11_DEAD = True
+        return None
+    _X11, _XEXT, _XDPY = x11, xext, dpy
+    return _X11, _XEXT, _XDPY
+
+
+def _guarded(x11: Any, dpy: Any, call: Any) -> Any:
+    """在自有的 X 错误处理器下执行一次请求；出现 X 错误 → 返回 None。
+
+    ⚠️ 这层护栏是**必须的**：Tk 进程里未被接管的 X 错误会被 Tk 错误处理器
+    升级成致命错误——对一个刚关闭的窗口调 `XGetWindowAttributes`（BadWindow）
+    会直接把整个应用带走。凡是可能落在「已销毁句柄」上的请求都要走这里。
+    期间短暂接管全局错误处理器，结束后恢复（Tk 自己的处理器原样放回）；
+    `XSync` 是为了把异步错误当场冲出来，不然错误可能在我们恢复处理器之后才到。
+    """
+    state = {"err": False}
+
+    def _handler(_dpy: Any, _ev: Any) -> int:
+        state["err"] = True
+        return 0
+
+    cb = _X_ERROR_CB(_handler)
+    prev = x11.XSetErrorHandler(ctypes.cast(cb, ctypes.c_void_p))
+    try:
+        result = call()
+        x11.XSync(dpy, 0)
+    finally:
+        x11.XSetErrorHandler(prev)
+    return None if state["err"] else result
+
+
+def _wayland_note() -> None:
+    """Wayland 会话下第一条用户可感的降级说明（只打一次）。"""
+    global _WAYLAND_NOTE_DONE
+    if _WAYLAND_NOTE_DONE:
+        return
+    _WAYLAND_NOTE_DONE = True
+    if os.environ.get("WAYLAND_DISPLAY"):
+        print("[desktop] ⚠️ 检测到 Wayland 会话（界面经 XWayland）：窗口位置/置顶/透明度"
+              "由合成器决定——niri 实测按平铺管理、忽略透明度，字幕跟随可能不生效；"
+              "边界见 docs/GUIDE.linux.md「桌面字幕」")
+
+
+def _attrs(x11: Any, dpy: Any, wid: int) -> _XWindowAttrs | None:
+    """取窗口属性；窗口不存在 / 已销毁 → None（错误由 `_guarded` 吞掉，绝不致命）。"""
+    a = _XWindowAttrs()
+
+    def call() -> bool:
+        return bool(x11.XGetWindowAttributes(dpy, ctypes.c_ulong(wid), ctypes.byref(a)))
+
+    return a if _guarded(x11, dpy, call) else None
+
+
+def _query_tree(x11: Any, dpy: Any, wid: int) -> tuple[int, list[int]]:
+    """`XQueryTree` 的薄封装：返回 (parent, children)；失败给 (0, [])。"""
+    root_r, parent_r = ctypes.c_ulong(), ctypes.c_ulong()
+    children_p = ctypes.POINTER(ctypes.c_ulong)()
+    n = ctypes.c_uint()
+    state = {"parent": 0, "kids": []}
+
+    def call() -> bool:
+        if not x11.XQueryTree(dpy, ctypes.c_ulong(wid), ctypes.byref(root_r),
+                              ctypes.byref(parent_r), ctypes.byref(children_p),
+                              ctypes.byref(n)):
+            return False
+        state["parent"] = int(parent_r.value)
+        state["kids"] = [int(children_p[i]) for i in range(int(n.value))]
+        return True
+
+    ok = _guarded(x11, dpy, call)
+    if children_p:                       # 无论成败都别泄内存
+        x11.XFree(children_p)
+    if not ok:
+        return 0, []
+    return state["parent"], state["kids"]
+
+
+def _atom(x11: Any, dpy: Any, name: bytes) -> int:
+    """`XInternAtom` 带缓存（每帧都问一次太浪费）。"""
+    val = _ATOMS.get(name)
+    if val is None:
+        val = int(x11.XInternAtom(dpy, name, 0))
+        _ATOMS[name] = val
+    return val
+
+
+def _window_title(x11: Any, dpy: Any, wid: int) -> str:
+    """窗口标题：优先 `_NET_WM_NAME`（UTF8_STRING），退回 `WM_NAME`（XFetchName）。
+
+    窗口可能在中途被销毁（X 错误由 `_guarded` 吞掉）→ 拿不到就给空串。
+    """
+    name_atom = _atom(x11, dpy, b"_NET_WM_NAME")
+    utf8_atom = _atom(x11, dpy, b"UTF8_STRING")
+    out = {"title": ""}
+
+    def call() -> None:
+        a_type, a_fmt = ctypes.c_ulong(), ctypes.c_int()
+        n_items, after = ctypes.c_ulong(), ctypes.c_ulong()
+        prop = ctypes.POINTER(ctypes.c_ubyte)()
+        status = x11.XGetWindowProperty(
+            dpy, ctypes.c_ulong(wid), ctypes.c_ulong(name_atom), 0, 1024, 0,
+            ctypes.c_ulong(utf8_atom), ctypes.byref(a_type), ctypes.byref(a_fmt),
+            ctypes.byref(n_items), ctypes.byref(after), ctypes.byref(prop))
+        if status == 0 and prop:
+            try:
+                out["title"] = ctypes.string_at(prop, int(n_items.value)).decode(
+                    "utf-8", "replace")
+                return
+            finally:
+                x11.XFree(prop)
+        name_p = ctypes.c_char_p()
+        if x11.XFetchName(dpy, ctypes.c_ulong(wid), ctypes.byref(name_p)) and name_p.value:
+            try:
+                out["title"] = name_p.value.decode("utf-8", "replace")
+            finally:
+                x11.XFree(name_p)
+
+    _guarded(x11, dpy, call)
+    return out["title"]
+
+
+# ---------------------------------------------------------------- 门面调用的公开函数
+
+
+def top_level_hwnd(widget_id: int) -> int:
+    """内层客户窗 → 「root 的直接子窗口」。
+
+    覆盖窗（桌面字幕窗）：就是我方 Tk 的包装窗（形状/属性都往它身上设）；
+    被 WM 管理的窗口：是 WM 框（拿去做排除清单同样正确）。
+    拿不到 / 没有 X：原样返回（与 facade 的安全默认一致）。
+    """
+    loaded = _load_x11()
+    if not loaded:
+        return int(widget_id)
+    x11, _xext, dpy = loaded
+    _wayland_note()
+    root = int(x11.XDefaultRootWindow(dpy))
+    wid = int(widget_id)
+    for _ in range(32):                  # 防御环/深树：最多上溯 32 层
+        parent, _kids = _query_tree(x11, dpy, wid)
+        if parent in (0, root):
+            return wid
+        wid = parent
+    return wid
+
+
+def find_window_by_title(substr: str, exclude: Any = ()) -> int | None:
+    """按标题子串（不区分大小写）在窗口树里找**客户窗口**；找不到返回 None。
+
+    * WM 框会继承客户的标题，最深层的可见匹配才是真客户窗（客户区才准）；
+    * `exclude` = 我方窗口的顶层句柄（facade 传 `top_level_hwnd` 的结果），随时跳过；
+    * 树深限 `_MAX_SEARCH_DEPTH`，多余的开销不值得。
+    """
+    loaded = _load_x11()
+    if not loaded:
+        return None
+    x11, _xext, dpy = loaded
+    _wayland_note()
+    needle = str(substr).casefold()
+    if not needle:
+        return None
+    skip = {int(v) for v in exclude} if exclude else set()
+    root = int(x11.XDefaultRootWindow(dpy))
+    best: tuple[int, int, int] | None = None      # (可见排名, 深度, wid)
+    stack: list[tuple[int, int]] = [(c, 1) for c in _query_tree(x11, dpy, root)[1]]
+    while stack:
+        wid, depth = stack.pop()
+        if wid in skip:
+            continue
+        a = _attrs(x11, dpy, wid)
+        if a is None or a.width <= 1 or a.height <= 1:
+            continue
+        title = _window_title(x11, dpy, wid)
+        if title and needle in title.casefold():
+            rank = 1 if a.map_state == _IS_VIEWABLE else 0
+            cand = (rank, depth, wid)
+            if best is None or cand[:2] > best[:2]:
+                best = cand
+        if depth < _MAX_SEARCH_DEPTH:
+            for c in _query_tree(x11, dpy, wid)[1]:
+                stack.append((c, depth + 1))
+    return best[2] if best is not None else None
+
+
+def window_client_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """目标窗口客户区的屏幕矩形 (left, top, right, bottom)。
+
+    * 窗口不可见（最小化/隐藏）→ None，调用方据此暂停跟随并留一行日志；
+    * 坐标经 `XTranslateCoordinates` 折算到 root，多屏（含负坐标）都对。
+    """
+    loaded = _load_x11()
+    if not loaded:
+        return None
+    x11, _xext, dpy = loaded
+    a = _attrs(x11, dpy, int(hwnd))
+    if a is None or a.width <= 0 or a.height <= 0:
+        return None
+    if a.map_state != _IS_VIEWABLE:
+        return None
+    root = int(x11.XDefaultRootWindow(dpy))
+    dx, dy = ctypes.c_int(), ctypes.c_int()
+    child = ctypes.c_ulong()
+
+    def call() -> bool:
+        return bool(x11.XTranslateCoordinates(dpy, ctypes.c_ulong(int(hwnd)),
+                                              ctypes.c_ulong(root), 0, 0,
+                                              ctypes.byref(dx), ctypes.byref(dy),
+                                              ctypes.byref(child)))
+
+    if not _guarded(x11, dpy, call):
+        return None
+    return (int(dx.value), int(dy.value),
+            int(dx.value) + int(a.width), int(dy.value) + int(a.height))
+
+
+def is_window(hwnd: int) -> bool:
+    """句柄还是一个真窗口吗。"""
+    loaded = _load_x11()
+    if not loaded:
+        return False
+    x11, _xext, dpy = loaded
+    return _attrs(x11, dpy, int(hwnd)) is not None
+
+
+def set_click_through(hwnd: int, on: bool) -> bool:
+    """开/关鼠标穿透（X Shape 输入区）。
+
+    开 = 输入区置空（点击落到下层窗口）；关 = 移除客户端输入区（回默认）。
+    ⚠️ 必须作用在**顶层包装窗**上——facade 传进来的句柄来自 `top_level_hwnd`。
+    """
+    loaded = _load_x11()
+    if not loaded:
+        return False
+    x11, xext, dpy = loaded
+    wid = int(hwnd)
+    if _attrs(x11, dpy, wid) is None:      # 句柄已失效：直接失败，别喂 Xlib 出错误日志
+        return False
+
+    def call() -> bool:
+        if on:
+            rects = (_XRect * 1)()         # n_rects=0 + ShapeSet：空区域 = 完全穿透
+            xext.XShapeCombineRectangles(dpy, ctypes.c_ulong(wid), _SHAPE_INPUT,
+                                         0, 0, rects, 0, _SHAPE_SET, 0)
+        else:
+            xext.XShapeCombineMask(dpy, ctypes.c_ulong(wid), _SHAPE_INPUT,
+                                   0, 0, 0, _SHAPE_SET)   # src=None → 恢复默认输入区
+        return True
+
+    return _guarded(x11, dpy, call) is not None
+
+
+def set_tool_window(hwnd: int) -> bool:
+    """标「不抢焦点」：WM_HINTS 的 input=False。
+
+    X11 没有「不进 alt-tab」的统一开关，覆盖窗本来也不受 WM 管理；重点是
+    **别把焦点从游戏里抢走**（WM 看到 input=False 就不给焦点）。
+    """
+    loaded = _load_x11()
+    if not loaded:
+        return False
+    x11, _xext, dpy = loaded
+    hints = _XWMHints()
+    hints.flags = _INPUT_HINT
+    hints.input = 0
+
+    def call() -> bool:
+        return bool(x11.XSetWMHints(dpy, ctypes.c_ulong(int(hwnd)), ctypes.byref(hints)))
+
+    return bool(_guarded(x11, dpy, call))
+
+
+def screen_work_area() -> tuple[int, int, int, int]:
+    """屏幕工作区 (left, top, right, bottom)。
+
+    优先 EWMH `_NET_WORKAREA`（常规 X11 桌面都有）；没有就退**整屏几何**
+    （niri 的 XWayland 实测没有这个属性；整屏是并集画布，夹取不会把字幕夹出屏）。
+    """
+    loaded = _load_x11()
+    if not loaded:
+        return (0, 0, 1920, 1080)
+    x11, _xext, dpy = loaded
+    root = int(x11.XDefaultRootWindow(dpy))
+    prop = ctypes.POINTER(ctypes.c_ubyte)()
+    result: dict[str, tuple[int, int, int, int]] = {}
+
+    def call() -> None:
+        atom = _atom(x11, dpy, b"_NET_WORKAREA")
+        a_type, a_fmt = ctypes.c_ulong(), ctypes.c_int()
+        n_items, after = ctypes.c_ulong(), ctypes.c_ulong()
+        status = x11.XGetWindowProperty(
+            dpy, ctypes.c_ulong(root), ctypes.c_ulong(atom), 0, 4, 0,
+            ctypes.c_ulong(_XA_CARDINAL), ctypes.byref(a_type), ctypes.byref(a_fmt),
+            ctypes.byref(n_items), ctypes.byref(after), ctypes.byref(prop))
+        if status == 0 and prop and a_fmt.value == 32 and int(n_items.value) >= 4:
+            vals = ctypes.cast(prop, ctypes.POINTER(ctypes.c_ulong))
+            left, top, wid, hei = (int(vals[i]) for i in range(4))
+            if wid > 0 and hei > 0:
+                result["area"] = (left, top, left + wid, top + hei)
+
+    try:
+        _guarded(x11, dpy, call)
+    finally:
+        if prop:
+            x11.XFree(prop)
+    if "area" in result:
+        return result["area"]
+    a = _attrs(x11, dpy, root)
+    if a is not None and a.width > 0 and a.height > 0:
+        return (0, 0, int(a.width), int(a.height))
+    return (0, 0, 1920, 1080)

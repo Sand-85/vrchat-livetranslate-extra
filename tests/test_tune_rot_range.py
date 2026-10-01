@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -44,7 +43,8 @@ SANDBOX = SANDBOX_DIR / "config.yaml"
 WANT_ROT = [180, -135, 95]
 
 SPEC_KEYS = ["pos_x", "pos_y", "pos_z", "rot_x", "rot_y", "rot_z", "width_m",
-             "curvature", "alpha", "font_size", "source_font_size", "panel_h"]
+             "curvature", "alpha", "font_size", "source_font_size", "panel_h",
+             "bg_alpha", "source_alpha"]
 ROT_IDX = (3, 4, 5)                                 # rot_x / rot_y / rot_z 在 specs 里的位置
 
 
@@ -52,26 +52,29 @@ ROT_IDX = (3, 4, 5)                                 # rot_x / rot_y / rot_z 在 
 
 
 def make_sandbox() -> None:
-    """把模板复制成沙箱配置，并把 `rot: [...]` 改成一组越界值。
+    """把模板复制成沙箱配置，并把**当前锚点（right_hand）那一份** `rot` 改成越界值。
 
-    用行级替换而不是整文件重写：沙箱要跟用户手写配置一样**保留注释**，
-    这样后面「回写不丢值」那条才验的是真实场景。
+    用行级就地改（`_yaml_set_or_create`）而不是整文件重写：沙箱要跟用户手写配置一样
+    **保留注释**，这样后面「回写不丢值」那条才验的是真实场景。
     """
+    from vlt.config_io import _yaml_set_or_create
+
     text = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
     want = "[" + ", ".join(str(v) for v in WANT_ROT) + "]"
-    new, n = re.subn(r"(?m)^(\s*rot:\s*)\[[^\]]*\]", rf"\g<1>{want}", text)
-    assert n == 1, f"模板里应有且只有 1 行 `rot: [...]`，实际命中 {n} 处"
+    # 位姿是按锚点分开存的：改右手的 `overlay.offsets.right_hand.rot`
+    new = _yaml_set_or_create(text, ["overlay", "offsets", "right_hand", "rot"], want)
+    assert new != text, "模板里应该有 `overlay.offsets.right_hand.rot` 这一行"
     SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
     # .gitattributes 规定源码 LF：显式传 newline，别让 Windows 把整份配置写成 CRLF
     SANDBOX.write_text(new, encoding="utf-8", newline="\n")
-    got = yaml.safe_load(SANDBOX.read_text(encoding="utf-8"))["overlay"]["offset"]["rot"]
+    got = yaml.safe_load(SANDBOX.read_text(encoding="utf-8"))["overlay"]["offsets"]["right_hand"]["rot"]
     assert got == WANT_ROT, f"沙箱配置里的 rot 没写对：{got!r}（期望 {WANT_ROT}）"
     print(f"沙箱配置 → {SANDBOX}（rot: {got}）")
 
 
 def read_sandbox_rot() -> list:
     data = yaml.safe_load(SANDBOX.read_text(encoding="utf-8"))
-    return list(data["overlay"]["offset"]["rot"])
+    return list(data["overlay"]["offsets"]["right_hand"]["rot"])
 
 
 def collect_scales(win) -> list:
@@ -138,7 +141,7 @@ def check_round_trip_keeps_rot(gui, scales: list) -> None:
     gui._save_overlay_cfg()
     rot = read_sandbox_rot()
     assert rot == WANT_ROT, f"改 pos_x 落盘把 rot 改了：{rot}（期望 {WANT_ROT}）"
-    pos = yaml.safe_load(SANDBOX.read_text(encoding="utf-8"))["overlay"]["offset"]["pos"]
+    pos = yaml.safe_load(SANDBOX.read_text(encoding="utf-8"))["overlay"]["offsets"]["right_hand"]["pos"]
     assert pos[0] == -0.075, f"pos_x 没写进去：{pos!r}（回写这条路径本身失效了？）"
     print(f"  ✓ 拖位置滑块落盘后 rot 仍是 {rot}")
 
@@ -153,6 +156,62 @@ def check_round_trip_keeps_rot(gui, scales: list) -> None:
                              f"—— issue #6 的回写夹值")
     print(f"  ✓ 碰过 rot 滑块再落盘，配置里 rot 仍是 {rot}"
           f"（旧范围下三个轴都会被夹到端点，变成 [90, 90, -90]）")
+
+
+def check_tune_fallbacks_match_config_defaults() -> None:
+    """④ 微调面板里 `ov.get(键, 兜底)` 的兜底值必须等于 `OverlayConfig` 的默认值。
+
+    兜底只在 config.yaml **缺键**时才生效，真机上极难发现。实测踩到的漂移：
+    `font_size` / `source_font_size` 兜底是 42/30 而默认值是 36/29，`width_m` 兜底
+    0.24 而默认 0.23 —— 用户手写配置少写两行，界面就显示 42/30，**碰一下还会把
+    42/30 写回配置**（字号无声变大）。这里用 AST 静态比对，不依赖控件树。
+    """
+    import ast
+
+    from vlt.output.overlay import OverlayConfig
+
+    field_of = {"width_m": "width_m", "curvature": "curvature", "alpha": "alpha",
+                "font_size": "font_size", "source_font_size": "source_font_size",
+                "bg_alpha": "bg_alpha", "source_alpha": "source_alpha"}
+    tree = ast.parse((ROOT / "vlt" / "gui.py").read_text(encoding="utf-8"))
+    found: dict[str, float] = {}
+    for node in ast.walk(tree):
+        # 目标形态：self._tune_values: dict[str, float] = { ..., "键": float(x.get("键", 兜底)), ... }
+        # 目标形态：self._tune_values: dict[str, float] = { ..., "键": float(x.get("键", 兜底)), ... }
+        # ⚠️ 带类型标注时是 AnnAssign 而不是 Assign —— 只认 Assign 会「一条都扫不到」
+        if isinstance(node, ast.AnnAssign):
+            tgt, value = node.target, node.value
+        elif isinstance(node, ast.Assign):
+            tgt, value = (node.targets[0] if node.targets else None), node.value
+        else:
+            continue
+        if not (isinstance(tgt, ast.Attribute) and tgt.attr == "_tune_values"
+                and isinstance(value, ast.Dict)):
+            continue
+        for val in value.values:
+            # 形态是 float(<x>.get("<键>", 兜底))：先把外面的 float(...) 剥掉
+            inner = val.args[0] if (isinstance(val, ast.Call)
+                                    and isinstance(val.func, ast.Name)
+                                    and val.func.id == "float" and val.args) else val
+            if not (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "get" and len(inner.args) == 2
+                    and isinstance(inner.args[0], ast.Constant)
+                    and isinstance(inner.args[1], ast.Constant)):
+                continue
+            if inner.args[0].value in field_of:
+                found[inner.args[0].value] = inner.args[1].value
+
+    missing = sorted(set(field_of) - set(found))
+    assert not missing, f"没扫到这些键的兜底值（键名改了就同步改这条用例）：{missing}"
+
+    cfg = OverlayConfig()
+    bad = [f"{k}：兜底 {found[k]:g} ≠ 默认值 {getattr(cfg, field_of[k]):g}"
+           for k in sorted(field_of)
+           if float(found[k]) != float(getattr(cfg, field_of[k]))]
+    assert not bad, ("微调面板的兜底值与配置默认值漂移了（config.yaml 缺键时界面会显示"
+                     "错值，还会写回配置）：\n  " + "\n  ".join(bad))
+    print(f"  ✓ 微调面板 {len(found)} 个兜底值都等于 OverlayConfig 默认值"
+          f"（width_m / font_size / source_font_size 这类漂移会被拦住）")
 
 
 # ---------------------------------------------------------------- 入口
@@ -179,11 +238,14 @@ def main() -> int:
             gui._update_check_job = None
         gui._toggle_tune_panel()
 
-        scales = collect_scales(gui._tune_body)
+        # 只收集 specs 那张网格里的滑块：同一个微调面板下方还挂着「桌面字幕」的透明度
+        # 滑块（不是手腕屏参数），按 `_tune_body` 整棵树收集会把顺序与条数都算错。
+        scales = collect_scales(getattr(gui, "_tune_grid", gui._tune_body))
         print("test_tune_rot_range:")
         for fn in (lambda: check_rot_slider_range(scales),
                    lambda: check_out_of_range_not_clamped(scales),
-                   lambda: check_round_trip_keeps_rot(gui, scales)):
+                   lambda: check_round_trip_keeps_rot(gui, scales),
+                   check_tune_fallbacks_match_config_defaults):
             try:
                 fn()
             except AssertionError as exc:

@@ -31,12 +31,13 @@ from .config import Direction, _as_str_map, DEFAULT_CONFIG, load_api_key, load_c
 from .config_io import (
     _fmt_scalar,
     _write_config_text,
+    _yaml_scalar,
     _yaml_set_in_text,
     _yaml_set_mapping,
     _yaml_set_or_create,
 )
 from .i18n import t
-from .output.overlay import OverlayConfig
+from .output.overlay import OverlayConfig, resolve_offset
 from .devices import (
     DeviceInfo,
     enumerate_audio_out_devices,
@@ -56,6 +57,7 @@ from .engine import (
     EngineEvents,
     input_gate_settings,
 )
+from .level_probe import LevelProbe
 from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
 
 from .paths import APP_DIR, BUNDLE_DIR
@@ -504,6 +506,15 @@ class TranslationGUI:
         # 手腕屏由**界面**持有（不是某个引擎）：手腕上只该有一块屏，内容镜像聊天区，
         # 而聊天区本来就在界面这一层（两个方向的文字都汇到这里）。
         self._overlay_out: Any | None = None
+        # 桌面字幕（PC 桌面模式：贴在 VRChat 窗口上的叠加窗）同样由界面持有，
+        # 理由与手腕屏一致——内容是聊天区的镜像，而聊天区在界面这一层。
+        self._desktop_out: Any | None = None
+        self._desktop_dragging = False
+        self._desktop_save_job: str | None = None
+        # 用户是否**真的动过**透明度滑块：`_save_desktop_cfg()` 也被「锁定位置」和拖动
+        # 落盘调到，只有这个标志为真才写 alpha —— 否则用户只是拖了个位置，
+        # 滑块上那个（可能是继承来的 / 默认的）值就被写进配置，透明度悄悄变了。
+        self._desktop_alpha_touched = False
         self._specs: list[tuple] = []
         self._sinks: set[str] = set()
         self._pending_starts = 0
@@ -555,11 +566,14 @@ class TranslationGUI:
         self._update_pending_info: update_check.ReleaseInfo | None = None
         # 【重载】已安排带拉起的替换：_on_close 别再重复安排退出时替换
         self._reload_started = False
+        # 正在退出：_on_close 里置位，之后一律不许再把电平探针拉起来（见 _gate_probe_wanted）
+        self._closing = False
         # 「已更新到最新版本」一次性提示（版本变化那一次才弹；版本号只进日志）
         self._updated_hint_win: tk.Toplevel | None = None
         self._updated_hint_job: str | None = None
 
         # 设置弹窗（分页）：headless 模式下不建 UI，这几个保持空/默认值
+        self._settings_win: tk.Toplevel | None = None
         self._settings_nb: ttk.Notebook | None = None
         # 每页一份 (滚动画布, 内容 frame, 滚动条)，顺序 = tab 顺序（滚轮按当前页取用）
         self._settings_pages: list[tuple[tk.Canvas, ttk.Frame, ttk.Scrollbar]] = []
@@ -576,6 +590,9 @@ class TranslationGUI:
         self._gate_level_lbl: ttk.Label | None = None
         self._gate_level_hold = LEVEL_FLOOR_DB     # 峰值保持：读数跳动时靠它平滑
         self._gate_level_tick = 0                  # _poll 节流（50ms → 100ms 刷一次）
+        # 独立电平探针：**没在翻译**时的电平来源（有引擎时用引擎的，绝不两路并存）。
+        # 只在「设置窗可见 + 勾了启用 + 没有引擎」时活着，见 _sync_gate_level_probe。
+        self._gate_probe: LevelProbe | None = None
         self._gate_save_job: str | None = None
         self._gate_hold_ms = 500.0                 # 只从配置读（界面不暴露，避免旋钮过多）
         self._gate_preroll_ms = 250
@@ -961,6 +978,12 @@ class TranslationGUI:
         tk.Checkbutton(out_frame, text=t("译音输出"), variable=self._vmic_var,
                        command=self._save_audio_flag,
                        **self._indicator_kw()).pack(side=tk.LEFT, padx=(10, 0))
+        # 桌面字幕（PC 桌面模式，不需要头显）：勾上立刻出一块贴在 VRChat 窗口上的字幕窗
+        self._desktop_var = tk.BooleanVar(
+            value=bool((self._cfg.ui or {}).get("desktop_overlay", False)))
+        tk.Checkbutton(out_frame, text=t("桌面字幕"), variable=self._desktop_var,
+                       command=self._on_desktop_toggle,
+                       **self._indicator_kw()).pack(side=tk.LEFT, padx=(10, 0))
 
         # 微调面板：外层常驻（保证位置固定），只切换内层 body 的显隐——
         # 若整块 pack_forget 再 pack，会被排到窗口最底部去。
@@ -1227,25 +1250,36 @@ class TranslationGUI:
         """
         ov = self._cfg.overlay if isinstance(self._cfg.overlay, dict) else {}
         off = ov.get("offset") or {}
-        pos = list(off.get("pos") or [0.0, 0.06, 0.02])
-        rot = list(off.get("rot") or [-47, -16, 0])
         _sz = list(ov.get("size_px") or [1024, 440])
         self._tune_panel_w = int(_sz[0])
+        # 位姿按**当前锚点**取（每个锚点各存一套；口径与两端后端共用 resolve_offset）
+        self._anchor_label_to_key = {t("右手"): "right_hand", t("左手"): "left_hand",
+                                     t("外部 tracker"): "tracker", t("头显前固定"): "hmd"}
+        _key_to_label = {v: k for k, v in self._anchor_label_to_key.items()}
+        pos, rot = resolve_offset(ov, str(ov.get("anchor", "right_hand")))
+        pos, rot = list(pos), list(rot)
         self._tune_values: dict[str, float] = {
             "pos_x": float(pos[0]), "pos_y": float(pos[1]), "pos_z": float(pos[2]),
             "rot_x": float(rot[0]), "rot_y": float(rot[1]), "rot_z": float(rot[2]),
-            "width_m": float(off.get("width_m", 0.24)),
+            # ⚠️ 下面这些 **`ov.get(键, 兜底)` 的兜底值必须等于 `OverlayConfig` 的默认值**
+            #    （由 tests/test_tune_rot_range.py 的 test_tune_fallbacks_match_config_defaults
+            #    钉住）。兜底只在 config.yaml **缺键**时才生效，真机上很难发现 —— 之前这里
+            #    是 width_m=0.24 / font_size=42 / source_font_size=30，而默认值是
+            #    0.23 / 36 / 29：用户手写配置少写两行，滑块就显示 42/30，
+            #    **碰一下还会把 42/30 写回配置**，字号悄悄变了。
+            "width_m": float(off.get("width_m", 0.23)),
             "curvature": float(off.get("curvature", 0.0)),
             "alpha": float(off.get("alpha", 0.9)),
             # 字号 / 面板高度决定「一块屏能显示多少字」——用户明确要能自己调
-            "font_size": float(ov.get("font_size", 42)),
-            "source_font_size": float(ov.get("source_font_size", 30)),
+            "font_size": float(ov.get("font_size", 36)),
+            "source_font_size": float(ov.get("source_font_size", 29)),
             "panel_h": float(_sz[1]),
+            # 半透明程度（0-255）：底板与原文分开调 —— 底板要透、文字要实心，
+            # 是两件事（实测用户就是这么要求的：界面半透明、文字不透明）
+            "bg_alpha": float(ov.get("bg_alpha", 205)),
+            "source_alpha": float(ov.get("source_alpha", 205)),
         }
         self._ov_save_job: str | None = None
-        self._anchor_label_to_key = {t("右手"): "right_hand", t("左手"): "left_hand",
-                                     t("前臂 tracker"): "tracker", t("头显前固定"): "hmd"}
-        _key_to_label = {v: k for k, v in self._anchor_label_to_key.items()}
 
         row = ttk.Frame(self._tune_body)
         row.pack(fill=tk.X, pady=(2, 2))
@@ -1258,12 +1292,19 @@ class TranslationGUI:
         self._anchor_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_anchor_change())
         ttk.Label(row, text=t("tracker 序号:"), font=FONT_UI).pack(side=tk.LEFT)
         self._tracker_var = tk.StringVar(value=str(ov.get("tracker_index", 0)))
-        ttk.Spinbox(row, from_=0, to=3, width=3, font=FONT_UI, textvariable=self._tracker_var,
+        # 上限 7 = Linux role 表有 8 项（0=右腕 … 7=左脚）；Windows 侧按「第 N 个已配对的
+        # GenericTracker」，序号大一点也无妨。原来卡在 0–3，Linux 上胸/腰/脚那几项
+        # 从界面根本够不到。
+        ttk.Spinbox(row, from_=0, to=7, width=3, font=FONT_UI, textvariable=self._tracker_var,
                     command=self._save_overlay_cfg).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(row, text=t("（仅锚点=前臂 tracker 时有效）"), font=FONT_STATUS,
-                  foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(10, 0))
+        # 「外部 tracker」= 挂到第 N 个通用 tracker（绑前臂/手腕只是为了让挂点离手腕近），
+        # 跟「前臂」没有绑定关系 —— 老文案写「前臂 tracker」会让人以为得是专用设备。
+        # 提示文案保持短：这一行左边还有锚点下拉和序号框，拉太长会把整行撑出窗口。
+        ttk.Label(row, text=t("（仅锚点=外部 tracker 时有效）"),
+                  font=FONT_STATUS, foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(10, 0))
 
         grid = ttk.Frame(self._tune_body)
+        self._tune_grid = grid      # 供测试按控件树定位 specs 那批滑块（本面板还挂着桌面字幕的滑块）
         grid.pack(fill=tk.X, pady=(2, 2))
         specs = [
             ("pos_x", t("位置X"), -0.30, 0.30, 0.005, "m"),
@@ -1280,6 +1321,9 @@ class TranslationGUI:
             ("font_size", t("译文字号"), 20, 64, 1, ""),
             ("source_font_size", t("原文字号"), 14, 48, 1, ""),
             ("panel_h", t("面板高"), 240, 560, 10, "px"),
+            # 0-255 的 8 位 alpha：底板（界面）/ 原文分开 —— 想让文字更实就拉满 255
+            ("bg_alpha", t("底板不透明度"), 0, 255, 5, ""),
+            ("source_alpha", t("原文不透明度"), 0, 255, 5, ""),
         ]
         # 标签宽度按**当前语言**最长的那条算：中文是 3-4 字（width=6 够），
         # 但英语 "Curvature"、俄语 "Размер оригинала" 会被 6 字宽截断 ——
@@ -1287,6 +1331,11 @@ class TranslationGUI:
         # 标签长到放不下三列时自动降成两列，宁可面板高一点，也不裁字。
         label_w = max(6, max(_char_width_for(spec[1], FONT_UI) for spec in specs))
         cols = 3 if label_w <= 9 else 2
+        # 切锚点要把该锚点那一份位姿**回填到滑块**上（见 _load_anchor_offset），
+        # 所以 var / 值标签都得留个引用。
+        self._tune_vars: dict[str, tk.DoubleVar] = {}
+        self._tune_lbls: dict[str, ttk.Label] = {}
+        self._tune_units: dict[str, str] = {}
         for i, (key, label, lo, hi, res, unit) in enumerate(specs):
             row_i, col_i = divmod(i, cols)
             cell = ttk.Frame(grid)
@@ -1301,7 +1350,63 @@ class TranslationGUI:
                      highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
                      command=self._make_tune_handler(key, var, val_lbl, unit)).pack(side=tk.LEFT, padx=(4, 6))
             val_lbl.pack(side=tk.LEFT)
+            self._tune_vars[key] = var
+            self._tune_lbls[key] = val_lbl
+            self._tune_units[key] = unit
 
+        # 桌面字幕（PC 桌面模式）：只需要「透明度 + 拖动解锁」两件，与上面那堆 VR 参数
+        # 无关；放在同一块「微调」里，用户不用记两处入口。
+        #
+        # ⚠️ 滑块初值必须与**窗口真实透明度同源**：窗口那侧是
+        #    `DesktopOverlayConfig.from_dict(desktop_overlay 段, overlay 段)` 解析出来的
+        #    （desktop_overlay.alpha → overlay.alpha → 默认值）。只读本段的 alpha 会让
+        #    「overlay.alpha=0.5 且没写 desktop_overlay.alpha」的用户看到滑块停在 0.90、
+        #    而窗口其实是 0.50 —— 更糟的是碰一下滑块就把 0.90 写回配置（透明度突然变了）。
+        from .output.desktop_overlay import DesktopOverlayConfig
+        _dcfg = DesktopOverlayConfig.from_dict(self._desktop_cfg(),
+                                               visual=self._cfg.overlay or {})
+        drow = ttk.Frame(self._tune_body)
+        drow.pack(fill=tk.X, pady=(6, 2))
+        ttk.Label(drow, text=t("桌面字幕"), font=FONT_UI).pack(side=tk.LEFT)
+        self._desktop_alpha_var = tk.DoubleVar(value=float(_dcfg.alpha))
+        self._desktop_alpha_lbl = ttk.Label(drow, text=f"{self._desktop_alpha_var.get():.2f}",
+                                            font=FONT_STATUS, foreground=TEXT_DIM, width=5)
+        tk.Scale(drow, from_=0.20, to=1.00, resolution=0.05, orient=tk.HORIZONTAL,
+                 variable=self._desktop_alpha_var, showvalue=False, length=104, width=10,
+                 bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
+                 highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
+                 command=self._on_desktop_alpha).pack(side=tk.LEFT, padx=(4, 6))
+        self._desktop_alpha_lbl.pack(side=tk.LEFT)
+        # 按钮文案会在「解锁拖动 / 锁定位置」之间切，宽度按两者里更长的算，免得不换语言也裁字
+        self._desktop_drag_btn = ttk.Button(
+            drow, text=t("解锁拖动"),
+            width=max(_char_width_for(t("解锁拖动"), FONT_UI, 6),
+                      _char_width_for(t("锁定位置"), FONT_UI, 6)),
+            command=self._toggle_desktop_drag)
+        self._desktop_drag_btn.pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(drow, text=t("（字幕窗默认可穿透，先解锁再拖）"), font=FONT_STATUS,
+                  foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(8, 0))
+
+    def _current_anchor(self) -> str:
+        """下拉当前选中的锚点键（right_hand / left_hand / tracker / hmd）。"""
+        return self._anchor_label_to_key.get(self._anchor_combo.get(), "right_hand")
+
+    def _load_anchor_offset(self, anchor: str) -> None:
+        """把**该锚点那一份**位姿回填到滑块上（切锚点时必须做，否则滑块显示的
+        是上一个锚点的值，随手拖一下就把那份值写到新锚点头上了）。
+
+        取不到就按 `resolve_offset` 的兜底链（`offset` → 内置默认）走 —— 与后端
+        真正用的那份值完全同源，界面显示的和面板的位置不会对不上。
+        """
+        ov = self._cfg.overlay if isinstance(self._cfg.overlay, dict) else {}
+        pos, rot = resolve_offset(ov, anchor)
+        pairs = list(zip(("pos_x", "pos_y", "pos_z"), pos)) + \
+            list(zip(("rot_x", "rot_y", "rot_z"), rot))
+        for key, val in pairs:
+            v = float(val)
+            self._tune_values[key] = v
+            self._tune_vars[key].set(v)
+            self._tune_lbls[key].configure(text=f"{v:g}{self._tune_units[key]}")
     def _make_tune_handler(self, key: str, var, lbl, unit: str):  # noqa: ANN001
         def _on_move(_v: str) -> None:
             self._tune_values[key] = round(float(var.get()), 4)
@@ -1310,6 +1415,12 @@ class TranslationGUI:
         return _on_move
 
     def _on_anchor_change(self) -> None:
+        """换锚点：先把**新锚点自己那一份**位姿回填到滑块，再落盘。
+
+        ⚠️ 顺序不能反：先落盘的话，写进去的是**上一个锚点**的位姿（滑块还没换过来），
+        等于换一次锚点就毁一份配置。
+        """
+        self._load_anchor_offset(self._current_anchor())
         self._save_overlay_cfg()
 
     def _schedule_overlay_save(self) -> None:
@@ -1324,8 +1435,12 @@ class TranslationGUI:
     def _save_overlay_cfg(self) -> None:
         """把微调面板的值写回 config.yaml；overlay 侧有热重载，改完立刻生效。
 
-        用就地改文本的方式（`_yaml_set_in_text`），**不整文件重写**，
+        用就地改文本的方式（`_yaml_set_in_text` / `_yaml_set_or_create`），**不整文件重写**，
         否则拖动一次滑块就会把配置里的注释和键顺序全抹掉。
+
+        ⚠️ 位姿写到 `overlay.offsets.<当前锚点>`（每个锚点各存一套），**不是**
+        `overlay.offset` —— 后者退化为「没单独存过的锚点」的兜底。写错地方就等于
+        切一次锚点覆盖一份位姿（用户实测的「没法设置成左手」）。
         """
         self._ov_save_job = None
         p = DEFAULT_CONFIG
@@ -1334,18 +1449,16 @@ class TranslationGUI:
         try:
             text = p.read_text(encoding="utf-8")
             v = self._tune_values
+            anchor = self._current_anchor()
             try:
                 tracker = int(self._tracker_var.get())
             except (TypeError, ValueError):
                 tracker = 0
+            pos_s = f"[{_fmt_scalar(v['pos_x'])}, {_fmt_scalar(v['pos_y'])}, {_fmt_scalar(v['pos_z'])}]"
+            rot_s = f"[{_fmt_scalar(v['rot_x'])}, {_fmt_scalar(v['rot_y'])}, {_fmt_scalar(v['rot_z'])}]"
             updates: list[tuple[list[str], str]] = [
-                (["overlay", "anchor"],
-                 self._anchor_label_to_key.get(self._anchor_combo.get(), "right_hand")),
+                (["overlay", "anchor"], anchor),
                 (["overlay", "tracker_index"], str(tracker)),
-                (["overlay", "offset", "pos"],
-                 f"[{_fmt_scalar(v['pos_x'])}, {_fmt_scalar(v['pos_y'])}, {_fmt_scalar(v['pos_z'])}]"),
-                (["overlay", "offset", "rot"],
-                 f"[{_fmt_scalar(v['rot_x'])}, {_fmt_scalar(v['rot_y'])}, {_fmt_scalar(v['rot_z'])}]"),
                 (["overlay", "offset", "width_m"], _fmt_scalar(v["width_m"])),
                 (["overlay", "offset", "curvature"], _fmt_scalar(v["curvature"])),
                 (["overlay", "offset", "alpha"], _fmt_scalar(v["alpha"])),
@@ -1353,14 +1466,34 @@ class TranslationGUI:
                 (["overlay", "font_size"], _fmt_scalar(v["font_size"])),
                 (["overlay", "source_font_size"], _fmt_scalar(v["source_font_size"])),
                 (["overlay", "size_px"], f"[{self._tune_panel_w}, {_fmt_scalar(v['panel_h'])}]"),
+                # 底板 / 原文的 8 位 alpha（同样会触发重渲一帧）
+                (["overlay", "bg_alpha"], str(int(v["bg_alpha"]))),
+                (["overlay", "source_alpha"], str(int(v["source_alpha"]))),
             ]
             for key_path, val in updates:
                 text = _yaml_set_in_text(text, key_path, val)
+            # 位姿按锚点分开存；老配置里整段没有 `offsets:` → 用 or_create 补建整条链
+            # （`_yaml_set_in_text` 找不到父键时会静默不改，设置就永远存不下去）
+            for key_path, val in ((["overlay", "offsets", anchor, "pos"], pos_s),
+                                  (["overlay", "offsets", anchor, "rot"], rot_s)):
+                text = _yaml_set_or_create(text, key_path, val)
             _write_config_text(p, text)
-            print(f"[gui] 手腕屏参数已写入 config.yaml：anchor={updates[0][1]} "
-                  f"pos={updates[2][1]} rot={updates[3][1]} width={updates[4][1]}m "
-                  f"curvature={updates[5][1]} alpha={updates[6][1]} "
-                  f"字号={updates[7][1]}/{updates[8][1]} 面板={updates[9][1]}"
+            # ⚠️ 内存里的 cfg 必须同步：不同步的话，切到别的锚点再切回来时
+            #    `_load_anchor_offset` 读到的还是**启动时**那份配置 —— 刚调好的值会被
+            #    旧值覆盖，界面上表现为「调了半天，切一下就白调」。
+            ov = self._cfg.overlay
+            if isinstance(ov, dict):
+                ov["anchor"] = anchor
+                ov["offsets"] = {**(ov.get("offsets") or {}),
+                                 anchor: {"pos": [v["pos_x"], v["pos_y"], v["pos_z"]],
+                                          "rot": [v["rot_x"], v["rot_y"], v["rot_z"]]}}
+            print(f"[gui] 手腕屏参数已写入 config.yaml：anchor={anchor} "
+                  f"offsets.{anchor} pos={pos_s} rot={rot_s} "
+                  f"width={_fmt_scalar(v['width_m'])}m "
+                  f"curvature={_fmt_scalar(v['curvature'])} alpha={_fmt_scalar(v['alpha'])} "
+                  f"字号={_fmt_scalar(v['font_size'])}/{_fmt_scalar(v['source_font_size'])} "
+                  f"面板=[{self._tune_panel_w}, {_fmt_scalar(v['panel_h'])}] "
+                  f"底板/原文 alpha={int(v['bg_alpha'])}/{int(v['source_alpha'])}"
                   f"（overlay 会热重载，无需重启）",
                   flush=True)
         except Exception as exc:  # noqa: BLE001
@@ -1643,7 +1776,8 @@ class TranslationGUI:
         ggrid.pack(fill=tk.X)
         ggrid.columnconfigure(1, weight=1)
         # 实时电平条：横轴 -70 ~ 0 dBFS；蓝 = 当前已超过门限（这段会被翻译），
-        # 白竖线 = 门限位置。数据来自 loopback 采集腿 —— 没在翻译时显示「—」。
+        # 白竖线 = 门限位置。数据来自 loopback 采集：正在翻译时用引擎那条腿，
+        # 没翻译时用独立探针（设置窗可见 + 勾了「启用」才采）；两路都没有才显示「—」。
         self._gate_level_canvas = tk.Canvas(ggrid, width=320, height=15,
                                             bg=SURFACE, highlightthickness=1,
                                             highlightbackground=BORDER, bd=0)
@@ -1666,7 +1800,7 @@ class TranslationGUI:
         self._gate_val_lbl = ttk.Label(ggrid, text=f"{_gate_db:g} dB",
                                        style="Dim.TLabel", width=9)
         self._gate_val_lbl.grid(row=1, column=2, sticky="w")
-        ttk.Label(body, text=t("只有响度超过门限的声音才会被翻译；改完立刻生效（开始翻译后这里显示实时电平）"),
+        ttk.Label(body, text=t("只有响度超过门限的声音才会被翻译；改完立刻生效（勾选「启用」后这里显示实时电平）"),
                   style="Muted.TLabel", justify=tk.LEFT,
                   wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
 
@@ -1920,12 +2054,14 @@ class TranslationGUI:
         """打开日志文件夹 —— 与「导出日志压缩包」看到的是同一个目录（_log_dir 单一真相，
         源码运行 = 仓库 logs/，打包后 = %APPDATA%\\vrchat-livetranslate\\logs，绿色版 = exe 旁）。
 
-        本软件只发 Windows 版，直接 os.startfile；打不开**不许静默**：状态栏 + 日志都留痕。
+        走跨平台封装 `platform.open_path`（Windows = `os.startfile`，Linux = `xdg-open`）——
+        以前这里直接调 `os.startfile`，Linux 上没有该属性会抛 AttributeError，必开必败。
+        打不开**不许静默**：状态栏 + 日志都留痕。
         """
         d = self._log_dir()
         try:
             d.mkdir(parents=True, exist_ok=True)   # 还没写过日志时也能打开（空目录）
-            os.startfile(str(d))
+            platform.open_path(str(d))
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] ⚠️ 打不开日志文件夹（{d}）：{type(exc).__name__}: {exc}", flush=True)
             self._set_status("error", t("打不开日志文件夹：{msg}", msg=exc))
@@ -1959,9 +2095,15 @@ class TranslationGUI:
         self._apply_dark_titlebar(win)
         # 也是同理：withdraw 时量不到可视高度，滚动条的显隐得等显示出来再判一次
         self._sync_settings_pages()
+        # 实时电平：窗口一打开（且勾了「启用」）就自己采一路，不必先点「开始翻译」。
+        # 此刻窗口可能还没被 WM 映射完（winfo_viewable 尚为假）—— 没关系，
+        # _poll 每 100ms 会再同步一次，最迟一跳就起来。
+        self._sync_gate_level_probe()
 
     def _close_settings(self) -> None:
         self._settings_win.withdraw()
+        # 窗口一关就**立刻**停采集、join 线程、关掉设备：窗口关着还占着声卡是不可接受的
+        self._sync_gate_level_probe()
 
     # ---------------------------------------------------------------- 界面语言
     def _on_ui_lang_change(self, _event=None) -> None:
@@ -3068,12 +3210,13 @@ class TranslationGUI:
                 (["ui", "direction"], self._direction_var.get()),
                 (["ui", "chatbox"], _fmt_scalar(bool(self._chatbox_var.get()))),
                 (["ui", "overlay"], _fmt_scalar(bool(self._overlay_var.get()))),
+                (["ui", "desktop_overlay"], _fmt_scalar(bool(self._desktop_var.get()))),
             ]
             for key_path, val in updates:
                 text = _yaml_set_in_text(text, key_path, val)
             _write_config_text(p, text)
             print(f"[gui] 界面选择已保存：direction={updates[0][1]} chatbox={updates[1][1]} "
-                  f"overlay={updates[2][1]}", flush=True)
+                  f"overlay={updates[2][1]} desktop={updates[3][1]}", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] 保存界面选择失败：{exc}", flush=True)
 
@@ -3528,6 +3671,10 @@ class TranslationGUI:
             sinks.add("chatbox")
         if self._overlay_var.get():
             sinks.add("overlay")
+        if self._desktop_var.get():
+            # "desktop" 只是界面层的标记（字幕窗由界面持有，引擎不认这个 sink），
+            # 放在这里是为了让「只勾桌面字幕」也能通过下面的"至少选一个输出"检查。
+            sinks.add("desktop")
         if not sinks:
             self._set_status("warn", t("请至少选择一个输出"))
             return
@@ -3591,6 +3738,7 @@ class TranslationGUI:
         self._pending_starts = len(specs)
         # 手腕屏由界面持有，内容镜像聊天区（两个方向都进同一块屏）
         self._start_overlay()
+        self._start_desktop()
         # 房间勾着就确保它在跑（_stop() 会连房间一起停；_start_room 幂等，已在跑则无操作）
         if getattr(self, "_room_var", None) is not None and self._room_var.get():
             self._start_room()
@@ -3616,7 +3764,7 @@ class TranslationGUI:
         # 引擎不碰手腕屏：它由界面持有（一块屏显示两个方向的对话）。
         # 若交给两个引擎各自创建，会撞 `OverlayError_KeyInUse`（用户实测）。
         # chatbox 只发「我说的话」的译文——theirs 腿不需要它（与 engine._chatbox_wanted 同义，双保险）。
-        own_sinks = {s for s in self._sinks if s != "overlay"}
+        own_sinks = {s for s in self._sinks if s not in ("overlay", "desktop")}
         if direction == "theirs":
             own_sinks.discard("chatbox")
         events = EngineEvents(
@@ -3640,6 +3788,9 @@ class TranslationGUI:
         self._engine_dirs.append(direction)
         self._pending_starts -= 1
         eng.start()
+        # 引擎起来了 → 电平改由引擎那条腿提供，探针必须让位
+        # （同一时刻只允许一路 loopback，否则两路抢同一个采集端点）
+        self._sync_gate_level_probe()
         if self._pending_starts > 0:
             # 两个引擎错开 300ms 启动，避免同时抢占音频设备
             self._start_job = self._root.after(300, self._start_engine, index + 1)
@@ -3720,6 +3871,166 @@ class TranslationGUI:
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] 手腕屏刷新失败：{type(exc).__name__}: {exc}", flush=True)
 
+    # ---------------------------------------------------------------- 桌面字幕（界面持有）
+    def _desktop_cfg(self) -> dict:
+        d = self._cfg.desktop_overlay
+        return d if isinstance(d, dict) else {}
+
+    def _start_desktop(self, *, force: bool = False) -> bool:
+        """把桌面字幕窗拉起来（PC 桌面模式：贴在 VRChat 窗口上的叠加窗）。
+
+        与手腕屏同一套约定：由**界面**持有（内容是聊天区的镜像，而聊天区在界面这一层），
+        失败只禁用这一项，绝不影响翻译。force=True 用于「勾上就起」那条路
+        （此时还没点开始翻译，`self._sinks` 里没有 desktop）。
+        """
+        if self._desktop_out is not None:
+            return True
+        if not force and "desktop" not in self._sinks:
+            return False
+        try:
+            from .output.desktop_overlay import DesktopOverlay, DesktopOverlayConfig
+            cfg = DesktopOverlayConfig.from_dict(self._desktop_cfg(),
+                                                 visual=self._cfg.overlay or {})
+            out = DesktopOverlay(cfg, config_path=DEFAULT_CONFIG, root=self._root)
+            if not out.start():
+                return False                       # start() 内部已打印原因
+            self._desktop_out = out
+            self._push_desktop(force=True)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._desktop_out = None
+            print(f"[gui] ⚠️ 桌面字幕初始化异常，已禁用（翻译不受影响）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            return False
+
+    def _on_desktop_toggle(self) -> None:
+        """勾选/取消「桌面字幕」。勾上就立刻出窗（用户多半是想先看位置对不对）。
+
+        起不来就自动退回未勾选 —— 否则界面显示"已开启"、实际什么都没有。
+        """
+        if self._desktop_var.get():
+            if self._start_desktop(force=True):
+                self._set_status("info", t("桌面字幕已开启（拖到想要的位置，透明度见「微调 ▸」）"))
+            else:
+                self._desktop_var.set(False)
+                self._set_status("error", t("桌面字幕没启动起来，已自动取消勾选"))
+        else:
+            self._stop_desktop()
+            self._sinks.discard("desktop")         # 别让下一次「开始翻译」又把它拉起来
+        self._save_ui_state()
+
+    def _stop_desktop(self) -> None:
+        if self._desktop_out is None:
+            return
+        try:
+            self._desktop_out.close()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 关闭桌面字幕时出错（忽略）：{exc}", flush=True)
+        self._desktop_out = None
+        self._desktop_dragging = False
+        # 文案跟着复位：字幕窗都关掉了还写着「锁定位置」，与真实状态不符（用户会以为
+        # 还处在解锁态）。headless 模式下这个按钮没建过 → getattr 兜住。
+        btn = getattr(self, "_desktop_drag_btn", None)
+        if btn is not None:
+            btn.configure(text=t("解锁拖动"))
+
+    def _push_desktop(self, force: bool = False) -> None:
+        """把聊天区最近几条推给桌面字幕（与手腕屏同一份内容）。"""
+        if self._desktop_out is None:
+            return
+        try:
+            entries = [(b.who, b.source, b.text) for b in self._bubbles[-8:]]
+            self._desktop_out.update_entries(entries, force=force)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 桌面字幕刷新失败：{type(exc).__name__}: {exc}", flush=True)
+
+    def _on_desktop_alpha(self, _v: str = "") -> None:
+        """透明度滑块：先改窗口（立刻见效），停手 300ms 再落盘。"""
+        # 只有**用户拖动滑块**才会走到这里（Tk 的 -command 回调）→ 记下「动过了」，
+        # `_save_desktop_cfg()` 才允许把 alpha 写进配置（见那里的说明）。
+        self._desktop_alpha_touched = True
+        a = float(self._desktop_alpha_var.get())
+        lbl = getattr(self, "_desktop_alpha_lbl", None)
+        if lbl is not None:
+            lbl.configure(text=f"{a:.2f}")
+        if self._desktop_out is not None:
+            self._desktop_out.set_alpha(a)
+        self._schedule_desktop_save()
+
+    def _schedule_desktop_save(self) -> None:
+        if self._desktop_save_job is not None:
+            try:
+                self._root.after_cancel(self._desktop_save_job)
+            except Exception:
+                pass
+        self._desktop_save_job = self._root.after(300, self._save_desktop_cfg)
+
+    def _save_desktop_cfg(self) -> None:
+        """把桌面字幕的参数（透明度 + 拖动折算出的锚点/偏移）写回 config.yaml。
+
+        用 `_yaml_set_or_create` 而不是就地改：用户的 config.yaml 是从**旧模板**生成的，
+        里面根本没有 `desktop_overlay:` 段，就地改会因为找不到父键静默失效
+        （表现就是"拖了、调了，重启全没了"）。
+
+        ⚠️ alpha 只在**用户真的动过滑块**时才写：本函数也被「锁定位置」与拖动落盘调到，
+        无条件写的话，用户只是把字幕拖了个位置，滑块上那个值（可能是从 `overlay.alpha`
+        继承来的、甚至只是默认的 0.90）就被写进 `desktop_overlay.alpha` 并热重载生效 ——
+        表现为「拖一下位置，透明度突然变了」。
+        """
+        self._desktop_save_job = None
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            return
+        try:
+            text = p.read_text(encoding="utf-8")
+            updates: list[tuple[list[str], str]] = []
+            if self._desktop_alpha_touched:
+                updates.append((["desktop_overlay", "alpha"],
+                                _fmt_scalar(float(self._desktop_alpha_var.get()))))
+            if self._desktop_out is not None:
+                for key, val in (self._desktop_out.snap_to_config() or {}).items():
+                    if key in ("offset", "pos"):
+                        updates.append((["desktop_overlay", key], f"[{val[0]}, {val[1]}]"))
+                    else:
+                        updates.append((["desktop_overlay", key], str(val)))
+            if not updates:
+                return                               # 什么都没改：不重写配置、也不打误导日志
+            for key_path, value in updates:
+                text = _yaml_set_or_create(text, key_path, value)
+            _write_config_text(p, text)
+            print("[gui] 桌面字幕参数已写入 config.yaml："
+                  + " ".join(f"{'/'.join(k)}={v}" for k, v in updates), flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 保存桌面字幕参数失败：{exc}", flush=True)
+
+    def _toggle_desktop_drag(self) -> None:
+        """解锁/锁定拖动。
+
+        字幕窗默认**鼠标穿透**（不挡着点 VRChat），穿透开着时窗口收不到鼠标事件，
+        所以要拖必须先解锁；锁定 = 把落点折算成锚点+偏移写回配置并恢复穿透。
+        """
+        if self._desktop_out is None:
+            # ⚠️ 这条分支**没有**取消任何勾选（那是 `_on_desktop_toggle` 的事）：
+            #    文案必须如实说「没在运行，先去勾上」，不能谎称已经替用户改了勾选状态。
+            self._desktop_dragging = False
+            self._set_status("warn", t("桌面字幕还没开启，先勾上「桌面字幕」再解锁拖动"))
+            return
+        self._desktop_dragging = not self._desktop_dragging
+        try:
+            self._desktop_out.set_draggable(self._desktop_dragging)
+        except Exception as exc:  # noqa: BLE001
+            self._desktop_dragging = False
+            print(f"[gui] 切换桌面字幕拖动失败：{type(exc).__name__}: {exc}", flush=True)
+            return
+        btn = getattr(self, "_desktop_drag_btn", None)
+        if btn is not None:
+            btn.configure(text=t("锁定位置") if self._desktop_dragging else t("解锁拖动"))
+        if self._desktop_dragging:
+            self._set_status("info", t("桌面字幕已解锁：拖动字幕窗到想要的位置，放好后点「锁定位置」"))
+        else:
+            self._save_desktop_cfg()
+            self._set_status("info", t("桌面字幕位置已记住"))
+
     def _stop(self) -> None:
         """停止翻译：**绝不在界面线程等引擎收尾**（真机实测冻 20s = 窗口无响应）。
 
@@ -3746,11 +4057,14 @@ class TranslationGUI:
             except Exception as exc:    # noqa: BLE001
                 print(f"[gui] 下发停止信号失败（忽略）：{type(exc).__name__}: {exc}", flush=True)
         self._stop_overlay()
+        self._stop_desktop()
         self._stop_room()          # 关窗 / 停止都连房间一起停（幂等、≤5s，绝不拖住退出）
         self._refresh_room_status_label()
         self._engines = []          # 立刻移走：收尾由后台线程负责，_poll 不再看它们
         self._engine_dirs = []
         self._set_text_input_enabled(False)
+        # 引擎没了 → 设置窗若还开着且勾了「启用」，电平交回独立探针
+        self._sync_gate_level_probe()
         if not engines:
             # 没有引擎在手：但可能还有上一次的收尾在飞（只有 _on_close 这条重复调用路径会走到），
             # 那就别把「开始翻译」放开 —— 旧引擎还在关麦克风/虚拟声卡。
@@ -3780,8 +4094,9 @@ class TranslationGUI:
         elapsed = time.monotonic() - t0
         if stuck:
             print(f"[gui] ⚠️ 停止收尾超时（{STOP_WAIT_S:.0f}s）：第 {stuck} 个引擎还没退出"
-                  "（界面已恢复，可再点「开始翻译」）", flush=True)
-        self._q.put(("stop_done", elapsed, len(engines)))
+                  "（仍在关麦克风/虚拟声卡；界面照常恢复，状态栏会如实提示仍在收尾）",
+                  flush=True)
+        self._q.put(("stop_done", elapsed, len(engines), bool(stuck)))
         self._stop_done_evt.set()
 
     def _on_close(self) -> None:
@@ -3792,6 +4107,9 @@ class TranslationGUI:
         这里和按钮那条路不同：退出时等一等是对的（要关干净麦克风/虚拟声卡），
         但同样给上限 —— 等不到也得走，绝不把窗口吊在那儿。
         """
+        self._closing = True
+        # 先放掉电平探针占着的采集设备；_stop() 里那次同步看到 _closing 也不会再拉起来
+        self._stop_gate_probe()
         try:
             self._stop()
         except Exception as exc:
@@ -3944,29 +4262,38 @@ class TranslationGUI:
             self._set_status("info", t("设备：全部自动检测"))
 
     def _save_device_config(self, mic_name: str, loop_name: str, out_name: str) -> None:
-        # Linux：只写麦克风。`loopback_device` / `output.audio.device_name` **原样保留**
-        # （界面不给选、引擎也忽略它们），别把用户旧配置清成空串。
+        """把设备选择写回 config.yaml —— **就地改那几行**，不整份重写。
+
+        ⚠️ 这里以前用 `yaml.safe_load` + `yaml.dump` 整文件重写：用户每改一次设备下拉，
+        `config.yaml` 的**注释、空行、键顺序就全没了** —— 实测一份 154 行、53 行注释的
+        配置被拍成 116 行、键按字母重排的转储（注释是配置里唯一的说明书，丢了只能重看模板）。
+        其它保存路径（语言 / 译音开关 / 手腕屏微调 / 音色 / 输入门限）早就改成就地写了，
+        只有这条漏了 —— 而设备下拉恰恰是用户最常动的控件之一。
+
+        Linux：只写麦克风。`loopback_device` / `output.audio.device_name` **原样保留**
+        （界面不给选、引擎也忽略它们），别把用户旧配置清成空串。
+        """
         write_fixed = not self._linux_fixed_audio
         p = DEFAULT_CONFIG
         if not p.exists():
             return
         try:
-            raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            capture = dict(raw.get("capture") or {})
-            capture["mic_device"] = mic_name
+            text = p.read_text(encoding="utf-8")
+            # 值用 _yaml_scalar 渲染：设备名是外部枚举来的，含 `#`/`: `/`[` 时
+            # 手拼会写出坏 YAML（旧整份 dump 自动处理了这件事，这里要自己保证）。
+            updates: list[tuple[list[str], str]] = [
+                (["capture", "mic_device"], _yaml_scalar(mic_name)),
+            ]
             if write_fixed:
-                capture["loopback_device"] = loop_name
-            raw["capture"] = capture
-            if write_fixed:
-                output = dict(raw.get("output") or {})
-                audio = dict(output.get("audio") or {})
-                audio["device_name"] = out_name
-                output["audio"] = audio
-                raw["output"] = output
-            with p.open("w", encoding="utf-8") as f:
-                yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)
+                updates.append((["capture", "loopback_device"], _yaml_scalar(loop_name)))
+                updates.append((["output", "audio", "device_name"], _yaml_scalar(out_name)))
+            for key_path, val in updates:
+                # 用 _yaml_set_or_create：老配置可能整段没有 `capture` / `output.audio`，
+                # 那个「只在已存在路径上替换」的函数会静默 no-op（设置就永远存不下去）。
+                text = _yaml_set_or_create(text, key_path, val)
+            _write_config_text(p, text)     # 写前校验 YAML：宁可这次不生效，也不写坏配置
         except Exception as exc:
-            print(f"[gui] 保存设备配置失败：{exc}")
+            print(f"[gui] 保存设备配置失败：{exc}", flush=True)
             return
         # 同步内存里的配置，引擎启动时会读
         self._cfg.output.setdefault("capture", {})["mic_device"] = mic_name
@@ -3985,6 +4312,8 @@ class TranslationGUI:
         db = float(self._gate_var.get())
         self._gate_val_lbl.configure(text=f"{db:g} dB")
         self._apply_gate_live()
+        # 勾上「启用」→ 立刻开始采电平；取消勾选 → 立刻停并释放设备
+        self._sync_gate_level_probe()
         if self._gate_save_job is not None:
             try:
                 self._root.after_cancel(self._gate_save_job)
@@ -4053,13 +4382,92 @@ class TranslationGUI:
               flush=True)
         self._set_status("info", t("输入门限已保存：{db} dB", db=f"{db:g}"))
 
+    def _gate_probe_wanted(self) -> bool:
+        """独立电平探针**该不该在跑**（四个条件同时成立）。
+
+        ① 没在退出（`_closing`）；② 没有引擎在跑；③ 勾了「启用」；④ 设置窗**可见**。
+
+        ⚠️ 窗口是常驻对象（建好即 withdraw，不是每次销毁重建），所以「开着吗」只能
+        判 `winfo_viewable()`，判「对象在不在」永远为真。
+        """
+        if self._closing or self._headless or self._engines:
+            return False
+        var = getattr(self, "_gate_enabled_var", None)
+        if var is None or not bool(var.get()):
+            return False
+        win = self._settings_win
+        if win is None:
+            return False
+        try:
+            return bool(win.winfo_viewable())
+        except Exception:  # noqa: BLE001 — 窗口已销毁：当作「没开着」
+            return False
+
+    def _sync_gate_level_probe(self) -> None:
+        """把探针对齐到 `_gate_probe_wanted()` 的判定（幂等，可以放心高频调）。
+
+        调用点：开/关设置窗、勾「启用」、引擎启动与停止、`_poll` 每 100ms 兜底一次
+        （兜底那次是为了保证「窗口关着时绝不可能还开着采集」—— 万一有别的路径
+        把窗口藏起来而没走 `_close_settings`，这里最迟一跳就把它停掉）。
+
+        「目标不在 / 目标变了」由**探针自己在后台低频处理**（`LevelProbe` 里
+        每 `RETRY_S` 重试、每 `RECHECK_S` 复查采集目标）—— 界面这里不重建对象：
+        这样不会每 100ms 刷一行日志，也不需要界面去懂 PipeWire 的目标集合。
+        只有「用户取消勾选 / 关窗 / 开始翻译」才会把探针整个丢掉、设备立刻释放。
+        """
+        if not self._gate_probe_wanted():
+            self._stop_gate_probe()
+            return
+        if self._gate_probe is not None:
+            return                          # 在跑（或在后台等目标）就别动它
+        capture_cfg = (self._cfg.output or {}).get("capture") or {}
+        name = capture_cfg.get("loopback_device") or None
+        probe = LevelProbe(device_name=name)
+        self._gate_probe = probe
+        probe.start()
+        print(f"[level] 设置窗已打开且勾了「启用」→ 开始独立电平采集"
+              f"（设备：{name or '自动检测'}；没在翻译，不占用引擎那条腿）", flush=True)
+
+    def _stop_gate_probe(self) -> None:
+        """停掉探针并释放设备（`LevelProbe.stop()` 内部会 join 线程 + close 源）。"""
+        probe = self._gate_probe
+        if probe is None:
+            return
+        self._gate_probe = None             # 先摘掉：_refresh_gate_level 立刻回到「—」
+        was_running = probe.running
+        probe.stop()
+        if was_running:
+            print(f"[level] 已停止独立电平采集并释放设备（本次共采 {probe.chunks} 块）",
+                  flush=True)
+
+    def _gate_level_db(self) -> float | None:
+        """当前该画出来的电平（dBFS）；**没有可用来源**时返回 None（读数显示「—」）。
+
+        优先级是硬的：**有引擎 → 只用引擎的** `input_gate.level_db`（那条腿本来就在采，
+        电平与真正被上送的音频同源）；没引擎 → 用独立探针。两路并用等于白开一路
+        loopback 去抢同一个 WASAPI 端点。
+        """
+        if self._engines:
+            lvl = LEVEL_FLOOR_DB
+            for e in self._engines:
+                g = getattr(e, "input_gate", None)
+                if g is not None:
+                    lvl = max(lvl, float(g.level_db))
+            return lvl
+        probe = self._gate_probe
+        # 探针开不了设备（在后台低频重试）/ 还没有第一块数据时 `has_data=False` / 读取
+        # 异常停下 —— 这几种都显示「—」，绝不拿一个没有可信读数或已经死掉的来源假装有电平。
+        if probe is not None and probe.running and probe.has_data:
+            return float(probe.level_db)
+        return None
+
     def _refresh_gate_level(self) -> None:
         """刷新设置窗里的实时电平条（每 100ms 一次）。
 
         横轴 -70 ~ 0 dBFS：门限是白竖线，蓝色填充 = 当前电平已超过门限（这段会被翻译）。
-        数据来源是运行中引擎的 `input_gate.level_db`（loopback 采集腿每 100ms 更新）；
-        没有引擎在跑就只画门限线、读数显示「—」—— 电平只有真在采集时才有意义，
-        不假装有数据。
+        数据来源见 `_gate_level_db()`：正在翻译时是引擎那条 loopback 腿，没翻译时是
+        独立探针（设置窗可见 + 勾了「启用」才在采）；两路都没有就只画门限线、
+        读数显示「—」—— 没有真在采集就不假装有数据。
         """
         cv = self._gate_level_canvas
         gvar = getattr(self, "_gate_var", None)
@@ -4078,7 +4486,8 @@ class TranslationGUI:
         x_thr = (thr - lo) / (hi - lo) * w
         cv.delete("all")                       # 每 100ms 重建（2 个图元，开销可忽略）
         cv.create_line(x_thr, 0, x_thr, h, fill=TEXT, width=2)
-        if not self._engines:
+        lvl = self._gate_level_db()
+        if lvl is None:
             self._gate_level_hold = LEVEL_FLOOR_DB
             if self._gate_level_lbl is not None:
                 try:
@@ -4086,12 +4495,9 @@ class TranslationGUI:
                 except Exception:  # noqa: BLE001
                     pass
             return
-        lvl = LEVEL_FLOOR_DB
-        for e in self._engines:
-            g = getattr(e, "input_gate", None)
-            if g is not None:
-                lvl = max(lvl, float(g.level_db))
-        # 峰值保持（每 100ms 掉 1.5dB）：逐块读数跳得厉害，直接画会闪成噪声
+        # 峰值保持（每 100ms 掉 1.5dB）：逐块读数跳得厉害，直接画会闪成噪声。
+        # 只在这一处做 —— 引擎的 level_db 与探针的 level_db 都是「最近一块的瞬时值」，
+        # 两条路进来的观感因此完全一致。
         self._gate_level_hold = max(lvl, self._gate_level_hold - 1.5, LEVEL_FLOOR_DB)
         db = max(lo, min(hi, self._gate_level_hold))
         x_lvl = (db - lo) / (hi - lo) * w
@@ -4110,6 +4516,7 @@ class TranslationGUI:
                 if kind == "text":
                     self._add_text(item[2], item[3], item[4], who=item[1])
                     self._push_overlay()   # 手腕屏镜像聊天区（同一块屏，两个方向都上）
+                    self._push_desktop()   # 桌面字幕同一份内容（PC 桌面模式）
                 elif kind == "status":
                     self._set_status(item[1], item[2])
                 elif kind == "stats":
@@ -4143,14 +4550,24 @@ class TranslationGUI:
                     self._on_voice_preview_done(item[1], item[2], item[3])
                 elif kind == "stop_done":
                     # 引擎收尾完成（后台线程入队）→ 恢复「开始翻译」。
-                    # item = ("stop_done", 收尾用时, 引擎数)
+                    # item = ("stop_done", 收尾用时, 引擎数, 是否有引擎超时未退出)
+                    _, elapsed, n_engines, incomplete = item
+                    # 超时也照样放开：收尾线程已经不再等了，一直禁着等于把界面永久锁死
+                    # （只能重启应用）。代价是极端情况下可能与还在关设备的旧引擎抢麦克风 ——
+                    # 那种失败会在启动路径上如实报错并留痕，比界面锁死可恢复得多。
                     self._start_btn.configure(state=tk.NORMAL)
                     self._stop_btn.configure(state=tk.DISABLED)
-                    print(f"[gui] 停止收尾完成：{item[2]} 个引擎，用时 {item[1]:.2f}s",
+                    print(f"[gui] 停止收尾完成：{n_engines} 个引擎，用时 {elapsed:.2f}s"
+                          + ("（有引擎超时未退出，仍在关设备）" if incomplete else ""),
                           flush=True)
                     # 引擎失败时状态栏已有 error 消息，别用"已停止"盖掉
                     if self._last_status_level != "error":
-                        self._set_status("info", t("已停止"))
+                        if incomplete:
+                            # 降级路径也要在状态栏如实留痕（本仓库禁静默降级）：
+                            # 只写「已停止」会骗人 —— 上一条腿其实还没收完。
+                            self._set_status("warn", t("已停止（上一次会话仍在收尾）"))
+                        else:
+                            self._set_status("info", t("已停止"))
         except queue.Empty:
             pass
         if (self._pending_starts == 0 and self._engines
@@ -4164,6 +4581,8 @@ class TranslationGUI:
             self._engine_dirs = []
         if self._overlay_out is not None:
             self._overlay_out.tick()      # 手腕屏的热重载 / 淡出
+        if self._desktop_out is not None:
+            self._desktop_out.tick()      # 桌面字幕：跟随目标窗口 / 热重载 / 补画
         # 房间行状态（连接态 + 在线人数）每 0.5s 刷一次：人数变化不经 on_status，只能轮询快照
         _now = time.monotonic()
         if _now >= self._room_status_next:
@@ -4171,8 +4590,12 @@ class TranslationGUI:
             self._refresh_room_status_label()
         # 输入门限的实时电平条：每 100ms 刷一次（_poll 本身 50ms 一跳）
         self._gate_level_tick += 1
-        if self._gate_level_canvas is not None and self._gate_level_tick % 2 == 0:
-            self._refresh_gate_level()
+        if self._gate_level_tick % 2 == 0:
+            # 顺带兜底同步探针启停：万一有别的路径把设置窗藏起来而没走 _close_settings，
+            # 这里最迟一跳就把采集停掉 —— 「窗口关着时不许还开着采集」不能只靠调用点自觉。
+            self._sync_gate_level_probe()
+            if self._gate_level_canvas is not None:
+                self._refresh_gate_level()
         self._root.after(50, self._poll)
 
     # ================================================================ 聊天气泡

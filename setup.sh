@@ -72,8 +72,15 @@ else
 fi
 
 if ls /usr/share/openxr/1/*.json >/dev/null 2>&1 \
-   || [ -f "$HOME/.config/openxr/1/active_runtime.json" ]; then
+   || [ -f "$HOME/.config/openxr/1/active_runtime.json" ] \
+   || [ -n "${XR_RUNTIME_JSON:-}" ]; then
     echo "      OK   OpenXR 运行时（Monado / WiVRn）"
+    # ⚠️ 上面这条判据只能说明「装了运行时」：清单在 /usr/share/openxr/1/ 只代表有这个运行时，
+    #    真正生效的是「活跃运行时」指针（XR_RUNTIME_JSON 或 ~/.config/openxr/1/active_runtime.json）。
+    if [ -z "${XR_RUNTIME_JSON:-}" ] && [ ! -f "$HOME/.config/openxr/1/active_runtime.json" ]; then
+        echo "           ⚠️ 但没看到「活跃运行时」指针（XR_RUNTIME_JSON / ~/.config/openxr/1/active_runtime.json）"
+        echo "              → 手腕屏可能报 RuntimeUnavailableError；用 wivrn-dashboard 或 Envision 选中一个运行时"
+    fi
 else
     echo "      缺   OpenXR 运行时（手腕屏，可选）"
     echo "           → Monado：pacman -S monado    WiVRn：AUR wivrn-server"

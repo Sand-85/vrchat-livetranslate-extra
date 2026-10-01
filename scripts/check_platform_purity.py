@@ -26,13 +26,15 @@
 ## AppImage 侧怎么读（两种产物两条路径）
 
 AppImage 是 **squashfs**，没有 PyInstaller 那套读取器。这里用 AppImage 运行时自带的
-`--appimage-extract` 就地解包（不要求宿主装 squashfs-tools），然后：
+`--appimage-extract` 就地解包（不要求宿主装 squashfs-tools），然后按**内层布局**分两路：
 
-* 模块级判据：`usr/app/**/*.py` 的包路径 + `usr/python/lib/python*/site-packages`
-  的顶层包名（第三方依赖也在这个目录里，`pyaudiowpatch` 之类的名字要能抓到）；
-* 内容级判据：只扫 `usr/app/**/*.py`（**编译后**取常量，与 exe 路径同语义）。
-  资源/模板（`config.example.yaml`、字体）不参与字样判据 —— 它们本来就是跨平台的东西，
-  真正的「实现」只可能在 Python 里。
+* **PyInstaller onedir（2026-10 起的官方布局）**：`usr/bin/<名>/<名>` 是内层可执行文件，
+  代码与实现字样都在它的 PYZ 里 —— 直接复用 exe 那条读取路径（`pkg_archive_contents`
+  列模块名、逐条目取内容）。⚠️ 不做这条分支的话，旧分支在 `usr/app/` 找不到任何 `.py`，
+  两条判据**双双空过**（假绿）——这正是这个脚本必须跟着构建路线改的原因。
+* 旧布局（`usr/app/` 明文源码 + `usr/python`）——保留兼容，但新构建不再产出；
+  模块级判据 = `usr/app/**/*.py` 的包路径 + `usr/python/.../site-packages` 的顶层包名；
+  内容级判据 = 只扫 `usr/app/**/*.py`（编译后取常量，与 exe 路径同语义）。
 
 ## 字样判据为什么排除 docstring
 
@@ -49,8 +51,9 @@ from typing import Iterator
 
 # 每个平台**不允许**出现的东西。
 #
-#   modules —— 模块名（exe：PyInstaller 的 TOC/内嵌 PYZ；AppImage：AppDir 里的包路径），
-#              靠 --exclude-module / 构建脚本的反向删除保证
+#   modules —— 模块名（exe：PyInstaller 的 TOC/内嵌 PYZ；AppImage：内层 onedir
+#              可执行文件的 PYZ），靠构建脚本的 --exclude-module（Linux 见
+#              build_appimage.sh 的 EXCLUDES；Windows 见 build_exe.py 的 EXCLUDE_WIN）保证
 #   strings —— **实现**里不允许出现的字样（函数名、API 名、平台工具名）
 #
 # ⚠️ 加新平台独占模块时，**同时**加进 scripts/build_exe.py 的 EXCLUDE_WIN
@@ -84,6 +87,7 @@ FORBIDDEN: dict[str, dict[str, list[str]]] = {
         "modules": [
             "vlt.platform.win",            # WASAPI / pyaudiowpatch 那套
             "vlt.output.openvr_overlay",   # SteamVR 手腕屏后端（Windows 独占）
+            "openvr",                      # SteamVR 接口本体（上一条的依赖）
             "pyaudiowpatch",
             "pycaw",
             "comtypes",
@@ -279,9 +283,22 @@ def appimage_entry_bytes(root: Path) -> Iterator[tuple[str, bytes]]:
             yield name, blob
 
 
+def _string_scope_ok(name: str, prefixes: tuple[str, ...]) -> bool:
+    """某条 PYZ/档案条目的名字是否在「字样判据」的扫描范围内（见 `_judge` 注释）。"""
+    return any(name == p or name.startswith(p + ".") for p in prefixes)
+
+
 def _judge(platform: str, rules: dict, names: list[str],
-           entries: Iterator[tuple[str, bytes]]) -> bool:
-    """两条判据都在这里：模块名（硬）+ 实现字样。"""
+           entries: Iterator[tuple[str, bytes]],
+           string_scope: tuple[str, ...] = ("vlt", "run_gui")) -> bool:
+    """两条判据都在这里：模块名（硬）+ 实现字样。
+
+    `string_scope`：字样判据**只扫我们自己的实现**（`vlt.*` 与入口 `run_gui`）。
+    第三方库的代码本来就是跨平台实现（sounddevice 里就有 PortAudio 的 `paWASAPI`
+    常量），拿「某平台禁列」去扫第三方是**误报**；而「第三方有没有混进来」由
+    判据 1（模块名）负责 —— 想让某个第三方被拦，就把它加进 `FORBIDDEN[...]["modules"]`
+    （例：Linux 侧的 `openvr`），别指望字样碰运气。
+    """
     print(f"   收录条目：{len(names)}")
     ok = True
 
@@ -301,6 +318,8 @@ def _judge(platform: str, rules: dict, names: list[str],
     needles = rules["strings"]
     found: dict[bytes, list[str]] = {}
     for name, data in entries:
+        if not _string_scope_ok(name, string_scope):
+            continue
         for needle in needles:
             if needle in data:
                 found.setdefault(needle, []).append(name)
@@ -310,15 +329,23 @@ def _judge(platform: str, rules: dict, names: list[str],
             _fail(f"内嵌内容里出现 {needle.decode()}（来自 {where}）")
             ok = False
     if not found:
-        _ok(f"内容级干净（{len(needles)} 条禁列字样一处都没出现）")
+        _ok(f"内容级干净（{len(needles)} 条禁列字样一处都没出现；扫描域：{string_scope}）")
 
     print(("== 结论：干净 ==" if ok else "== 结论：**隔离被破坏** =="))
     if not ok:
-        print("   修法：把对应模块加进构建脚本的排除列表（Windows 见 "
-              "scripts/build_exe.py 的 EXCLUDE_WIN；Linux 见 "
-              "scripts/build_appimage.sh 的反向删除），"
+        print("   修法：把对应模块加进构建排除清单（Windows 见 scripts/build_exe.py 的 "
+              "EXCLUDE_WIN；Linux 见 scripts/build_appimage.sh 的 EXCLUDES），"
               "并确认它没有出现在共享代码的顶层 import 里。")
     return ok
+
+
+def _frozen_exe(root: Path) -> Path | None:
+    """PyInstaller onedir 布局里的内层可执行文件（`usr/bin/<名>/<名>`，同级有 `_internal/`）。"""
+    for internal in sorted(root.glob("usr/bin/*/_internal")):
+        exe = internal.parent / internal.parent.name
+        if exe.is_file():
+            return exe
+    return None
 
 
 def check(artifact: Path, platform: str) -> bool:
@@ -330,6 +357,11 @@ def check(artifact: Path, platform: str) -> bool:
     if is_appimage(artifact):
         try:
             with appdir(artifact) as root:
+                frozen = _frozen_exe(root)
+                if frozen is not None:
+                    # PyInstaller onedir：复用 exe 的读取路径（见文件头说明）
+                    return _judge(platform, rules, load_names(frozen),
+                                  iter_entry_bytes(frozen))
                 return _judge(platform, rules, appimage_names(root),
                               appimage_entry_bytes(root))
         except Exception as exc:             # noqa: BLE001

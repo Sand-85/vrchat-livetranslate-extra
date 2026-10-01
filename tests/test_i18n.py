@@ -3,7 +3,7 @@
 跑法：.venv/Scripts/python.exe tests/test_i18n.py
 
 全程离线：不联网、不启动引擎。GUI 用例用**临时 config.yaml**（ui.lang: en）起真窗口，
-绝不碰用户真实配置；「打开日志文件夹」用例把 os.startfile 打桩，绝不真开资源管理器。
+绝不碰用户真实配置；「打开日志文件夹」用例把 platform.open_path 打桩，绝不真开文件管理器。
 
 已知边界（不是疏漏，是有意为之）：
 - 机械守卫只认 `t("字面量")`；个别动态 key（`t(_zh)`，日志要留中文原文的场合）不在
@@ -531,15 +531,19 @@ def test_language_combo_writes_config() -> None:
 
 
 def test_open_log_folder_button() -> None:
-    """★ 设置弹窗「日志」区有「打开日志文件夹」按钮；处理函数用 os.startfile 打开
-    **与导出压缩包同一个目录**（_log_dir）；打不开时不许静默（状态栏 + 日志）。
-    os.startfile 全程打桩，绝不真开资源管理器。"""
+    """★ 设置弹窗「日志」区有「打开日志文件夹」按钮；处理函数走跨平台封装
+    `platform.open_path`（Windows=os.startfile，Linux=xdg-open）打开**与导出压缩包同一个
+    目录**（_log_dir）；打不开时不许静默（状态栏 + 日志）。
+
+    open_path 全程打桩，绝不真开文件管理器。**故意不去打桩 `os.startfile`**：若有人再把
+    实现改回直接调 `os.startfile`，Linux 上会真抛 AttributeError（该属性不存在），本用例即红
+    —— 这正是本用例要守的回归点（见「打开日志文件夹在 Linux 上必失败」的修复）。"""
     import vlt.gui as gui_mod
+    from vlt import platform as platform_mod
 
     saved_env = _isolate_env(Path(tempfile.mkdtemp(prefix="vlt-i18n-env-")))
     gui = None
-    had_startfile = hasattr(gui_mod.os, "startfile")
-    orig_startfile = getattr(gui_mod.os, "startfile", None)
+    orig_open_path = platform_mod.open_path
     try:
         gui = _make_gui(_temp_config("zh"))
         # 按钮存在且在导出按钮旁边（同一个容器）
@@ -549,7 +553,7 @@ def test_open_log_folder_button() -> None:
             "「打开日志文件夹」不在日志区"
 
         opened: list[str] = []
-        gui_mod.os.startfile = lambda p: opened.append(p)
+        platform_mod.open_path = lambda p: opened.append(str(p))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             gui._on_open_log_folder()
@@ -561,20 +565,17 @@ def test_open_log_folder_button() -> None:
         def _boom(_p: str) -> None:
             raise OSError("denied-for-test")
 
-        gui_mod.os.startfile = _boom
+        platform_mod.open_path = _boom
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             gui._on_open_log_folder()              # 绝不许抛
         assert "打不开日志文件夹" in str(gui._status_label.cget("text")), \
             f"失败时状态栏没提示：{gui._status_label.cget('text')!r}"
         assert "打不开日志文件夹" in buf.getvalue(), "失败路径必须留痕"
-        print(f"  ✓ 打开日志文件夹：startfile 收到正确目录（{opened[0]}）；"
-              f"失败路径状态栏+日志双留痕（已打桩，未真开资源管理器）")
+        print(f"  ✓ 打开日志文件夹：open_path 收到正确目录（{opened[0]}）；"
+              f"失败路径状态栏+日志双留痕（已打桩，未真开文件管理器）")
     finally:
-        if had_startfile:
-            gui_mod.os.startfile = orig_startfile
-        elif hasattr(gui_mod.os, "startfile"):
-            delattr(gui_mod.os, "startfile")
+        platform_mod.open_path = orig_open_path
         _destroy(gui)
         _restore_env(saved_env)
 

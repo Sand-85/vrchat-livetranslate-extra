@@ -21,12 +21,15 @@
    （实测这段时间 Tk 事件循环处理了 **0** 个事件 = 窗口「未响应」），
    且第二个引擎在前一个收尾期间继续上送音频。
 
-## 本文件断言的四件事
+## 本文件断言的六件事
 
 - 会话层：对端装死时 `close()` 有界（≤3s）**且留痕**（本仓库禁静默降级）；
 - 引擎层：`request_stop()` 立即返回（<50ms）且**并发**下发（B 不必等 A 收尾）；
+- chatbox 排空有**墙钟**预算（≤2.5s），没排完的要留痕；
+- chatbox 排空时积压里**最新一条必须发出去**（预算只够一两条时不许按 FIFO 挤掉它），
+  且丢弃绝不静默：要么全发完，要么日志写明放弃了几条；
 - 界面层：收尾要 5s 的引擎也不能让 `_stop()` 阻塞，收尾期间禁「开始」防抢设备；
-- chatbox 排空预算收紧到 ≤2.5s，没排完的要留痕。
+- 界面层：收尾**超时**（引擎线程还活着）时状态栏必须如实提示，不许只写「已停止」。
 
 跑法：.venv/Scripts/python.exe tests/test_stop_freeze.py
 """
@@ -160,6 +163,29 @@ class _SlowEngine:
         return True
 
 
+class _StuckEngine:
+    """收尾**超时**的引擎替身：`wait_stopped()` 直接返回 False（线程还活着）。
+
+    对应真机上的最坏情况 —— 会话/设备卡住，引擎在 STOP_WAIT_S 内没退出来。
+    立刻返回 False 而不是真睡 5s，免得这条用例白等。
+    """
+
+    def __init__(self) -> None:
+        self.request_calls = 0
+        self.wait_calls = 0
+
+    def request_stop(self) -> None:
+        self.request_calls += 1
+
+    def stop(self, timeout: float = 5.0) -> None:      # noqa: ARG002
+        raise AssertionError(
+            "界面线程不许调用阻塞版 stop() —— 这正是「停止后 20s 无响应」的根因")
+
+    def wait_stopped(self, timeout: float = 5.0) -> bool:   # noqa: ARG002
+        self.wait_calls += 1
+        return False
+
+
 # ---------------------------------------------------------------- 1) 会话层
 
 def test_session_close_is_bounded_and_logged() -> None:
@@ -268,17 +294,83 @@ def test_chatbox_drain_is_bounded_and_logged() -> None:
         E.run_mic = original_mic                 # type: ignore[assignment]
 
 
+def test_chatbox_drain_sends_newest_and_never_drops_silently() -> None:
+    """积压一堆时：**最新一条必须发出去**、总耗时有界、丢了必须写明丢了几条。
+
+    为什么要单独钉这条：上一版把补发轮数从 12 收到 4，而排空速度由令牌桶的
+    `min_gap_s`（0.4s 一条）决定 —— 4 轮只够发 4 条**最旧**的，用户刚说完的那句
+    永远发不出去，而且一声不响。有界是对的，但不该拿「最新一条」当代价。
+    """
+    original_session, original_mic = E.create_session, E.run_mic
+    E.create_session = lambda scfg: _FakeSession(scfg, close_s=0.0)   # type: ignore[assignment]
+    E.run_mic = _fake_mic                                            # type: ignore[assignment]
+    out = io.StringIO()
+    try:
+        engine = E.Engine(cfg=_cfg(), direction="mine", source="mic", sinks={"chatbox"},
+                          events=E.EngineEvents(), settle_s=30.0, dry_run=True)
+        engine.start()
+        time.sleep(0.8)
+        cb = engine.chatbox
+        assert cb is not None, "chatbox 没建起来（本用例需要一个真的 Chatbox）"
+        n = 30
+        newest = f"积压译文 {n - 1}"
+        with contextlib.redirect_stdout(io.StringIO()):   # 造积压的 29 行入队提示是噪声
+            for i in range(n):
+                cb.send(f"积压译文 {i}", is_final=True)
+            assert cb.pending_count > 1, "没能造出积压（限流应当把消息留在队列里）"
+
+        t0 = time.perf_counter()
+        with contextlib.redirect_stdout(out):
+            engine.stop(timeout=10.0)
+        elapsed = time.perf_counter() - t0
+        text = out.getvalue()
+
+        # 只看真正**发出去**的行：入队提示（⏳ 限流暂缓…）里也有同样的文本，会假阳性
+        dispatched = [ln for ln in text.splitlines() if "[dry-run]" in ln]
+        assert any(newest in ln for ln in dispatched), (
+            f"最新一条（{newest!r}）没被发出去 —— 预算只够发一两条时必须**优先**发最新的，"
+            f"而不是按 FIFO 从最旧的开始；实际发出的行={dispatched[-3:]!r}")
+        budget = E.CHATBOX_DRAIN_BUDGET_S
+        assert elapsed < budget + 1.0, (
+            f"排空花了 {elapsed:.2f}s，超出墙钟预算 {budget}s（不许退回原来 ~6s 的白等）")
+        # 没静默丢弃：要么全发完，要么留痕且**条数与实际剩余一致**
+        left = cb.pending_count
+        if left:
+            assert f"放弃 {left}/" in text, (
+                f"丢了 {left} 条却没有如实留痕（禁静默丢弃）；输出尾部={text[-400:]!r}")
+            assert "未发完" in text, f"留痕没写清是「未发完」的译文；输出尾部={text[-400:]!r}"
+        print(f"  chatbox 最新一条优先 OK（{elapsed:.2f}s；发出 {len(dispatched)} 条，"
+              f"放弃 {left} 条{'（已留痕）' if left else ''}）")
+    finally:
+        E.create_session = original_session      # type: ignore[assignment]
+        E.run_mic = original_mic                 # type: ignore[assignment]
+
+
 # ---------------------------------------------------------------- 3) 界面层
+
+def _capture_statuses(gui) -> list[tuple[str, str]]:      # noqa: ANN001
+    """把状态栏写入抓下来（headless 下 `_set_status` 本来就只记级别、不碰控件）。"""
+    seen: list[tuple[str, str]] = []
+
+    def _fake(level: str, msg: str) -> None:
+        seen.append((level, msg))
+        gui._last_status_level = level
+
+    gui._set_status = _fake                          # type: ignore[method-assign]
+    return seen
+
 
 def test_gui_stop_does_not_block_main_thread() -> None:
     import vlt.i18n as _i18n
     _i18n.detect_system_language = lambda: "zh"      # CI 是英文系统：钉死语言
     from vlt.gui import TranslationGUI
+    from vlt.i18n import t
 
     gui = TranslationGUI(headless=True)
     gui._root = _Root()                              # type: ignore[assignment]
     gui._start_btn = _Widget()                       # type: ignore[assignment]
     gui._stop_btn = _Widget()                        # type: ignore[assignment]
+    seen = _capture_statuses(gui)
     fake = _SlowEngine()
     gui._engines = [fake]                            # type: ignore[list-item]
     gui._engine_dirs = ["mine"]
@@ -294,6 +386,7 @@ def test_gui_stop_does_not_block_main_thread() -> None:
     assert gui._start_btn.kw.get("state") == "disabled", (
         "收尾期间必须禁掉「开始翻译」：否则会与还在关设备的旧引擎抢麦克风/虚拟声卡")
     assert not gui._engines, "引擎列表应当立刻移走（收尾由后台线程负责）"
+    assert seen[-1][1] == t("正在停止…"), f"停止中应先提示「正在停止…」：{seen[-1]!r}"
 
     deadline = time.time() + 5.0
     while time.time() < deadline and gui._start_btn.kw.get("state") != "normal":
@@ -302,7 +395,58 @@ def test_gui_stop_does_not_block_main_thread() -> None:
     assert gui._start_btn.kw.get("state") == "normal", (
         "收尾完成后界面没恢复（用户会以为还卡着）")
     assert gui._stop_btn.kw.get("state") == "disabled"
+    assert seen[-1] == ("info", t("已停止")), (
+        f"正常收尾完成就该显示「已停止」，别把如实提示滥用成常态：{seen[-1]!r}")
     print(f"  gui._stop() 不阻塞 OK（{elapsed * 1000:.1f}ms 返回，后台收尾后自动恢复）")
+
+
+def test_gui_stop_timeout_reports_honestly_in_status_bar() -> None:
+    """收尾**超时**（引擎线程还活着）→ 状态栏必须如实说，不许只显示「已停止」。
+
+    这条降级路径以前只有控制台一行 `[gui] ⚠️ …`：用户看到的状态栏轨迹是
+    「正在停止…」→「已停止」，而此刻旧引擎还在关麦克风/虚拟声卡，「开始翻译」也已经放开
+    → 用户会以为一切干净了。按本仓库约定（用户可见的降级必须**状态栏 + 日志**双留痕），
+    只写控制台是不合格的。
+    """
+    import vlt.i18n as _i18n
+    _i18n.detect_system_language = lambda: "zh"      # CI 是英文系统：钉死语言
+    from vlt.gui import TranslationGUI
+    from vlt.i18n import t
+
+    gui = TranslationGUI(headless=True)
+    gui._root = _Root()                              # type: ignore[assignment]
+    gui._start_btn = _Widget()                       # type: ignore[assignment]
+    gui._stop_btn = _Widget()                        # type: ignore[assignment]
+    seen = _capture_statuses(gui)
+    stuck = _StuckEngine()
+    gui._engines = [stuck]                           # type: ignore[list-item]
+    gui._engine_dirs = ["mine"]
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):            # 后台线程的留痕也落在这个 buf 里
+        gui._stop()
+        assert seen[-1][1] == t("正在停止…"), f"停止中应先提示「正在停止…」：{seen[-1]!r}"
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and gui._start_btn.kw.get("state") != "normal":
+            gui._poll()
+            time.sleep(0.05)
+
+    assert stuck.wait_calls == 1, "后台线程没去等引擎收尾（超时路径根本没被走到）"
+    assert gui._start_btn.kw.get("state") == "normal", (
+        "收尾超时后界面没恢复 —— 后台线程已经不再等了，一直禁着等于把界面永久锁死"
+        "（用户只能重启应用）")
+    assert gui._stop_done_evt.is_set(), (
+        "超时后必须置位：否则关窗路径 `_on_close` 会白等 CLOSE_WAIT_STOP_S")
+    assert seen[-1][1] != t("已停止"), (
+        "收尾超时是**用户可见的降级**：状态栏只写「已停止」等于骗人 —— "
+        "此刻旧引擎还在关麦克风/虚拟声卡")
+    assert seen[-1] == ("warn", t("已停止（上一次会话仍在收尾）")), (
+        f"状态栏文案不如实（应为 warn 级的如实提示）：{seen[-1]!r}")
+    assert "超时" in buf.getvalue(), (
+        f"控制台那行留痕要保留；实际输出={buf.getvalue()[-400:]!r}")
+    print(f"  gui 收尾超时如实留痕 OK（状态栏={seen[-1][1]!r}，级别 warn，"
+          f"且已放开「开始翻译」）")
 
 
 if __name__ == "__main__":
@@ -310,5 +454,7 @@ if __name__ == "__main__":
     test_session_close_is_bounded_and_logged()
     test_request_stop_is_nonblocking_and_concurrent()
     test_chatbox_drain_is_bounded_and_logged()
+    test_chatbox_drain_sends_newest_and_never_drops_silently()
     test_gui_stop_does_not_block_main_thread()
+    test_gui_stop_timeout_reports_honestly_in_status_bar()
     print("ALL PASSED")

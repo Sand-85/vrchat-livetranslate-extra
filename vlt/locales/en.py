@@ -48,10 +48,10 @@ STRINGS: dict[str, str] = {
     # ---- 手腕屏微调面板 ----
     "锚点:": "Anchor:",
     "tracker 序号:": "Tracker #:",
-    "（仅锚点=前臂 tracker 时有效）": "(only when Anchor = Forearm Tracker)",
+    "（仅锚点=外部 tracker 时有效）": "(only when Anchor = External Tracker)",
     "右手": "Right Hand",
     "左手": "Left Hand",
-    "前臂 tracker": "Forearm Tracker",
+    "外部 tracker": "External Tracker",
     "头显前固定": "Fixed to HMD",
     "位置X": "Pos X",
     "位置Y": "Pos Y",
@@ -65,6 +65,8 @@ STRINGS: dict[str, str] = {
     "译文字号": "Font Size",
     "原文字号": "Source Size",
     "面板高": "Panel H",
+    "底板不透明度": "Plate Opacity",
+    "原文不透明度": "Source Opacity",
 
     # ---- 打字输入行 ----
     "打字:": "Type:",
@@ -99,6 +101,7 @@ STRINGS: dict[str, str] = {
     "正在启动…": "Starting…",
     "已停止": "Stopped",
     "正在停止…": "Stopping…",
+    "已停止（上一次会话仍在收尾）": "Stopped (previous session still wrapping up)",
     "已切换为{target} → 中文": "Switched to {target} → Chinese",
 
     # ---- 设备扫描 / 选择 ----
@@ -164,9 +167,9 @@ STRINGS: dict[str, str] = {
         "(filters out players talking softly in the distance)",
     "当前电平:": "Level:",
     "门限:": "Threshold:",
-    "只有响度超过门限的声音才会被翻译；改完立刻生效（开始翻译后这里显示实时电平）":
-        "Only audio louder than the threshold gets translated; changes apply at once "
-        "(the live level appears here while translation is running)",
+    "只有响度超过门限的声音才会被翻译；改完立刻生效（勾选「启用」后这里显示实时电平）":
+        "Only sounds louder than the threshold are translated; changes take effect "
+        "immediately (the live level shows here while \"Enable\" is checked)",
     "输入门限已保存：{db} dB": "Input gate saved: {db} dB",
     # ---- 设置弹窗：音色 ----
     "音色": "Voice Timbre",
@@ -388,4 +391,22 @@ STRINGS: dict[str, str] = {
     "手腕屏没启动起来，已自动取消勾选（先把 SteamVR 打开，再勾一次即可）":
         "The wrist overlay could not start, so the tick was reverted — "
         "start SteamVR first, then tick it again",
+
+    # ---- 桌面字幕（PC 桌面模式叠加窗）----
+    "桌面字幕": "Desktop Subtitles",
+    "桌面字幕已开启（拖到想要的位置，透明度见「微调 ▸」）":
+        "Desktop subtitles are on — drag them where you want; opacity is under \"Tune ▸\"",
+    "桌面字幕没启动起来，已自动取消勾选":
+        "Desktop subtitles could not start, so the tick was reverted",
+    "桌面字幕还没开启，先勾上「桌面字幕」再解锁拖动":
+        "Desktop subtitles aren't running — tick \"Desktop Subtitles\" first, "
+        "then unlock dragging",
+    "解锁拖动": "Unlock & Drag",
+    "锁定位置": "Lock Position",
+    "桌面字幕已解锁：拖动字幕窗到想要的位置，放好后点「锁定位置」":
+        "Desktop subtitles unlocked — drag the window where you want it, "
+        "then click \"Lock Position\"",
+    "桌面字幕位置已记住": "Desktop subtitle position saved",
+    "（字幕窗默认可穿透，先解锁再拖）":
+        "(the window ignores clicks by default — unlock first, then drag)",
 }

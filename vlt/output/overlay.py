@@ -54,14 +54,40 @@ def resolve_font_path(configured: str) -> str | None:
 
 # ---------------------------------------------------------------- 配置
 
+# 位姿的出厂默认值（作者实测调好的**右手腕**角度）。定义成模块常量是为了让
+# `OverlayConfig` 的字段默认值与 `resolve_offset()` 的兜底值是**同一个数**。
+DEFAULT_POS: tuple[float, float, float] = (0.0, 0.06, 0.02)
+DEFAULT_ROT: tuple[float, float, float] = (-47.0, -16.0, 0.0)
+
+
+def resolve_offset(d: dict, anchor: str) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """从 `overlay` 段解析**某个锚点**的 `(pos, rot)`。GUI 与两端后端都走这里，口径只有一处。
+
+    取值优先级：
+      ① `overlay.offsets.<anchor>.pos/rot` —— 界面「微调 ▸」为**每个锚点各存一套**；
+      ② `overlay.offset.pos/rot`          —— 兜底：这个锚点还没单独存过时用它
+         （老配置只有这一段，照常工作，不会因为升级就丢位姿）；
+      ③ 出厂默认值。
+
+    为什么非要按锚点分开存：左右手 / tracker / hmd 的挂点坐标系各不相同，共用一份
+    offset 等于「每切一次锚点就得手改一次配置」，而且改完就把上一次调好的那份覆盖了
+    —— 用户实测的抱怨原话就是「没法设置成左手」。
+    """
+    d = d or {}
+    off = d.get("offset") or {}
+    per = ((d.get("offsets") or {}).get(anchor) or {})
+    pos = per.get("pos") or off.get("pos") or DEFAULT_POS
+    rot = per.get("rot") or off.get("rot") or DEFAULT_ROT
+    return tuple(pos), tuple(rot)          # type: ignore[return-value]
+
 
 @dataclass
 class OverlayConfig:
     enabled: bool = True
     anchor: str = "right_hand"          # left_hand | right_hand | tracker | hmd
     tracker_index: int = 0              # anchor=tracker 时用第几个 tracker
-    pos: tuple[float, float, float] = (0.0, 0.06, 0.02)      # 相对锚点，米
-    rot: tuple[float, float, float] = (-47.0, -16.0, 0.0)    # 欧拉角，度
+    pos: tuple[float, float, float] = DEFAULT_POS    # 相对锚点，米（由 resolve_offset 定）
+    rot: tuple[float, float, float] = DEFAULT_ROT    # 欧拉角，度
     width_m: float = 0.23
     curvature: float = 0.0
     alpha: float = 0.9
@@ -93,12 +119,15 @@ class OverlayConfig:
     def from_dict(d: dict) -> "OverlayConfig":
         d = d or {}
         off = d.get("offset") or {}
+        anchor = d.get("anchor", "right_hand")
+        # 位姿按**当前锚点**解析（每个锚点各存一套；见 resolve_offset）
+        pos, rot = resolve_offset(d, str(anchor))
         return OverlayConfig(
             enabled=bool(d.get("enabled", True)),
-            anchor=d.get("anchor", "right_hand"),
+            anchor=anchor,
             tracker_index=int(d.get("tracker_index", 0)),
-            pos=tuple(off.get("pos", (0.0, 0.06, 0.02))),          # type: ignore[arg-type]
-            rot=tuple(off.get("rot", (-47.0, -16.0, 0.0))),         # type: ignore[arg-type]
+            pos=pos,                                                # type: ignore[arg-type]
+            rot=rot,                                                # type: ignore[arg-type]
             width_m=float(off.get("width_m", 0.23)),
             curvature=float(off.get("curvature", 0.0)),
             alpha=float(off.get("alpha", d.get("alpha", 0.9))),

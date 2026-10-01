@@ -21,7 +21,7 @@ os.environ.setdefault("DASHSCOPE_API_KEY", "sk" + "-ws-" + "cfgtestonly012345678
 ROOT = Path(__file__).resolve().parents[1]          # 不写死本机路径：CI / 别人克隆后也能跑
 sys.path.insert(0, str(ROOT))
 
-# 这个用例用中文下拉标签操作控件（`gui._anchor_combo.set("前臂 tracker")`）。
+# 这个用例用中文下拉标签操作控件（`gui._anchor_combo.set("外部 tracker")`）。
 # 界面语言会跟随系统语言（CI 与外国机器是英文系统）→ 必须钉死，
 # 否则同一份代码在不同机器上结果不同。产品代码不依赖这个补丁。
 import vlt.i18n as _i18n  # noqa: E402
@@ -61,11 +61,16 @@ def main() -> int:
     gui = TranslationGUI()
     gui._toggle_tune_panel()
 
-    # 模拟用户操作：拖滑块 + 改锚点 + tracker 序号 + 切译音开关 + 改语言
+    # 模拟用户操作：改锚点 + 拖滑块 + tracker 序号 + 切译音开关 + 改语言
+    # ⚠️ 顺序要跟真界面一致：先切锚点（会把该锚点那一份回填到滑块），再拖滑块。
+    #    反过来的话，`_load_anchor_offset` 会把刚拖的值覆盖掉 —— 那不是 bug，是
+    #    「换锚点当然显示新锚点的值」。
+    gui._anchor_combo.set("外部 tracker")
+    gui._on_anchor_change()          # 真界面里是下拉事件触发的：先载入该锚点那一份，再落盘
+    start = {k: v for k, v in gui._tune_values.items()}      # 该锚点这一份的起点
     gui._tune_values["pos_x"] = -0.075
     gui._tune_values["width_m"] = 0.31
     gui._tune_values["curvature"] = 0.15
-    gui._anchor_combo.set("前臂 tracker")
     gui._tracker_var.set("1")
     gui._save_overlay_cfg()
     gui._vmic_var.set(True)
@@ -82,9 +87,35 @@ def main() -> int:
         fails.append(f"注释被破坏：{n_comments(before)} → {n_comments(after)}")
     if top_keys(after) != top_keys(before):
         fails.append("顶层键顺序被改变")
-    for want in ("anchor: tracker", "tracker_index: 1", "pos: [-0.075, 0.06, 0.02]",
-                 "width_m: 0.31", "curvature: 0.15", "enabled: true",
-                 "source_lang: ja", "target_lang: zh"):
+    # ⚠️ 位姿要落在**当前锚点那一份**（overlay.offsets.tracker），而不是把
+    #    overlay.offset 改掉 —— 后者是别的锚点的兜底，改了等于换个锚点就丢一份位姿。
+    data = yaml.safe_load(after)
+    ov = data.get("overlay") or {}
+    offsets = ov.get("offsets") or {}
+    # 别的锚点必须原封不动（「各存各的」）：两边都摘掉本次动过的 tracker 再比对
+    off_before = ((yaml.safe_load(before) or {}).get("overlay") or {}).get("offsets") or {}
+    other_after = {k: v for k, v in offsets.items() if k != "tracker"}
+    other_before = {k: v for k, v in off_before.items() if k != "tracker"}
+    for name, got, want in [
+        ("overlay.anchor", ov.get("anchor"), "tracker"),
+        ("overlay.tracker_index", ov.get("tracker_index"), 1),
+        ("overlay.offsets.tracker.pos", (offsets.get("tracker") or {}).get("pos"),
+         [-0.075, start["pos_y"], start["pos_z"]]),
+        ("overlay.offsets.tracker.rot", (offsets.get("tracker") or {}).get("rot"),
+         [start["rot_x"], start["rot_y"], start["rot_z"]]),
+        ("overlay.offset.width_m", (ov.get("offset") or {}).get("width_m"), 0.31),
+        ("overlay.offset.curvature", (ov.get("offset") or {}).get("curvature"), 0.15),
+        ("overlay.enabled", ov.get("enabled"), True),
+        # 别的锚点那一份必须原封不动（这就是「各存各的」）
+        ("overlay.offsets 里别的锚点", other_after, other_before),
+        ("overlay.offset.pos（兜底不该被写）", (ov.get("offset") or {}).get("pos"),
+         ((yaml.safe_load(before) or {}).get("overlay") or {}).get("offset", {}).get("pos")),
+    ]:
+        if got != want:
+            fails.append(f"{name} 写错了：{got!r}（期望 {want!r}）")
+        else:
+            print(f"  ✓ {name} = {got!r}")
+    for want in ("source_lang: ja", "target_lang: zh"):
         if want not in after:
             fails.append(f"没写进去：{want}")
         else:
@@ -151,25 +182,30 @@ def test_deep_indented_comments_survive_leaf_writes() -> None:
     新增的说明注释恰好写成这种深层续行 —— 拖一次滑块会删 5 行、选一次设备再多删
     1 行，丢的正是「换左手要镜像」和「tracker 按 role 寻址」这两处最该留住的。
     """
-    from vlt.gui import _yaml_set_in_text
+    from vlt.gui import _yaml_set_in_text, _yaml_set_or_create
 
     template = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
     base = n_comments(template)
 
     cases = [
         (["overlay", "offset", "rot"], "[-47, 16, 0]", "换到左手要镜像"),
+        # 位姿现在是按锚点分开存的（overlay.offsets.<锚点>.pos/rot）—— 这条路径比
+        # `overlay.offset` 还深一层，同样不许把上面的说明注释吃掉。
+        (["overlay", "offsets", "left_hand", "rot"], "[-47, 16, 0]", "左手不能照抄右手"),
         (["overlay", "tracker_index"], "1", "按 role 寻址"),
         (["capture", "loopback_device"], '"foo"', "VRChat 输出到的那个 sink"),
         (["overlay", "font"], '""', "Linux 上留空即可"),
     ]
     for path, value, marker in cases:
-        out = _yaml_set_in_text(template, path, value)
+        # 与界面同一条调用路径：`offsets.*` 在老配置里可能整段不存在，要用 or_create
+        setter = _yaml_set_or_create if "offsets" in path else _yaml_set_in_text
+        out = setter(template, path, value)
         assert n_comments(out) == base, (
             f"{'.'.join(path)} 写入后注释被破坏：{base} → {n_comments(out)}")
         assert marker in out, f"{'.'.join(path)} 的说明注释丢了：{marker!r}"
         data = yaml.safe_load(out)                 # 删的时候别把 YAML 弄坏
         assert data is not None, f"{'.'.join(path)} 写入后不再是合法 YAML"
-    print(f"  4 处深层缩进注释在就地写入后一字不少（各 {base} 行注释）OK")
+    print(f"  {len(cases)} 处深层缩进注释在就地写入后一字不少（各 {base} 行注释）OK")
 
 
 def test_write_guard_refuses_invalid_yaml() -> None:

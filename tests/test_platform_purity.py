@@ -65,6 +65,25 @@ def _check_platform(platform: str) -> None:
           f"{len(rules['strings'])} 条禁列字样）")
 
 
+def test_string_scope_excludes_third_party() -> None:
+    """★ 回归钉：字样判据只扫我们自己的实现（vlt.* / 入口），第三方库不参与。
+
+    反例就在包里：sounddevice（PyInstaller 收进 PYZ 的纯 Python 模块）里写了
+    PortAudio 的 `paWASAPI` 枚举常量 —— 它是跨平台库的合法实现，不是
+    「Linux 产物混进了 Windows 实现」。以前 AppImage 路线只扫 usr/app（我们自己的
+    源码），所以没暴露；PyInstaller 路线要是不设扫描域，就会红一次假警。
+    """
+    rules = C.FORBIDDEN["linux"]
+
+    # 第三方条目里出现禁列字样 → 不判红
+    assert C._judge("linux", rules, ["somepkg"], iter([("sounddevice", b"paWASAPI")])) is True
+    # 我们自己的模块里出现同样的字样 → 判红（扫描域内的正确行为）
+    assert C._judge("linux", rules, ["somepkg"], iter([("vlt.platform", b"paWASAPI")])) is False
+    # 入口脚本也在扫描域内
+    assert C._judge("linux", rules, ["somepkg"], iter([("run_gui", b"paWASAPI")])) is False
+    print("  ✓ 字样判据的扫描域（第三方不参与）OK")
+
+
 def test_source_is_platform_clean() -> None:
     """两个方向都扫：Linux 侧不含 Windows 实现，Windows 侧不含 Linux 实现。"""
     _check_platform("linux")
@@ -87,18 +106,25 @@ def test_forbidden_lists_match_build_excludes() -> None:
             assert mod in exclude_win, (f"{mod} 在 FORBIDDEN[windows] 里，"
                                         f"却没进 build_exe.py 的 EXCLUDE_WIN：{exclude_win}")
 
-    # Linux：build_appimage.sh 的反向删除必须覆盖 FORBIDDEN["linux"]["modules"] 里 vlt.* 的项
+    # Linux：build_appimage.sh 的 --exclude-module 清单必须覆盖 FORBIDDEN["linux"]["modules"]。
+    # （PyInstaller 路线是「分析期排除」，不再有旧路线那种「AppDir 里反向删 .py」，
+    #   判据从「脚本里出现 xxx.py 路径」改成「EXCLUDES 清单里出现模块名」。）
+    import re
+
     sh = (ROOT / "scripts" / "build_appimage.sh").read_text(encoding="utf-8")
+    m = re.search(r"EXCLUDES=\(([^)]*)\)", sh)
+    excludes = m.group(1).split() if m else []
+    assert excludes, "没解析出 build_appimage.sh 的 EXCLUDES（构建排除清单）"
+    assert "--exclude-module" in sh, "EXCLUDES 没被 --exclude-module 用上"
     for mod in C.FORBIDDEN["linux"]["modules"]:
-        if mod.startswith("vlt."):
-            as_path = mod.replace(".", "/") + ".py"
-            assert as_path in sh, (f"{mod} 在 FORBIDDEN[linux] 里，"
-                                   f"却没在 build_appimage.sh 里被反向删除（应出现 {as_path}）")
+        assert mod in excludes, (f"{mod} 在 FORBIDDEN[linux] 里，"
+                                 f"却没进 build_appimage.sh 的 EXCLUDES：{excludes}")
     print("  ✓ 禁列清单与两侧构建排除清单同步")
 
 
 if __name__ == "__main__":
     print("test_platform_purity:")
+    test_string_scope_excludes_third_party()
     test_source_is_platform_clean()
     test_forbidden_lists_match_build_excludes()
     print("ALL PASSED")

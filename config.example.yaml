@@ -140,23 +140,62 @@ overlay:
   # 刷新策略：0 = 有更新立刻上屏（本地显示不受 chatbox 2 秒节流约束，默认如此）
   #            >0 = 按秒数节流（怕刷太快看着晃时才调，例如 0.5）
   interval_s: 0
+  # 锚点 = 面板挂在什么上：右手 / 左手 / 外部 tracker / 头显前固定
   anchor: right_hand         # left_hand | right_hand | tracker | hmd
-  tracker_index: 0           # anchor=tracker 时取第几个 tracker（前臂 tracker 最贴合“绑在手臂上”）
-                             # ⚠️ Linux/OpenXR 上 tracker 是**按 role 寻址**的（不是按设备序号），
-                             #    这个序号是 role 表的序号，且未在真实 tracker 上验证过
+  # anchor=tracker 时取第几个 tracker。
+  # ⚠️ 这个锚点跟「前臂」**没有绑定关系** —— 它就是「第 N 个通用 tracker」
+  #    （把 tracker 绑在前臂/手腕上只是为了离手腕近、看着像块腕表）。而且两端寻址
+  #    口径不同，序号含义**不可移植**：
+  #      Windows —— 第 N 个**已配对在线**的 GenericTracker（驱动注册 ≠ 已配对；
+  #                 一个都没找到时**静默回落右手**，界面上不会有任何提示）
+  #      Linux   —— HTC 的 role 表序号：0=右腕 1=左腕 2=右肘 3=左肘 4=胸 5=腰
+  #                 6=右脚 7=左脚（按 role 寻址，不是按设备序号；该表未在真实
+  #                 tracker 上验证过）
+  tracker_index: 0
+  # ★ 每个锚点各存一套位姿：界面上切锚点会自动载入对应这一份，各改各的、互不覆盖。
+  #   界面「微调 ▸」拖的就是**当前锚点**这一份，改完存盘即热重载（无需重启）。
+  #   ⚠️ 左右手的 grip 坐标系沿 X 轴镜像，所以**左手不能照抄右手**：
+  #      rx 不变、ry 取反、rz 取反（位置的 x 分量同理）。下面 left_hand 那份已经按
+  #      这条规则镜像好了（默认 pos 的 x 是 0，看不出差别），戴着再微调即可。
+  offsets:
+    right_hand:
+      pos: [0.0, 0.06, 0.02]
+      rot: [-47, -16, 0]
+    left_hand:
+      pos: [0.0, 0.06, 0.02]
+      rot: [-47, 16, 0]
+    tracker:
+      pos: [0.0, 0.06, 0.02]   # 相对 tracker 的偏移：起点同右手腕，绑前臂时再微调
+      rot: [-47, -16, 0]
+    hmd:
+      pos: [0.0, -0.10, -0.35] # 头显正前方 35cm、略低于视线
+      rot: [0, 0, 0]
+  # 兜底：某个锚点在上面没有单独存过时用这一份（老配置只有这一段也照常工作，
+  # 不会因为升级就丢掉已经调好的位姿）。
+  # width_m / curvature / alpha 是**面板本身**的属性，所有锚点共用，所以留在这里。
   offset:
     pos: [0.0, 0.06, 0.02]   # 相对锚点偏移（米）——改完存盘即生效，无需重启
     rot: [-47, -16, 0]       # 欧拉角（度，约定 Rz·Ry·Rx）——默认值取自作者实测调好的**右手腕**角度
                              # ⚠️ 换到左手要镜像：rx 不变、ry 取反、rz 取反
                              #    即 left_hand 用 [-47, 16, 0]（起始值，再戴着微调）
-                             # 界面上的「手腕屏微调」滑块拖完也是写回这里
-    width_m: 0.23            # 面板宽度（米）
-    curvature: 0.0           # >0 则弯曲贴合（0.1~0.3 可试）
-    alpha: 0.9
+    width_m: 0.23            # 面板宽度（米）—— 弯曲时按**弧长**算，与 Windows 一致
+    curvature: 0.0           # 弯曲：占整圆的比例（与 SteamVR/Windows 同一口径：
+                             #   curvature = 宽度 / (2π·半径)；0.5 = 半圈 180°）。
+                             # 0 = 平面；0.1~0.3 是手腕屏比较好看的区间。改它只弯曲、
+                             # 面板中心不动（两边朝你卷）。
+    alpha: 0.9               # **整层**透明度乘子（0~1）：底板和文字一起乘。
+                             # Windows = SteamVR 的 setOverlayAlpha；Linux = 自己乘进贴图
+                             # alpha 通道（OpenXR 没有对应的 API）。想让"底板淡、文字实"，
+                             # 调下面的 bg_alpha，别动这里。
   size_px: [1024, 440]       # 面板像素尺寸（[宽, 高]；界面「面板高」滑块改的就是这个高）
   font: "C:/Windows/Fonts/msyh.ttc"   # 雅黑；日文可用 NotoSansJP-VF.ttf
-                             # ⚠️ 这是 Windows 路径。**Linux 上留空即可**，会自动用 fontconfig
-                             #    找一套中日韩字体（填了不存在的路径会回落到位图字体、画不出中文）
+                             # ⚠️ 这是 **Windows** 路径。解析规则两端一样：填**存在的绝对路径**
+                             #    就用它（Linux 例：/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc）；
+                             #    路径不存在（或留空）→ **静默回落**到平台自动探测 ——
+                             #    Linux 走 fontconfig（`fc-match`），Windows 用雅黑候选表。
+                             #    ⇒ Linux 上留空即可（写这条 Windows 路径没意义：文件不存在）。
+                             #    只有「fontconfig 里一套中日韩字体都没有」时才会退到位图字体，
+                             #    那时才画不出中文。
   font_size: 36              # 译文字号（界面微调面板可拖；调小 → 同样高度能塞更多字）
   source_font_size: 29       # 原文小字号（同上）
   max_lines: 3               # 译文最多显示几行（超出保留最新）
@@ -169,8 +208,39 @@ overlay:
   color_border: [110, 170, 205]
   border_alpha: 120
   color_bg: [12, 14, 20]
-  bg_alpha: 205
+  bg_alpha: 205              # 底板不透明度 0-255：面板要"透着看场景"就调小这里
+                             # （界面上「底板不透明度 / 原文不透明度」两个滑块改的就是它俩；
+                             #   想让文字更实心就把 source_alpha 拉满 255）
   separator: true            # 原文/译文之间的细分隔线
+
+# 桌面字幕（**PC 桌面模式**用：把译文像歌词一样贴在 VRChat 窗口上）
+#
+# 与上面的 `overlay:` 是两条独立的腿：`overlay:` = 头显里的手腕屏（要 SteamVR / OpenXR），
+# 本段 = 普通显示器上的一块无边框叠加窗（不需要头显，桌面模式玩家用这个）。
+# 视觉参数（字体/字号/配色/行数/是否显示原文）**默认继承 `overlay:` 段** —— 这里只写
+# 桌面专属的摆放与透明度；想单独给桌面字幕一套配色，把对应键抄到本段即可覆盖。
+#
+# 开了之后：勾选界面上的「桌面字幕」，字幕窗会立刻出现；「微调 ▸」里有透明度滑块和
+# 「解锁拖动 / 锁定位置」——鼠标穿透是默认开的（不挡你点 VRChat），要拖动得先解锁。
+desktop_overlay:
+  enabled: false             # 总开关（界面上的勾选状态存在 ui.desktop_overlay，两边都认）
+  mode: conversation         # conversation=镜像聊天区（最近几条，带说话人侧边条）
+                             # latest=只显示最新一句（更像歌词）
+  attach_to_game: true       # true=贴在 VRChat 窗口上并**跟随**它的移动/缩放
+                             #      找不到窗口时自动退化成 pos 的绝对屏幕坐标（会留日志）
+  game_title: VRChat         # 目标窗口标题（不区分大小写的子串匹配）
+  anchor: bottom_center      # 贴窗时的锚点：top_left/top_center/top_right
+                             #              middle_left/center/middle_right
+                             #              bottom_left/bottom_center/bottom_right
+                             #              free = 不贴窗口，用下面的 pos 定位
+  offset: [0, -48]           # 相对锚点的像素偏移（负 y = 往上）（拖动后由界面写回这里）
+  pos: [80, 80]              # **屏幕绝对坐标**（不是窗口相对坐标）：attach_to_game=false、
+                             # anchor=free、或找不到目标窗口时用它定位。多屏时副屏在主屏
+                             # 左侧/上方的话，这里可以是负值。
+  size_px: [1024, 360]       # 面板像素尺寸。⚠️ 本段**没写**这一项时会继承 overlay.size_px
+  alpha: 0.90                # **整窗透明度**（0.2~1.0）—— 界面「微调 ▸」里的滑块改的就是它
+  click_through: true        # 鼠标穿透（点字幕窗会点到 VRChat 上）；拖动的瞬间自动临时关掉
+  follow: true               # VRChat 窗口移动时跟着走
 
 # 第三条腿：译音输出（模型译音 → 虚拟声卡 → VRChat 麦克风 → 对方听到）
 output:
@@ -243,3 +313,4 @@ ui:
   direction: mine          # mine=我说的话 | theirs=别人说 | dual=双向同时
   chatbox: true            # 输出勾选：chatbox 气泡
   overlay: false           # 输出勾选：手腕屏（需要 SteamVR 在跑）
+  desktop_overlay: false   # 输出勾选：桌面字幕（PC 桌面模式，贴在 VRChat 窗口上）

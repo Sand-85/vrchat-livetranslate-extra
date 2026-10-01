@@ -26,6 +26,10 @@ __all__ = [
     "IS_WINDOWS", "IS_LINUX",
     "backend", "device_backend",
     "open_path", "find_cjk_font", "detect_ui_language",
+    # 桌面叠加窗（issue #11）：缺失实现的平台会拿到下面的安全默认值
+    "desktop_window_backend", "find_game_window", "window_client_rect", "is_window",
+    "set_click_through", "set_tool_window", "top_level_hwnd", "screen_work_area",
+    "monitor_work_area",
 ]
 
 _backend: Any = None
@@ -158,3 +162,133 @@ def detect_ui_language() -> str:
     （读 `LC_ALL`/`LC_MESSAGES`/`LANG`）。
     """
     return backend().detect_ui_language()
+
+
+# ---------------------------------------------------------------- 桌面叠加窗（issue #11）
+#
+# 桌面模式的字幕窗（`vlt/output/desktop_overlay.py`，**共享模块**）需要几件平台事实：
+# 找游戏窗口、拿它的客户区、给自己的窗口打上鼠标穿透/不抢焦点、知道屏幕工作区多大。
+# 这些能力目前只有 Windows 侧实现（Tk + Win32 扩展样式）。
+#
+# ⚠️ 门面在这里**兜底**而不是让共享模块去 import 平台独占模块：
+#   * `linux.py` 没有这些属性 → 下面每个函数返回安全默认值（None / False / 原值 /
+#     (0,0,1920,1080)），Linux 侧**一个文件都不用改**就能导入共享模块；
+#   * 于是桌面字幕在 Linux 上退化成「固定在屏幕坐标上的一块置顶面板」（不跟随游戏窗口），
+#     降级由调用方（desktop_overlay）打日志说明，门面自己不吭声。
+#
+# 判定「有没有桌面窗口能力」用 `find_window_by_title` 这一个属性作探针：它是这套能力里
+# 最核心的一个，缺了它其余几个也没有意义。
+
+_DEFAULT_WORK_AREA = (0, 0, 1920, 1080)
+
+
+def desktop_window_backend() -> Any:
+    """有桌面窗口能力的后端模块；没有（或平台不支持）返回 None。"""
+    try:
+        mod = backend()
+    except Exception:  # noqa: BLE001 — 不支持的平台：桌面字幕整条腿禁用，别把进程带崩
+        return None
+    if getattr(mod, "find_window_by_title", None) is None:
+        return None
+    return mod
+
+
+def _desktop_call(name: str, default: Any, *args: Any) -> Any:
+    """转调后端同名函数；后端没有 / 调用抛异常 → 返回 `default`。
+
+    调用点都在 50ms 一跳的 tick 里，任何异常冒出去都会打断翻译腿。
+    """
+    mod = desktop_window_backend()
+    fn = getattr(mod, name, None) if mod is not None else None
+    if fn is None:
+        return default
+    try:
+        return fn(*args)
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def find_game_window(title: str, exclude: Any = ()) -> int | None:
+    """按标题（子串、不区分大小写）找目标游戏窗口的顶层句柄；找不到返回 None。
+
+    `exclude` = 要排除的句柄（通常是本程序自己的主窗与字幕窗）—— 本程序主窗标题
+    「VRChat 实时同传」也含 "VRChat"，不排除的话 VRChat 没起来时会贴到我们自己界面上。
+    """
+    hwnd = _desktop_call("find_window_by_title", None, title, exclude)
+    try:
+        return int(hwnd) if hwnd else None
+    except (TypeError, ValueError):
+        return None
+
+
+def window_client_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """目标窗口客户区的屏幕矩形 (left, top, right, bottom)；取不到返回 None。"""
+    rect = _desktop_call("window_client_rect", None, hwnd)
+    try:
+        left, top, right, bottom = (int(v) for v in rect)
+    except (TypeError, ValueError):
+        return None
+    if right <= left or bottom <= top:
+        return None
+    return (left, top, right, bottom)
+
+
+def is_window(hwnd: int) -> bool:
+    """句柄还是一个真窗口吗（游戏关掉/换场景后变 False，调用方据此重新找窗口）。"""
+    return bool(_desktop_call("is_window", False, hwnd))
+
+
+def set_click_through(hwnd: int, on: bool) -> bool:
+    """开/关鼠标穿透。返回是否真的设上了（False = 本平台没这能力，调用方要留一行日志）。"""
+    return bool(_desktop_call("set_click_through", False, hwnd, on))
+
+
+def set_tool_window(hwnd: int) -> bool:
+    """标记为「不抢焦点 + 不进 alt-tab」的工具窗。返回是否设上了。"""
+    return bool(_desktop_call("set_tool_window", False, hwnd))
+
+
+def top_level_hwnd(widget_id: int) -> int:
+    """Tk 的 `winfo_id()` 给的是子窗口句柄 → 换成能设扩展样式的顶层句柄。
+
+    拿不到就返回原值（`widget_id` 本身可能就是顶层）。
+    """
+    hwnd = _desktop_call("top_level_hwnd", None, widget_id)
+    try:
+        return int(hwnd) if hwnd else int(widget_id)
+    except (TypeError, ValueError):
+        return int(widget_id)
+
+
+def _as_work_area(rect: Any) -> tuple[int, int, int, int] | None:
+    """把后端给的 (left, top, right, bottom) 校验成合法工作区；不合法返回 None。
+
+    ⚠️ **不做 `max(0, ...)` 之类的钳制**：多屏时副屏在主屏左侧/上方，坐标本来就是负的，
+    钳一下就把副屏工作区改成了错的东西（字幕会被夹到主屏里去）。
+    """
+    try:
+        left, top, right, bottom = (int(v) for v in rect)
+    except (TypeError, ValueError):
+        return None
+    if right <= left or bottom <= top:
+        return None
+    return (left, top, right, bottom)
+
+
+def screen_work_area() -> tuple[int, int, int, int]:
+    """主屏工作区（不含任务栏）；取不到给 1920x1080 的保守值。
+
+    不能返回 (0,0,0,0)：调用方拿它做夹取，那会把字幕夹成左上角一个点。
+    """
+    return _as_work_area(_desktop_call("screen_work_area", None)) or _DEFAULT_WORK_AREA
+
+
+def monitor_work_area(hwnd: int) -> tuple[int, int, int, int]:
+    """`hwnd` **所在那块显示器**的工作区；取不到就回落主屏工作区（绝不抛）。
+
+    多显示器时贴窗必须用这一条：`screen_work_area()` 只有主屏那一份，副屏
+    （尤其坐标为负的左侧副屏）上的字幕会被它夹回主屏。没有窗口句柄（自由模式）
+    或本平台没有这项能力（Linux）时，回落到主屏工作区就还是原来的行为。
+    """
+    return (_as_work_area(_desktop_call("monitor_work_area", None, hwnd))
+            or screen_work_area())

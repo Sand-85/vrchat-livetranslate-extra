@@ -86,169 +86,51 @@ def check_runtime() -> list[str]:
 
 # ================================================================ C GL + Wayland context
 
-# ⚠️ 为什么是 **EGL + Wayland** 而不是 X11/GLX —— 实测踩出来的：
-#   niri 是 Wayland，X11 靠 `xwayland-satellite`（一个精简实现）。
-#   实测在那上面 `glXChooseFBConfig` / `glXCreatePbuffer` 都成功，
-#   但**所有** context 创建方式（glXCreateNewContext / glXCreateContextAttribsARB 的
-#   空属性表 / 3.3 core / 2.1）一律被 X 服务器拒掉（`GLXBadFBConfig` / `BadValue`）。
-#   换成 libwayland-client + libEGL 一次就通。
+# GL 后端由**生产实现**提供（`vlt/output/openxr_overlay.py` 的 `create_gl_context()`）：
+#   * Wayland → libwayland-client + libEGL，图形绑定 `GraphicsBindingEGLMNDX`；
+#   * X11     → libX11 + GLX pbuffer，图形绑定 `GraphicsBindingOpenGLXlibKHR`。
+# `--gl wayland|x11` 可强制某一条（默认 auto：Wayland 优先，失败回退 X11）。
 #
-# 而且 OpenXR 的 Wayland 图形绑定**只要一个 wl_display**：
-#     XrGraphicsBindingOpenGLWaylandKHR { type, next, struct wl_display* display }
-#   运行时自己用 `eglGetCurrentContext()` 取当前线程上的 context —— 所以调用
-#   `xrCreateSession` 之前必须保证我们的 EGL context 是 current 的。
+# ⚠️ 历史：niri 上曾经只有 Wayland 一条路能用 —— 它的 X11 是精简的
+#   `xwayland-satellite`：`glXChooseFBConfig`/`glXCreatePbuffer` 都成功，但**所有**
+#   context 创建方式一律被 X 服务器拒掉（`GLXBadFBConfig`/`BadValue`）。这是 satellite
+#   的特例；真正的 Xorg 会话上 GLX 正常（XLIB 绑定）。
+#
+# 两种后端都在构造时把 context make current —— OpenXR 要求调用 xrCreateSession 时
+# 绑定里的 context 是 current 的（Monado 的 EGL 分支自己取 eglGetCurrentContext()）。
 
-# EGL 常量
-EGL_PLATFORM_WAYLAND_KHR = 0x31D8
-EGL_OPENGL_API = 0x30A2
-EGL_NONE = 0x3038
-EGL_SURFACE_TYPE, EGL_PBUFFER_BIT = 0x3033, 0x0001
-EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT = 0x3040, 0x0008
-EGL_RED_SIZE, EGL_GREEN_SIZE, EGL_BLUE_SIZE, EGL_ALPHA_SIZE = 0x3024, 0x3023, 0x3022, 0x3021
-EGL_CONTEXT_MAJOR_VERSION, EGL_CONTEXT_MINOR_VERSION = 0x3098, 0x30FB
-EGL_NO_SURFACE = 0
+# GL 常量（spike 自查用；EGL/GLX 常量都在生产实现里）
 GL_VENDOR, GL_RENDERER, GL_VERSION = 0x1F00, 0x1F01, 0x1F02
 
 
-class EglWaylandContext:
-    """Wayland + EGL 的 **surfaceless** GL context。
+class _ProductionGlContext:
+    """把**生产 GL 后端**适配成 spike 用的小接口（width/height/gl/xr_binding/info）。
 
-    纯 ctypes（libwayland-client + libEGL + libGL），不引 PyOpenGL/glfw ——
-    我们只需要「有个 GL context + 能 glTexImage2D」，为这点事拖依赖不划算。
-
-    暴露 `wl_display` 给 `GraphicsBindingOpenGLWaylandKHR`，暴露 `gl` 给上传贴图。
+    X11/GLX 与 Wayland/EGL 两个后端都在产品代码里
+    （`vlt/output/openxr_overlay.py` 的 `create_gl_context()`）—— spike 再抄一份
+    就是两个口径（同一件事写两遍），所以这里只做适配，不重复实现。
     """
 
-    def __init__(self, width: int = 1024, height: int = 440) -> None:
+    def __init__(self, width: int = 1024, height: int = 440, prefer: str = "auto") -> None:
+        import os
+
+        from vlt.output.openxr_overlay import create_gl_context
+        if prefer != "auto":
+            os.environ["VLT_OVERLAY_GL"] = prefer
         self.width, self.height = width, height
-        self.wl = ctypes.CDLL("libwayland-client.so.0")
-        self.egl = ctypes.CDLL("libEGL.so.1")
-        self.gl = ctypes.CDLL("libGL.so.1")
-        self._bind_signatures()
+        self._ctx = create_gl_context()
+        self.gl = self._ctx.gl
 
-        self.wl_display = self.wl.wl_display_connect(None)
-        if not self.wl_display:
-            raise RuntimeError("wl_display_connect 失败（WAYLAND_DISPLAY 没设？）")
-
-        self.egl_display = self.egl.eglGetPlatformDisplay(
-            EGL_PLATFORM_WAYLAND_KHR, self.wl_display, None)
-        if not self.egl_display:
-            raise RuntimeError(f"eglGetPlatformDisplay 失败 err=0x{self.egl.eglGetError():x}")
-
-        maj, minr = ctypes.c_int(), ctypes.c_int()
-        if not self.egl.eglInitialize(self.egl_display, ctypes.byref(maj), ctypes.byref(minr)):
-            raise RuntimeError(f"eglInitialize 失败 err=0x{self.egl.eglGetError():x}")
-        self.egl_version = f"{maj.value}.{minr.value}"
-
-        if not self.egl.eglBindAPI(EGL_OPENGL_API):
-            raise RuntimeError(f"eglBindAPI(OPENGL) 失败 err=0x{self.egl.eglGetError():x}")
-
-        cfg_attribs = (ctypes.c_int * 13)(
-            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
-            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
-            EGL_NONE)
-        self.egl_config = ctypes.c_void_p()
-        num = ctypes.c_int()
-        if not self.egl.eglChooseConfig(self.egl_display, cfg_attribs,
-                                        ctypes.byref(self.egl_config), 1, ctypes.byref(num)) \
-                or num.value == 0:
-            raise RuntimeError(f"eglChooseConfig 失败 err=0x{self.egl.eglGetError():x}")
-
-        # 先要 3.3 core，不行就退回「不带版本号」——我们要的功能（glTexImage2D）是 GL 1.1
-        ctx_attribs = (ctypes.c_int * 5)(EGL_CONTEXT_MAJOR_VERSION, 3,
-                                         EGL_CONTEXT_MINOR_VERSION, 3, EGL_NONE)
-        self.egl_context = self.egl.eglCreateContext(self.egl_display, self.egl_config,
-                                                     None, ctx_attribs)
-        if not self.egl_context:
-            self.egl_context = self.egl.eglCreateContext(self.egl_display, self.egl_config,
-                                                         None, None)
-        if not self.egl_context:
-            raise RuntimeError(f"eglCreateContext 失败 err=0x{self.egl.eglGetError():x}")
-
-        # surfaceless 是可行的前提（EGL_KHR_surfaceless_context，Mesa/NVIDIA 都支持）
-        if not self.egl.eglMakeCurrent(self.egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                                       self.egl_context):
-            raise RuntimeError(f"eglMakeCurrent(surfaceless) 失败 err=0x{self.egl.eglGetError():x}")
-
-    def _bind_signatures(self) -> None:
-        """⚠️ argtypes/restype 必须写全 —— 指针被当成 32 位 int 就是段错误。"""
-        self.wl.wl_display_connect.argtypes = [ctypes.c_char_p]
-        self.wl.wl_display_connect.restype = ctypes.c_void_p
-
-        self.egl.eglGetPlatformDisplay.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
-        self.egl.eglGetPlatformDisplay.restype = ctypes.c_void_p
-        self.egl.eglInitialize.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
-                                           ctypes.POINTER(ctypes.c_int)]
-        self.egl.eglInitialize.restype = ctypes.c_uint
-        self.egl.eglBindAPI.argtypes = [ctypes.c_uint]
-        self.egl.eglBindAPI.restype = ctypes.c_uint
-        self.egl.eglChooseConfig.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
-                                             ctypes.POINTER(ctypes.c_void_p), ctypes.c_int,
-                                             ctypes.POINTER(ctypes.c_int)]
-        self.egl.eglChooseConfig.restype = ctypes.c_uint
-        self.egl.eglCreateContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-                                              ctypes.POINTER(ctypes.c_int)]
-        self.egl.eglCreateContext.restype = ctypes.c_void_p
-        self.egl.eglMakeCurrent.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                            ctypes.c_void_p, ctypes.c_void_p]
-        self.egl.eglMakeCurrent.restype = ctypes.c_uint
-        self.egl.eglGetError.restype = ctypes.c_uint
-
-        self.gl.glGetString.argtypes = [ctypes.c_uint]
-        self.gl.glGetString.restype = ctypes.c_char_p
-        self.gl.glBindTexture.argtypes = [ctypes.c_uint, ctypes.c_uint]
-        self.gl.glBindTexture.restype = None
-        self.gl.glTexImage2D.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_int,
-                                         ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                         ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
-        self.gl.glTexImage2D.restype = None
-
-    @property
-    def egl_get_proc_address_addr(self) -> int:
-        """`eglGetProcAddress` 的地址 —— Monado 会**真的调用**我们给的这个函数指针。"""
-        self.egl.eglGetProcAddress.argtypes = [ctypes.c_char_p]
-        self.egl.eglGetProcAddress.restype = ctypes.c_void_p
-        return ctypes.cast(self.egl.eglGetProcAddress, ctypes.c_void_p).value
+    def name(self) -> str:
+        return self._ctx.name
 
     def xr_binding(self):
-        """构造 `XrGraphicsBindingEGLMNDX`（Monado 系的 OpenGL 绑定）。
-
-        ⚠️ 三个指针字段的类型是 PyOpenGL 的 `OpenGL._opaque.EGLxxx_pointer`，
-        **不能传 int 也不能传 c_void_p**（报 "expected EGLDisplay instead of int"）。
-        正确做法是 `ctypes.cast(ctypes.c_void_p(addr), 那个类型)`。
-        （PyOpenGL 本来就是 pyopenxr 的硬依赖，所以这不引入新依赖。）
-
-        类型全部从结构体自己的 `_fields_` 取，不硬编码模块路径。
-        """
-        import xr
-        f = xr.GraphicsBindingEGLMNDX._fields_
-        pfn_t, disp_t, cfg_t, ctx_t = f[0][1], f[1][1], f[2][1], f[3][1]
-        return xr.GraphicsBindingEGLMNDX(
-            get_proc_address=pfn_t(self.egl_get_proc_address_addr),
-            display=ctypes.cast(ctypes.c_void_p(self.egl_display), disp_t),
-            config=ctypes.cast(ctypes.c_void_p(self.egl_config.value), cfg_t),
-            context=ctypes.cast(ctypes.c_void_p(self.egl_context), ctx_t),
-        )
-
-    def wayland_display_ptr(self):
-        """转成 pyopenxr 期望的 `LP_wl_display`。
-
-        ⚠️ **不能直接传 c_void_p 或整数** —— pyopenxr 的字段类型是
-        `xr.platform.linux.LP_wl_display`，类型不符会直接 TypeError。
-        这里从结构体自己的 `_fields_` 取类型，免得硬编码 `xr.platform.linux`。
-        """
-        import xr
-        lp_type = xr.GraphicsBindingOpenGLWaylandKHR._fields_[0][1]
-        return ctypes.cast(self.wl_display, lp_type)
-
-    def gl_string(self, which: int) -> str:
-        p = self.gl.glGetString(which)
-        return p.decode() if p else "?"
+        return self._ctx.binding()
 
     def info(self) -> str:
-        return (f"Wayland+EGL {self.egl_version} / GL {self.gl_string(GL_VERSION)} / "
-                f"{self.gl_string(GL_RENDERER)}")
-
+        from vlt.output.openxr_overlay import GL_RENDERER, GL_VENDOR
+        return (f"{self._ctx.name} / {self._ctx.gl_string(GL_VENDOR)} / "
+                f"{self._ctx.gl_string(GL_RENDERER)}")
 
 
 # ================================================================ 会话状态机
@@ -379,22 +261,23 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="B0 spike：OpenXR overlay 后端可行性验证")
     ap.add_argument("--wait", type=float, default=0.0, metavar="秒",
                     help="先等运行时就绪（头显连上）再开始，默认 0 = 立刻跑")
+    ap.add_argument("--gl", choices=["auto", "wayland", "x11"], default="auto",
+                    help="强制 GL 后端（auto：Wayland 优先、失败回退 X11）")
     ap.add_argument("--gl-only", action="store_true",
-                    help="只验 [C] GL+Wayland context（不需要头显/运行时，可本机单独跑）")
+                    help="只验 [C] GL context + 图形绑定结构（不需要头显/运行时，可本机单独跑）")
     args = ap.parse_args()
 
     if args.gl_only:
         # 这一项跟 OpenXR 无关 —— 单独抽出来是为了能在没有头显时先验通，
         # 免得为了一个 ctypes 签名错误让人反复戴头显（真的踩过）。
-        print("=== [C] GL + Wayland context（--gl-only）===", flush=True)
+        print("=== [C] GL context + 图形绑定（--gl-only）===", flush=True)
         try:
-            glx = EglWaylandContext()
-            record("C  GL+Wayland context", "ok", glx.info())
+            glx = _ProductionGlContext(prefer=args.gl)
+            record(f"C  GL context（{glx.name()}）", "ok", glx.info())
             b = glx.xr_binding()      # 顺带验绑定结构体能不能构造出来
-            record("C2 GraphicsBindingEGLMNDX", "ok",
-                   f"display={b.display} config={b.config} context={b.context}")
+            record("C2 图形绑定结构", "ok", f"{type(b).__name__}")
         except Exception as exc:  # noqa: BLE001
-            record("C  GL+Wayland context", "fail", f"{type(exc).__name__}: {exc}")
+            record("C  GL context", "fail", f"{type(exc).__name__}: {exc}")
         _summary()
         return 0
 
@@ -437,13 +320,13 @@ def main() -> int:
         _summary()
         return 1
 
-    print("\n[C] GL + Wayland context", flush=True)
+    print("\n[C] GL context + 图形绑定", flush=True)
     glx = None
     try:
-        glx = EglWaylandContext()
-        record("C  GL+Wayland context", "ok", glx.info())
+        glx = _ProductionGlContext(prefer=args.gl)
+        record(f"C  GL context（{glx.name()}）", "ok", glx.info())
     except Exception as exc:  # noqa: BLE001
-        record("C  GL+Wayland context", "fail", f"{type(exc).__name__}: {exc}")
+        record("C  GL context", "fail", f"{type(exc).__name__}: {exc}")
         _summary()
         return 1
 
@@ -453,8 +336,9 @@ def main() -> int:
         overlay_info = xr.SessionCreateInfoOverlayEXTX(
             create_flags=xr.OverlaySessionCreateFlagsEXTX(0),   # 规范要求必须为 0
             session_layers_placement=100)
-        # ⚠️ 用 **EGL_MNDX**，不是标准的 OPENGL_WAYLAND/XCB 绑定 ——
-        #    Monado 系运行时只实现前者（见 NEEDED 里的注释）。
+        # 绑定由 GL 后端给：Wayland → EGL_MNDX，X11 → GraphicsBindingOpenGLXlibKHR
+        # （Monado 系运行时对 Wayland 只实现 EGL_MNDX，没有 OPENGL_WAYLAND；
+        #   XLIB 本来就在它的分发表里。）
         binding = glx.xr_binding()
         # 链顺序（照 VRCX-0 的 OpenXR 后端）：SessionCreateInfo → GraphicsBinding → Overlay
         binding.next = ctypes.cast(ctypes.pointer(overlay_info), ctypes.c_void_p)

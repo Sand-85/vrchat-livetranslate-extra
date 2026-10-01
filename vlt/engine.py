@@ -41,13 +41,15 @@ ROOT = Path(__file__).resolve().parent.parent
 CHUNK_BYTES = 3200          # 100ms @16kHz s16le mono
 # 音频流静默超过这个时长 = 上一句说完了（给虚拟麦打句尾标记的兜底触发）
 SENTENCE_GAP_S = 0.6
+# 收尾时排空 chatbox 的**墙钟**预算（不是「轮数」）。为什么不写轮数：排空速度由令牌桶的
+# min_gap_s 决定（默认 0.4s 才放一条），轮数和它一耦合，改限流就等于改停止耗时 ——
+# 上一版把 12 轮收成 4 轮后，积压里**最新那条**（用户刚说完的那句）连发都发不出去
+# 就被 close() 掐掉了。现在总耗时有硬上限，且最新一条优先发（见 _drain_chatbox）。
+CHATBOX_DRAIN_BUDGET_S = 2.0
+CHATBOX_DRAIN_TICK_S = 0.05     # 隔一会儿再问一次令牌桶；刻意不与 min_gap_s 耦合
 # B 模式：同一条终版在这么短时间内重复下发 → 视为服务端重复事件、不重念；
-# 超过这个间隔又出现同样的文本 → 当成用户真的又说了一遍，照念。
+# 超过这个间隔又出现同样的文本 → 当成用户真的又说了一遍，照念。（本仓库的 B 音源增强）
 VOICE_DUP_WINDOW_S = 1.0
-# 收尾时排空 chatbox 的预算：最多 2s（原来是 12×0.5s=6s，纯白等 —— 限流是
-# 每 0.4s 才放一条，积压十几条本来也排不完，白等 6 秒只是让「停止」更慢）。
-CHATBOX_DRAIN_ROUNDS = 4
-CHATBOX_DRAIN_INTERVAL_S = 0.5
 
 
 def _common_prefix_len(a: str, b: str) -> int:
@@ -831,17 +833,7 @@ class Engine:
         except Exception:
             pass
         try:
-            if self._chatbox is not None:
-                for _ in range(CHATBOX_DRAIN_ROUNDS):
-                    if self._chatbox.pending_count == 0:
-                        break
-                    self._chatbox.flush_pending()
-                    await asyncio.sleep(CHATBOX_DRAIN_INTERVAL_S)
-                _left = self._chatbox.pending_count
-                if _left:
-                    # 降级路径留痕（禁静默降级）：这几条**发不出去**了，得让人看得见。
-                    print(f"[chatbox] 停止时仍有 {_left} 条未发完（限流窗口内排不完，"
-                          f"已放弃等待；它们不会重发）", flush=True)
+            await self._drain_chatbox()
         except Exception:
             pass
         try:
@@ -865,6 +857,39 @@ class Engine:
                 self._chatbox.close()
         except Exception:
             pass
+
+    async def _drain_chatbox(self) -> None:
+        """停止收尾时排空 chatbox：**最新一条优先** + 墙钟有界 + 丢弃留痕。
+
+        三个约束互相拉扯，少一个都不行：
+        ① 有界 —— 排空就卡在收尾路径上，白等就是「点了停止还要卡好几秒」；
+        ② 不丢最新一条 —— 积压里最值钱的恰是**最后**那句（用户刚说完、正等着上屏），
+           按 FIFO 从最旧的开始发，预算一到就把最新那条挤掉了（上一版正是如此）；
+        ③ 丢了要看得见 —— 本仓库禁静默丢弃，否则「译文少了一条」根本无从查起。
+        """
+        cb = self._chatbox
+        if cb is None:
+            return
+        backlog = cb.pending_count
+        if not backlog:
+            return
+        deadline = time.monotonic() + CHATBOX_DRAIN_BUDGET_S
+        newest_sent = False
+        while time.monotonic() < deadline:      # 至少跑一轮 ⇒ 最新一条必有一次机会
+            if not newest_sent:
+                newest_sent = cb.flush_pending(newest_first=True) > 0
+            else:
+                cb.flush_pending()              # 剩下的按原顺序补发，能发几条是几条
+            if cb.pending_count == 0:
+                break
+            await asyncio.sleep(CHATBOX_DRAIN_TICK_S)
+        left = cb.pending_count
+        if left:
+            why = ("最新一条也没排上（限流窗口整段都满）" if not newest_sent
+                   else "最新一条已优先发出")
+            print(f"[chatbox] 停止时放弃 {left}/{backlog} 条未发完的译文（{why}；"
+                  f"排空预算 {CHATBOX_DRAIN_BUDGET_S:.1f}s，限流窗口内排不完，不会重发）",
+                  flush=True)
 
     async def _build_and_run(self) -> None:
         scfg = self._session_cfg()
@@ -1725,6 +1750,33 @@ def pick_default_loopback(loops: list[dict], default_out_index: int | None,
     return None
 
 
+# 「同一失败理由只留一行」的节流状态（见 `_note_loopback_enum_error`）。
+_last_enum_err: str | None = None
+
+
+def _note_loopback_enum_error(exc: Exception) -> None:
+    """枚举设备失败留痕：**同一理由只留一行**，理由变了立刻再打一行。
+
+    为什么需要节流：这个函数被两个重试循环调用 —— 电平探针的低频自愈
+    （`level_probe.RETRY_S = 5.0`）与引擎 loopback 腿的重开。不节流就是
+    **十几行/分钟**，把真正的信息淹掉。与 `level_probe._enter_waiting` 同一取舍：
+    降级**不静默**（第一行一定在），只是不刷屏。
+    """
+    global _last_enum_err
+    msg = f"[loopback] ❌ 枚举设备失败：{type(exc).__name__}: {exc}"
+    if msg != _last_enum_err:
+        _last_enum_err = msg
+        print(msg, flush=True)
+
+
+def _note_loopback_enum_ok() -> None:
+    """枚举恢复正常：从失败里恢复时补一行 ✅（与 `level_probe._note_open` 同一取舍）。"""
+    global _last_enum_err
+    if _last_enum_err is not None:
+        _last_enum_err = None
+        print("[loopback] ✅ 设备枚举已恢复", flush=True)
+
+
 def pick_loopback_target(patterns: list[str] | None = None,
                          device_name: str | None = None) -> LoopbackTarget | None:
     """挑一个「系统声采集」目标（纯逻辑 + 后端数据，两个平台共用）。
@@ -1742,8 +1794,9 @@ def pick_loopback_target(patterns: list[str] | None = None,
     try:
         loops = backend.query_loopback_devices()
     except Exception as exc:  # noqa: BLE001
-        print(f"[loopback] ❌ 枚举设备失败：{type(exc).__name__}: {exc}", flush=True)
+        _note_loopback_enum_error(exc)      # 同一理由只留一行（重试循环里不会刷屏）
         return None
+    _note_loopback_enum_ok()                # 从失败里恢复：补一行 ✅
     if not loops:
         return None
 

@@ -126,6 +126,25 @@ def _yaml_set_or_create(text: str, path: list[str], value: str) -> str:
         got = _find(key_path[0], indent, lo, hi)
         if got is None:                          # 父级缺失 → 在本区间末尾补建整条链
             at = hi
+            # ⚠️ 不能直接插在 `hi`（= 本块后面的第一个真行）：块尾往往还挂着**空行**
+            #    和**下一段的标题注释**，插在它们后面的话，那段注释就变成新键的注释了。
+            #    实测：在 `overlay:` 末尾补建 `offsets:`，结果
+            #        # 第三条腿：译音输出（模型译音 → 虚拟声卡 → …）
+            #          offsets:
+            #            …
+            #        output:
+            #    「译音输出」的说明被挂到了手腕屏的键上。所以往回退过空行、
+            #    以及**比本块更浅**的注释（那是下一段的标题；本块内部的续行注释
+            #    缩进更深，必须留在原地 —— 见 `_yaml_set_in_text` 里那条取舍）。
+            while at > lo:
+                s = lines[at - 1].lstrip()
+                if not s:
+                    at -= 1
+                    continue
+                if s.startswith("#") and (len(lines[at - 1]) - len(s)) < indent:
+                    at -= 1
+                    continue
+                break
             if at == len(lines) and lines and lines[-1] == "":
                 at = len(lines) - 1               # 保住文件末尾的那个换行
             block: list[str] = []
@@ -276,3 +295,29 @@ def _fmt_scalar(x) -> str:  # noqa: ANN001, ANN202
     if isinstance(x, (list, tuple)):
         return "[" + ", ".join(_fmt_scalar(i) for i in x) + "]"
     return str(x)
+
+
+def _yaml_scalar(value) -> str:  # noqa: ANN001
+    """把一个**字符串**渲染成安全的 YAML 标量（该不该加引号交给 PyYAML 决定）。
+
+    为什么需要它：就地写配置时，值是直接拼进那一行的（`key: <value>`），
+    而值里有几个来源是**外部数据** —— 设备名、音色 id 之类可能含 `#`（会把整行
+    截成注释）、`: `、`[`、`&`、`*`、`%` 等 YAML 有意义的字符。整份 `yaml.dump`
+    时代这件事是自动的，改成就地写之后必须自己保证不写出坏 YAML。
+    `yaml.safe_dump` 只序列化这一个标量，返回 `CABLE Input` / `'a#b'` / `''`
+    这样的安全写法（allow_unicode 保住中文设备名，不转成 \\uXXXX）。
+    """
+    # ⚠️ `width` 必须给到无穷大：PyYAML 默认 `width=80` 会把**超宽标量折行**，
+    #    而这里只取第一行 —— 长设备名（Realtek/VB-Audio 那类很容易过 80 字符）会被
+    #    静默截断，而且截断后仍是**合法 YAML**：值照写、没有任何报错，只有下次启动
+    #    时设备选择悄悄回落到「自动检测」。需要加引号的长值更糟：首行是未闭合引号，
+    #    整份配置被 `_write_config_text` 拒写（保存静默失效）。
+    #    实测：86 字符设备名曾被截成 81 字符（见 tests/test_device_save.py 的长名用例）。
+    text = yaml.safe_dump(value, allow_unicode=True, default_flow_style=True,
+                          width=10 ** 9)
+    first, _, rest = text.partition("\n")
+    if rest.strip() not in ("", "..."):
+        # 除文档结束标记外还有第二行 = 值里带换行这类 PyYAML 必须折行的写法：
+        # 退回「始终单行」的双引号风格（YAML 双引号是 JSON 的超集）。
+        return _yaml_quote(value)
+    return first.strip()

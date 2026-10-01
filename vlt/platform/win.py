@@ -231,3 +231,268 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
     """
     from ..output.openvr_overlay import WristOverlay
     return WristOverlay(cfg, config_path=config_path, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------- 桌面叠加窗（issue #11）
+#
+# 桌面（非 VR）模式下的字幕窗：Tk 负责画，这里只提供 Tk 拿不到的那几件 Win32 事实 ——
+# 顶层 HWND、目标窗口客户区、鼠标穿透/不抢焦点的扩展样式、工作区（主屏那一份，
+# 以及**目标窗口所在显示器**那一份 —— 多屏时只有后者才不会把副屏字幕夹回主屏）。
+#
+# ⚠️ 共享模块（`vlt/output/desktop_overlay.py`）**只能通过 `vlt/platform/__init__.py`
+#    的门面调这些函数**：另一侧平台没有对等实现，门面会返回安全默认值，
+#    所以 Linux 侧一个文件都不用改（见 vlt/platform/__init__.py 的说明）。
+#
+# ⚠️ 所有函数都**不抛异常**：调用点在 50ms 一跳的 tick 里，抛出去会把整条翻译腿打断。
+#    取不到就返回 None / False / 原值，由调用方决定怎么降级（并留一行日志）。
+
+_GWL_EXSTYLE = -20
+_WS_EX_TRANSPARENT = 0x00000020       # 鼠标穿透
+_WS_EX_TOOLWINDOW = 0x00000080        # 不进 alt-tab
+_WS_EX_LAYERED = 0x00080000           # 分层窗口（色键 / 整窗透明度都要它）
+_WS_EX_NOACTIVATE = 0x08000000        # 显示时不抢焦点
+_SPI_GETWORKAREA = 0x0030
+_SM_CXSCREEN, SM_CYSCREEN = 0, 1
+# 窗口不与任何显示器相交（移出屏幕外/正在销毁）时，`MonitorFromWindow` 仍返回**最近**
+# 的那块屏 —— 比返回 NULL 再回落主屏更贴近用户的直觉（字幕就在那块屏附近）。
+_MONITOR_DEFAULTTONEAREST = 2
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", _RECT),
+                ("rcWork", _RECT), ("dwFlags", ctypes.c_ulong)]
+
+
+def _get_ex_style(hwnd: int) -> int | None:
+    """读窗口扩展样式（GWL_EXSTYLE）；失败返回 None。"""
+    try:
+        user32 = ctypes.windll.user32
+        fn = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+        fn.restype = ctypes.c_ssize_t
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        return int(fn(ctypes.c_void_p(int(hwnd)), _GWL_EXSTYLE)) & 0xFFFFFFFF
+    except Exception:  # noqa: BLE001 — 32/64 位差异、句柄失效都走这里
+        return None
+
+
+def _set_ex_style(hwnd: int, style: int) -> bool:
+    """写窗口扩展样式。**读回来确认**才算成功 —— SetWindowLongPtr 返回 0 既可能是
+    「失败」也可能是「原值就是 0」，靠返回值判断会误报。"""
+    try:
+        user32 = ctypes.windll.user32
+        fn = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+        fn.restype = ctypes.c_ssize_t
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+        fn(ctypes.c_void_p(int(hwnd)), _GWL_EXSTYLE, ctypes.c_ssize_t(int(style)))
+    except Exception:  # noqa: BLE001
+        return False
+    return _get_ex_style(hwnd) == (int(style) & 0xFFFFFFFF)
+
+
+def top_level_hwnd(widget_id: int) -> int:
+    """Tk 的 `winfo_id()` 给的是**子窗口** HWND，顶层要再 `GetParent()` 一次。
+
+    拿不到父窗口（本来就是顶层 / 句柄无效）就返回原值 —— 调用方要的是「能设扩展样式的
+    那个窗口」，两种情况都满足。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetParent.restype = ctypes.c_void_p
+        user32.GetParent.argtypes = [ctypes.c_void_p]
+        parent = user32.GetParent(ctypes.c_void_p(int(widget_id)))
+        return int(parent) if parent else int(widget_id)
+    except Exception:  # noqa: BLE001
+        return int(widget_id)
+
+
+def find_window_by_title(substr: str, exclude: Any = ()) -> int | None:
+    """按标题子串（不区分大小写）找**可见的顶层窗口**；找不到返回 None。
+
+    ⚠️ 标题**完全相等**的优先：本程序主窗口标题是「VRChat 实时同传」，也含 "VRChat" ——
+    只取 Z 序第一个命中的话，游戏窗口没起来时会贴到**我们自己的界面**上。
+    仍然保留子串匹配（用户可能把 VRChat 窗口改名 / 多开），只是让精确命中优先。
+
+    `exclude`：要排除的窗口句柄（可迭代）。调用方把**自己的**窗口（本程序主窗
+    与字幕窗）传进来 —— 精确匹配只能挡住「VRChat 实时同传」这种，字幕窗和未来
+    别的自建窗不该靠标题去赌。
+    """
+    needle = (substr or "").strip().lower()
+    if not needle:
+        return None
+    try:
+        skip = {int(v) for v in (exclude or ()) if v}
+    except TypeError:
+        skip = {int(exclude)} if exclude else set()          # 传了单个 int 也认
+    user32 = ctypes.windll.user32
+    user32.IsWindowVisible.restype = ctypes.c_bool
+    user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+
+    exact: list[int] = []
+    partial: list[int] = []
+
+    def _cb(hwnd, _lparam) -> bool:
+        try:
+            if not hwnd or int(hwnd) in skip or not user32.IsWindowVisible(hwnd):
+                return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            title = buf.value
+            low = title.lower()
+            if low == needle:
+                exact.append(int(hwnd))
+                return False                    # 精确命中，不用再找了
+            if needle in low:
+                partial.append(int(hwnd))
+        except Exception:  # noqa: BLE001 — 单个窗口读不到标题不影响其余
+            pass
+        return True
+
+    try:
+        proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(_cb)
+        user32.EnumWindows(proc, 0)
+    except Exception:  # noqa: BLE001
+        return None
+    return (exact or partial or [None])[0]
+
+
+def window_client_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """窗口**客户区**在屏幕上的矩形 (left, top, right, bottom)；失败返回 None。
+
+    用客户区而不是 GetWindowRect：字幕要贴在画面里，标题栏/边框那块不算。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetClientRect.restype = ctypes.c_bool
+        user32.GetClientRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RECT)]
+        user32.ClientToScreen.restype = ctypes.c_bool
+        user32.ClientToScreen.argtypes = [ctypes.c_void_p, ctypes.POINTER(_POINT)]
+        rc = _RECT()
+        if not user32.GetClientRect(ctypes.c_void_p(int(hwnd)), ctypes.byref(rc)):
+            return None
+        w, h = int(rc.right) - int(rc.left), int(rc.bottom) - int(rc.top)
+        if w <= 0 or h <= 0:                    # 最小化 / 还没布局完
+            return None
+        pt = _POINT(int(rc.left), int(rc.top))
+        if not user32.ClientToScreen(ctypes.c_void_p(int(hwnd)), ctypes.byref(pt)):
+            return None
+        return (int(pt.x), int(pt.y), int(pt.x) + w, int(pt.y) + h)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def is_window(hwnd: int) -> bool:
+    """句柄还是一个真窗口吗（游戏退了 / 换了场景就会变 False）。"""
+    if not hwnd:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.IsWindow.restype = ctypes.c_bool
+        user32.IsWindow.argtypes = [ctypes.c_void_p]
+        return bool(user32.IsWindow(ctypes.c_void_p(int(hwnd))))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def set_click_through(hwnd: int, on: bool) -> bool:
+    """开/关鼠标穿透（`WS_EX_LAYERED | WS_EX_TRANSPARENT`）。
+
+    ⚠️ 必须**读改写**：直接写死一个常量会把 Tk 的 `-transparentcolor` / `-alpha`
+    依赖的 `WS_EX_LAYERED` 冲掉（字幕会变成一块实心矩形）。关穿透时也只摘
+    `WS_EX_TRANSPARENT`，保留 LAYERED。
+    """
+    style = _get_ex_style(hwnd)
+    if style is None:
+        return False
+    style |= _WS_EX_LAYERED
+    style = (style | _WS_EX_TRANSPARENT) if on else (style & ~_WS_EX_TRANSPARENT)
+    return _set_ex_style(hwnd, style)
+
+
+def set_tool_window(hwnd: int) -> bool:
+    """不抢焦点 + 不进 alt-tab（`WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`）。
+
+    抢焦点的后果很具体：字幕窗一刷新就把输入焦点从游戏里夺走，用户打字/按键全丢。
+    """
+    style = _get_ex_style(hwnd)
+    if style is None:
+        return False
+    return _set_ex_style(hwnd, style | _WS_EX_NOACTIVATE | _WS_EX_TOOLWINDOW)
+
+
+def screen_work_area() -> tuple[int, int, int, int]:
+    """主屏**工作区** (left, top, right, bottom)：不含任务栏，字幕不该被它挡住。
+
+    `SPI_GETWORKAREA` 优先；拿不到（策略限制等）退 `GetSystemMetrics` 的整屏尺寸；
+    再不行给一个 1920x1080 的保守值 —— 调用方会拿它做夹取，返回 (0,0,0,0) 会把
+    字幕夹到左上角一个点，比给个粗略值更糟。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.SystemParametersInfoW.restype = ctypes.c_bool
+        user32.SystemParametersInfoW.argtypes = [
+            ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+        rc = _RECT()
+        if user32.SystemParametersInfoW(_SPI_GETWORKAREA, 0, ctypes.byref(rc), 0):
+            if int(rc.right) > int(rc.left) and int(rc.bottom) > int(rc.top):
+                return (int(rc.left), int(rc.top), int(rc.right), int(rc.bottom))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        user32 = ctypes.windll.user32
+        w = int(user32.GetSystemMetrics(SM_CXSCREEN))
+        h = int(user32.GetSystemMetrics(SM_CYSCREEN))
+        if w > 0 and h > 0:
+            return (0, 0, w, h)
+    except Exception:  # noqa: BLE001
+        pass
+    return (0, 0, 1920, 1080)
+
+
+def monitor_work_area(hwnd: int) -> tuple[int, int, int, int]:
+    """`hwnd` **所在那块显示器**的工作区；拿不到就回落到 `screen_work_area()`。
+
+    多显示器时这条是必需的：`SPI_GETWORKAREA` 只有**主屏**那一份工作区，副屏上的
+    字幕会被它夹回主屏 —— 左侧副屏的坐标本来就是负的，一夹就直接飞到主屏左上角。
+    所以贴窗时按「目标窗口待着的那块屏」取工作区，才是用户眼里的那块屏。
+
+    ⚠️ 返回值**可能是负坐标**（副屏在主屏左侧/上方）：不要做任何 `max(0, ...)` 钳制。
+    """
+    if not hwnd:
+        return screen_work_area()
+    try:
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.restype = ctypes.c_void_p
+        user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        user32.GetMonitorInfoW.restype = ctypes.c_bool
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MONITORINFO)]
+        mon = user32.MonitorFromWindow(ctypes.c_void_p(int(hwnd)),
+                                       _MONITOR_DEFAULTTONEAREST)
+        if not mon:
+            return screen_work_area()
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)      # 忘了填这个 GetMonitorInfoW 直接失败
+        if not user32.GetMonitorInfoW(ctypes.c_void_p(mon), ctypes.byref(mi)):
+            return screen_work_area()
+        left, top = int(mi.rcWork.left), int(mi.rcWork.top)
+        right, bottom = int(mi.rcWork.right), int(mi.rcWork.bottom)
+        if right <= left or bottom <= top:
+            return screen_work_area()
+        return (left, top, right, bottom)
+    except Exception:  # noqa: BLE001 — 句柄失效 / 远程桌面 / 老系统都走这里
+        return screen_work_area()

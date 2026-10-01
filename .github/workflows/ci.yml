@@ -155,6 +155,9 @@ jobs:
       - name: 凭据扫描
         run: python scripts/check_no_secrets.py --once
 
+      - name: 检查文档链接
+        run: python scripts/check_doc_links.py
+
       - name: 检查 tkinter 可用性
         id: tk
         run: |
@@ -175,8 +178,9 @@ jobs:
           ALWAYS_SKIP="tests/test_engine.py"
           # 需要真实窗体的（无 xvfb 时跳过；有 xvfb 就跑）
           GUI_TESTS="tests/test_api_key_gui.py tests/test_config_save.py tests/test_gui_rows.py \
-                     tests/test_i18n.py tests/test_overlay_conversation.py tests/test_sponsor.py \
-                     tests/test_textin.py tests/test_update_dialog.py tests/test_vrchat_capture.py"
+                     tests/test_i18n.py tests/test_level_probe.py tests/test_overlay_conversation.py \
+                     tests/test_sponsor.py tests/test_textin.py tests/test_update_dialog.py \
+                     tests/test_vrchat_capture.py"
 
           fail=0
           for t in tests/test_*.py; do
