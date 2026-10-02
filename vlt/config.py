@@ -11,7 +11,8 @@ from typing import Any
 
 import yaml
 
-from .session.base import SessionConfig, DEFAULT_FINAL_SILENCE_S
+from .session.base import (SessionConfig, DEFAULT_FINAL_SILENCE_S,
+                           DEFAULT_FAST_FINAL_SILENCE_S, DEFAULT_FAST_FINAL_MIC_QUIET_S)
 
 from .paths import APP_DIR, BUNDLE_DIR
 
@@ -132,6 +133,12 @@ class Direction:
             reconnect_backoff=tuple(base.get("reconnect_backoff", (2, 5, 10, 30))),
             max_new_sessions_per_minute=int(base.get("max_new_sessions_per_minute", 4)),
             final_silence_s=float(base.get("final_silence_s", DEFAULT_FINAL_SILENCE_S)),  # 默认值必须 > 服务端增量间隔（实测最大 2.3s），改小会让最终版在句子中间抢跑
+            # 快封句（麦克风也静了 → 用户确实说完了）：文字静默到这个值就封，省 ~1.8s；
+            # None = 关掉快路径（退回纯 final_silence_s）
+            fast_final_silence_s=_opt_float(base.get("fast_final_silence_s",
+                                                     DEFAULT_FAST_FINAL_SILENCE_S)),
+            fast_final_mic_quiet_s=float(base.get("fast_final_mic_quiet_s",
+                                                 DEFAULT_FAST_FINAL_MIC_QUIET_S)),
         )
 
 
@@ -240,6 +247,11 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         "reconnect_backoff": s.get("reconnect_backoff", [2, 5, 10, 30]),
         "max_new_sessions_per_minute": s.get("max_new_sessions_per_minute", 4),
         "final_silence_s": float(s.get("final_silence_s", DEFAULT_FINAL_SILENCE_S)),  # 默认值必须 > 服务端增量间隔（实测最大 2.3s），改小会让最终版在句子中间抢跑
+        # 快封句：麦克风也静了 → 文字静默 fast_final_silence_s 就封（省 ~1.8s）；None = 关掉
+        "fast_final_silence_s": _opt_float(s.get("fast_final_silence_s",
+                                                DEFAULT_FAST_FINAL_SILENCE_S)),
+        "fast_final_mic_quiet_s": float(s.get("fast_final_mic_quiet_s",
+                                             DEFAULT_FAST_FINAL_MIC_QUIET_S)),
         # 长静音闸门 + 本地 repeat 抑制：原样透传，取值校验在 engine 里做
         # （非法值会**留痕**并回落默认值，见 engine.silence_gate_settings / repeat_guard_settings）
         "silence_gate_enabled": s.get("silence_gate_enabled", True),
