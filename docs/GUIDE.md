@@ -90,6 +90,82 @@ python -m venv .venv
 > 手动全量检查：`python scripts/check_no_secrets.py --once`
 > 为什么需要：key 一旦进了 git 历史，删掉文件也清不掉，只能 rewrite 历史 —— 宁可在提交前拦。
 
+### 海外用户：阿里云百炼·国际版
+
+**为什么有两条线路**：默认的「千问云」只面向国内，海外网络既开不了号、直连也不稳。
+海外请改用**阿里云百炼·国际版（Alibaba Cloud Model Studio）**——同一套模型、同一个实时接口，
+只是入口地址和账号体系不同。两条线路**互斥**：同一时刻只有一条在工作，界面里选哪条就用哪条。
+
+**开通三步**（都在[百炼国际版控制台 · 模型市场](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)里做）：
+
+![国际站模型市场：右上角可切区域（Region）与界面语言（English）](../assets/modelstudio-market.png)
+
+1. 建一个业务空间（或直接用默认那个），进去
+2. 在「业务空间详情」页复制 **API Host 前缀** —— 这一截就是**业务空间 ID**，形如 `llm-xxxx`
+   （完整 Host 长这样：`llm-xxxx.ap-southeast-1.maas.aliyuncs.com`，只取开头的 `llm-xxxx`）
+3. 在**同一个业务空间**下建一个 API key（`sk-...`）—— 入口在控制台**左下角**的 `API-KEY`：
+
+![控制台左下角的 API-KEY 入口（红框处）](../assets/modelstudio-api-key-entry.png)
+
+![点进去就是 API Key 管理页：在这里创建/复制 key（未登录会先让你登录）](../assets/modelstudio-api-key.png)
+
+**界面四步**：
+
+1. `⚙ 设置 → 常规 → 服务线路` 选「阿里云百炼·国际版」
+2. 「业务空间 ID」填 `llm-xxxx`（线路是千问云时这个框是灰的，不用填）
+3. 「地域」保持默认的 **Singapore (`ap-southeast-1`)** —— 本版起界面里也只有这一个可选（原因见下）
+4. 点「保存线路设置」，再把 key 粘到本页上方的「API key」框里保存
+
+> 🔑 **key 分开存**：两条线路的 key 各存一个文件（`api_key.txt` / `api_key_bailian_intl.txt`），
+> 来回切线路**不用重填** key；界面里那行「当前（线路）：来源 sk-****6789」会跟着线路变。
+> 改完线路**要重新开始翻译**才生效（正在翻译时会提示你先停）。
+
+**地域：只有新加坡能用**（本版起界面里也只给这一个）
+
+| 地域 id | 城市 | 本程序 |
+|---|---|---|
+| `ap-southeast-1` | Singapore（默认） | ✅ 全部功能 |
+| `ap-northeast-1` | Japan (Tokyo) | ❌ 没有语音类模型 |
+| `us-east-1` | US (Virginia) | ❌ 没有语音类模型 |
+| `eu-central-1` | Germany (Frankfurt) | ❌ 没有语音类模型 |
+| `cn-hongkong` | China (Hong Kong) | ❌ 没有语音类模型 |
+
+> ⚠️ **为什么只剩新加坡**：百炼国际版**每个地域各自有 endpoint、API key 和模型清单，
+> 不能跨地域使用**（官方原文：*Each region has its own endpoint, API Key, and model list.
+> These cannot be used across regions.*）。而本程序要用的**语音链路** ——
+> 实时同传 `qwen3.8-livetranslate-flash-realtime`、试听音色 / 打字译音 `qwen3-tts-flash`、
+> Omni 音色 `qwen3.5-omni-flash` —— 在国际站**只在 Singapore 部署**。东京、弗吉尼亚、
+> 法兰克福、香港都缺语音类模型（东京连打字翻译用的 `qwen-mt-flash` 都没有）。
+> 所以界面里**只给新加坡**；配置文件里若还留着老地域，点「开始翻译」会被**拦下并提示**改回来
+> （不会静默替换成新加坡 —— 地域会进 Host，替换等于把请求打到别的地域的域名上）。
+
+> ⚠️ **key 也必须属于新加坡**：key 是在哪个地域的业务空间里建的，就只能连那个地域。
+> 拿别的地域（比如在日本建的业务空间）的 key 来连，会连不上或报 `Model not exist`
+> —— 先回控制台确认业务空间和 key 都在新加坡，再改这里的「地域」。
+
+**对应的 `config.yaml` 四个键**（界面点「保存线路设置」时自动就地写入，不用手改）：
+
+```yaml
+session:
+  provider: qianwen          # 线路 id：qianwen（千问云）/ bailian_intl（百炼国际版）
+  region: ap-southeast-1     # 只对百炼国际版有意义
+  workspace_id: ""           # 业务空间 ID（llm-xxxx）；千问云留空
+  base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime
+```
+
+切到百炼国际版后 `base_url` 会变成下面这样（**`{workspace_id}` 是字面占位符**，连接时才替换成你填的值，
+所以日后改业务空间 ID 不必回头改这一行）：
+
+```yaml
+  base_url: wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime
+```
+
+**`base_url` 才是「实际连哪」的唯一依据**；`provider` 只决定界面默认值、key 存哪个文件、以及校验规则
+（百炼国际版**必须**有业务空间 ID —— 没填时界面会红字拒绝保存，点「开始翻译」也会被拦下并自动跳到设置页）。
+
+> 🔍 **排障**：日志里 `[net] 线路=… host=…` 就是当前实际连的地址（业务空间 ID 已打码），
+> `[gui] 服务线路已保存：…` 是界面写盘的结果。两行对不上 → 说明改完还没重新开始翻译。
+
 ## 四、自检
 
 **用 exe 的**：双击打开界面，确认三件事——
@@ -133,7 +209,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 - **流式上屏**：未 final 的增量**就地重画同一条气泡**，不会每来一个增量就新增一条
 - **双向同时**：同一个窗口跑两个翻译方向（麦克风 → 右侧、游戏音频 → 左侧），第二个**错开 300ms 启动**避免抢音频设备；任一侧失败，另一侧照常工作
 - **语言镜像**：一个语言对双向对应——选「中文 → 英语」，别人说方向自动变「英语 → 中文」。
-  源语言可选 `自动检测` / 中文 / 英语 / 日语 / 韩语 / 法语 / 德语 / 西班牙语 / 俄语（目标语言是同一张表但没有「自动检测」）；
+  源语言可选 `自动检测` / 中文 / 英语 / 日语 / 韩语 / 法语 / 德语 / 西班牙语 / 俄语 / 泰语（目标语言是同一张表但没有「自动检测」）；
   源语言选 `自动检测` 时对方方向的目标回落中文并在状态栏说明。改动**立即生效**并写回配置，下次启动保留
 - **设置弹窗**（`⚙ 设置`）：API key 输入 / 清除、三个音频设备下拉 + `刷新`、**译音菜单**（音源 A/B + 两条腿的音色下拉与试听）、日志区（`导出日志压缩包…`）
 - **微调面板**（`微调 ▸`）：手腕屏的锚点 + 14 个滑块，**拖动即热重载、不用重启**（详见「六、配置」）
@@ -203,6 +279,12 @@ exe 是无控制台窗口的单文件 GUI，除了上面的 `--self-test` 之外
 > 📌 **选音频设备不用传参数**：在图形界面「⚙ 设置」里选（下拉里第一项「自动检测」= 走回退链），
 > 或直接改 `config.yaml` 的 `capture.mic_device` / `capture.loopback_device`。
 > 存的是**设备名字符串**而不是索引——索引会随插拔/会话切换整个变掉。
+>
+> ⚠️ **列表里只有「已启用」的设备，同一块声卡只出现一次**：程序只列 **WASAPI** 那一套端点
+> —— 也就是 Windows「声音」设置里**已启用**的那些（不启用的不会列出来，想用先去
+> 「声音 → 更多声音设置」里启用它）。这样不会出现「同一支麦克风列两三条、采样率还各不一样」
+> 的情况；名字后面括号里的采样率**就是实际会用的采样率**（一般是 48000）。
+> 老配置里存的名字仍能解析——会自动落到同名的那条 WASAPI 端点。
 
 ---
 
@@ -449,9 +531,12 @@ Nekoya=猫屋
 * **配置**：`config.yaml` 的 `desktop_overlay:` 段（`mode` 可切 `latest` 变成
   「只显示最新一句」的歌词式）。视觉参数（字体 / 字号 / 配色 / 行数 / 是否显示原文）
   默认**继承 `overlay:` 段**，想单独给桌面字幕一套配色就在 `desktop_overlay:` 里覆写同名键。
-* **Linux**：**X11 会话**下与 Windows 同款（找窗 / 贴窗跟随 / 鼠标穿透 / 拖动落盘 /
-  透明度）；**Wayland 会话**（niri 等，界面走 XWayland）下窗口位置与透明度由合成器决定，
-  跟随不会生效 —— 边界与排查见 [GUIDE.linux.md](GUIDE.linux.md) 的「桌面字幕」一节。
+* **Linux**：**Wayland 会话**（niri / sway / Hyprland / KDE 等实现了 layer-shell 的合成器）
+  走**原生 layer-shell 窗**；**X11 会话**（含带 XWayland 的 GNOME/Weston）走**原生 ARGB
+  覆盖窗**——都是逐像素透明（真圆角、底板半透明）、置顶跟随、协议级鼠标穿透、拖动落盘，
+  与 Windows 同款（X11 的透明需要合成器，如 picom；没检测到时会自动降级用 1 位形状蒙版裁掉透明区——没有黑框，圆角为锯齿、底板是实色，启动日志有一行说明）。
+  两条原生腿都建不起来时回落 Tk 窗。`desktop_overlay.backend` 可强制某条腿（排查渲染问题时
+  很有用）——边界与排查见 [GUIDE.linux.md](GUIDE.linux.md) 的「桌面字幕」一节。
 
 > ⚠️ VRChat 必须是**窗口化 / 无边框窗口**（Unity 的 `Fullscreen mode = 3`，VRChat 默认就是）。
 > 独占全屏时任何第三方置顶窗都会被盖住 —— 那不是本程序的 bug。
@@ -546,7 +631,7 @@ vlt/
 
 server/                   多人房间的服务端（Cloudflare Worker + Durable Object，独立部署）
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release / room_e2e_local）
-tests/                    50 个文件、411 个测试函数（离线可跑，CI 逐文件执行；
+tests/                    58 个文件、467 个测试函数（离线可跑，CI 逐文件执行；
                           不含需要真 API key 的 tests/test_engine.py）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
@@ -597,7 +682,7 @@ build_exe.bat                                              :: 打包 + 打完自
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.6.0 "RoomClient"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
   ```
 
 ---

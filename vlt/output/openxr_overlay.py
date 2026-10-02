@@ -851,6 +851,23 @@ class XrOverlaySession:
                 pass
         self._create_swapchain()
 
+    def set_size(self, size_px: tuple[int, int]) -> None:
+        """改面板像素尺寸：更新尺寸并**重建交换链**（「面板高」滑块热重载用）。
+
+        ⚠️ 只改配置、不动交换链的话：新面板图比交换链大 → `glTexSubImage2D` 越界
+        （GL_INVALID_VALUE，整张不写）+ `SwapchainSubImage.image_rect` 越界
+        （`XR_ERROR_SWAPCHAIN_RECT_INVALID`）→ 每帧 `xrEndFrame` 都失败。
+        而自愈重建用的还是**本对象的旧尺寸** → 面板永久卡死（用户实测：
+        430 → 440 一步就触发，日志连刷 232 次「已重建 swapchain」也不恢复，
+        只能重启应用）。同尺寸调用幂等（不白重建）。
+        """
+        size_px = (max(1, int(size_px[0])), max(1, int(size_px[1])))
+        if size_px == tuple(self.size_px):
+            return
+        self.size_px = size_px
+        if self.swapchain is not None:
+            self.rebuild_swapchain()
+
     # ---------- 锚点 ----------
 
     # 手部锚点建议绑定的交互 profile。只给一个的话，控制器型号对不上就完全没有 pose。
@@ -1470,6 +1487,10 @@ class OpenXrOverlay:
         """分级自愈：连续失败到阈值就升一级（swapchain → session → instance）。
 
         ⚠️ 刻意限频：失败一次就重启 instance 等于自己把自己拖死。
+        ⚠️ 本方法**不许**在动作后把 `_stage` 放回 "none"：那等于每轮都从第一级重来、
+        永远升不上第二级。用户实测日志：面板尺寸拖大后连刷 232 次「已重建 swapchain」、
+        0 次重建会话 —— 面板永久卡死，只能重启应用。梯子的回落只在帧循环的
+        「真的恢复上传」分支里做（`_fails = 0` 那处）。
         """
         if self._fails_in_stage < 3:
             return
@@ -1494,7 +1515,6 @@ class OpenXrOverlay:
                 self._teardown(keep_gl=True)
                 self._bring_up(rebuild_gl=True)
                 log.warning("[overlay:xr] ♻️♻️♻️ 已重建 GL context + 会话（第 %d 次）", self._reinits)
-            self._stage = "none"
         except Exception as exc:  # noqa: BLE001
             log.warning("[overlay:xr] ⚠️ 自愈（%s）失败，下轮再试：%s: %s",
                         self._stage, type(exc).__name__, exc)
@@ -1541,6 +1561,14 @@ class OpenXrOverlay:
         cached_render = self._last_render_cached
         self.cfg = new_cfg
         try:
+            # ★ 尺寸变化必须让**交换链**跟着换（见 `XrOverlaySession.set_size` 的实测记录）：
+            #   只重渲染不换交换链的话，新图比交换链大 → 上传越界 + image_rect 越界 →
+            #   每帧提交失败，而自愈重建用的还是旧尺寸 → 面板永久卡死。
+            if self._sess is not None and tuple(new_cfg.size_px) != tuple(self._sess.size_px):
+                old = self._sess.size_px
+                self._sess.set_size(tuple(new_cfg.size_px))
+                log.info("[overlay:xr] 面板尺寸 %sx%s → %sx%s（交换链已跟随重建）",
+                         old[0], old[1], new_cfg.size_px[0], new_cfg.size_px[1])
             if geo:
                 self._sess.ensure_anchor(new_cfg.anchor, new_cfg.tracker_index)
             if render:

@@ -452,18 +452,24 @@ def test_direction_language_names_translated() -> None:
     当候选项 —— 英文/日文/俄文界面里方向下拉仍是「中文 → 英语」，外国用户看不懂自己选的是啥。
     而机器守卫原来只看控件的 text 属性，扫不到下拉的「值」，两边都得补上。现在：
     显示走 `_lang_label()`（中文名 → 译名），选中值走 `_lang_key()`（译名 → 中文 key）。
+
+    覆盖 zh/en/ja/ko/ru 五种界面语言 × 三个语种（日语 / 泰语 / 自动检测）。
+    泰语是 2026-10-02 新加的语言：它在四套外语词表里都要有译名，否则外语界面会露出
+    汉字「泰语」；反查也要能落回 `th`，否则用户选了泰语、引擎收到的还是老语言码。
     """
     from vlt import i18n
 
-    # lang: (源下拉当前值=中文, 目标下拉当前值=英语, 源候选里的自动检测, 目标候选里的日语)
+    # lang: (源下拉当前值=中文, 目标下拉当前值=英语, 源候选里的自动检测,
+    #        候选里的日语译名, 候选里的泰语译名)
     cases = {
-        "en": ("Chinese", "English", "Auto-Detect", "Japanese"),
-        "ja": ("中国語", "英語", "自動検出", "日本語"),
-        "ko": ("중국어", "영어", "자동 감지", "일본어"),
-        "ru": ("Китайский", "Английский", "Автоопределение", "Японский"),
+        "zh": ("中文", "英语", "自动检测", "日语", "泰语"),
+        "en": ("Chinese", "English", "Auto-Detect", "Japanese", "Thai"),
+        "ja": ("中国語", "英語", "自動検出", "日本語", "タイ語"),
+        "ko": ("중국어", "영어", "자동 감지", "일본어", "태국어"),
+        "ru": ("Китайский", "Английский", "Автоопределение", "Японский", "Тайский"),
     }
     reports: list[str] = []
-    for lang, (want_src, want_tgt, want_auto, want_ja) in cases.items():
+    for lang, (want_src, want_tgt, want_auto, want_ja, want_th) in cases.items():
         saved_env = _isolate_env(Path(tempfile.mkdtemp(prefix="vlt-i18n-env-")))
         gui = None
         try:
@@ -472,29 +478,43 @@ def test_direction_language_names_translated() -> None:
             got_src, got_tgt = gui._source_combo.get(), gui._target_combo.get()
             assert got_src == want_src, f"{lang}：源语言下拉显示 {got_src!r}，期望 {want_src!r}"
             assert got_tgt == want_tgt, f"{lang}：目标语言下拉显示 {got_tgt!r}，期望 {want_tgt!r}"
-            vals = [str(v) for v in gui._source_combo.cget("values")]
-            assert want_auto in vals and want_ja in vals, \
-                f"{lang}：源语言候选项不对（应含自动检测与日语译名）：{vals!r}"
-            assert want_ja in [str(v) for v in gui._target_combo.cget("values")], \
-                f"{lang}：目标语言候选项里没有 {want_ja!r}"
+            src_vals = [str(v) for v in gui._source_combo.cget("values")]
+            tgt_vals = [str(v) for v in gui._target_combo.cget("values")]
+            assert want_auto in src_vals and want_ja in src_vals and want_th in src_vals, \
+                f"{lang}：源语言候选项不对（应含自动检测/日语/泰语译名）：{src_vals!r}"
+            assert want_ja in tgt_vals, f"{lang}：目标语言候选项里没有 {want_ja!r}"
+            assert want_th in tgt_vals, f"{lang}：目标语言候选项里没有 {want_th!r}：{tgt_vals!r}"
 
             # 反查：选「日语」（译名）→ 语言码必须落回 ja
             gui._target_combo.set(want_ja)
             gui._on_lang_change()
             assert gui._lang_pair["target"] == "ja", \
                 f"{lang}：选了 {want_ja!r} 之后语言码应为 ja，实际 {gui._lang_pair['target']!r}"
+
+            # 反查：泰语两侧都要能落回 th（我说泰语 / 别人说泰语）
+            gui._target_combo.set(want_th)
+            gui._on_lang_change()
+            assert gui._lang_pair["target"] == "th", \
+                f"{lang}：选了 {want_th!r} 之后语言码应为 th，实际 {gui._lang_pair['target']!r}"
+            assert gui._target_combo.get() == want_th, f"{lang}：选泰语后下拉回填的不是 {want_th!r}"
+            gui._source_combo.set(want_th)
+            gui._on_lang_change()
+            assert gui._lang_pair["source"] == "th", \
+                f"{lang}：源侧选了 {want_th!r} 之后语言码应为 th，实际 {gui._lang_pair['source']!r}"
+
             # 再选回英语（译名）→ 落回 en，且下拉回填的仍是译名
+            gui._source_combo.set(want_src)
             gui._target_combo.set(cases[lang][1])
             gui._on_lang_change()
             assert gui._lang_pair["target"] == "en", \
                 f"{lang}：选回 {cases[lang][1]!r} 后语言码应为 en，实际 {gui._lang_pair['target']!r}"
             assert gui._target_combo.get() == cases[lang][1], "选完下拉回填的不是译名"
-            reports.append(f"{lang}:{got_src}→{got_tgt}")
+            reports.append(f"{lang}:{got_src}→{got_tgt}/泰语={want_th}")
         finally:
             _destroy(gui)
             _restore_env(saved_env)
             i18n.set_language("zh")
-    print("  ✓ 方向下拉语言名已翻译且可反查：" + "，".join(reports))
+    print("  ✓ 方向下拉语言名已翻译且可反查（含泰语）：" + "，".join(reports))
 
 
 def test_language_combo_writes_config() -> None:

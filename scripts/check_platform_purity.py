@@ -67,6 +67,8 @@ FORBIDDEN: dict[str, dict[str, list[str]]] = {
     "windows": {
         "modules": [
             "vlt.platform.linux",          # PipeWire 设备枚举/采集/虚拟声卡（pw-dump/record/cat）
+            "vlt.platform.wayland",        # 原生 layer-shell 桌面叠加窗（libwayland-client）
+            "vlt.platform.x11",            # 原生 ARGB 桌面叠加窗（libX11）
             "vlt.output.openxr_overlay",   # 自建 OpenXR 手腕屏（pyopenxr + EGL/Wayland）
             "xr",                          # pyopenxr 本体
         ],
@@ -76,6 +78,7 @@ FORBIDDEN: dict[str, dict[str, list[str]]] = {
             b"pw-dump",
             b"pw-loopback",
             b"libwayland-client",
+            b"libX11.so.6",
             b"eglGetPlatformDisplay",
             b"GraphicsBindingEGLMNDX",
             b"XR_MNDX_egl_enable",

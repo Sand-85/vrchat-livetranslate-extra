@@ -48,6 +48,8 @@ def verify_imports(allow_fat: bool = False) -> int:
     import vlt.gui  # noqa: F401
     import vlt.output.openxr_overlay  # noqa: F401
     import vlt.platform  # noqa: F401
+    import vlt.platform.wayland  # noqa: F401 — 桌面字幕原生窗（漏收 = 用户侧回落 Tk）
+    import vlt.platform.x11  # noqa: F401 — 桌面字幕原生窗（X11 ARGB；漏收 = 回落 Tk）
     from vlt.output.openxr_overlay import layer_alpha_flags
 
     # ② 图层 alpha 开关必须在**打进包里的那份代码**里（少了它，手腕屏面板整层按不透明

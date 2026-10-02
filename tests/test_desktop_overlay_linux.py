@@ -73,6 +73,24 @@ def main() -> int:
             x11.XFree(ptr)
         return int(n.value)
 
+    class _XRectTest(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_short), ("y", ctypes.c_short),
+                    ("width", ctypes.c_ushort), ("height", ctypes.c_ushort)]
+
+    def raw_bounding_area(wid: int) -> int:
+        """形状蒙版（Bounding=0）的矩形覆盖面积 = 实心像素数。"""
+        n = ctypes.c_int()
+        order = ctypes.c_int()
+        ptr = xext.XShapeGetRectangles(dpy, ctypes.c_ulong(wid), 0,
+                                       ctypes.byref(n), ctypes.byref(order))
+        if not ptr:
+            return 0
+        try:
+            rects = ctypes.cast(ptr, ctypes.POINTER(_XRectTest))
+            return sum(int(rects[i].width) * int(rects[i].height) for i in range(n.value))
+        finally:
+            x11.XFree(ptr)
+
     def raw_wm_hints(wid: int) -> tuple[int, int]:
         atom = int(L._atom(x11, dpy, b"WM_HINTS"))
         a_type, a_fmt = ctypes.c_ulong(), ctypes.c_int()
@@ -134,6 +152,22 @@ def main() -> int:
         assert P.set_click_through(outer, False) is True
         x11.XSync(dpy, 0)
         assert raw_input_shape_count(outer) >= 1, "关了穿透但输入区没恢复"
+
+    @case("set_window_shape：1 位蒙版真的设上（面积=实心像素数；坏尺寸/坏句柄拒绝）")
+    def _( ) -> None:
+        w, h = GEOM[2], GEOM[3]                        # 200x100
+        row = bytes([0xFF] * 12 + [0x0F] + [0x00] * 12)   # 左半 100px 实心（LSB-first）
+        mask = row * h
+        assert P.set_window_shape(outer, mask, w, h) is True
+        x11.XSync(dpy, 0)
+        area = raw_bounding_area(outer)
+        assert area == 100 * h, f"蒙版面积不对：{area}（应 {100 * h}）"
+        assert P.set_window_shape(outer, b"\x00" * 10, w, h) is False, "坏尺寸应被拒"
+        assert P.set_window_shape(0, mask, w, h) is False, "坏句柄应被拒"
+        # 全实心恢复成整窗（后面的销毁检查不受形状影响）
+        assert P.set_window_shape(outer, b"\xff" * (w * h // 8), w, h) is True
+        x11.XSync(dpy, 0)
+        assert raw_bounding_area(outer) == w * h, "全实心没恢复整窗"
 
     @case("set_tool_window：WM_HINTS 的 input=False 真写上")
     def _( ) -> None:

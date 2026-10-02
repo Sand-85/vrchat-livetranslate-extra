@@ -141,8 +141,12 @@ jobs:
           # tk          —— tkinter 的运行时（setup-python 的解释器不一定自带 _tkinter）
           # libportaudio2 —— sounddevice 的运行时
           # libegl1 / libwayland-client0 —— 手腕屏后端 import 期就需要（真建会话会被防呆拦住）
+          # xdotool / imagemagick / picom —— X11 原生叠加窗测试（真指针 / 截图 / 合成）
+          # fonts-thai-tlwg —— 泰语用例需要「含泰文字形的字体」；CJK 字体（fonts-noto-cjk）
+          #                    不含泰文，缺了它 tests/test_thai_font.py 只能整组跳过
           sudo apt-get install -y --no-install-recommends \
-            xvfb fonts-noto-cjk tk libportaudio2 libegl1 libwayland-client0
+            xvfb fonts-noto-cjk fonts-thai-tlwg tk libportaudio2 libegl1 libwayland-client0 \
+            xdotool imagemagick picom
 
       - name: 安装依赖
         run: |

@@ -85,6 +85,94 @@ Sources are tried in the order below — **the first hit wins**:
 > Why: once a key lands in git history, deleting the file doesn't remove it — you'd have to rewrite history.
 > Better to stop it before commit.
 
+### For users outside mainland China: Alibaba Cloud Model Studio (International)
+
+**Why two lines**: the default "Qwen Cloud" line only serves mainland China — from abroad you cannot
+even open an account, and a direct connection is unreliable. Outside mainland China use
+**Alibaba Cloud Model Studio (International)** instead: the same models, the same realtime API — only
+the entry address and the account system differ. The two lines are **mutually exclusive**: exactly one
+of them is working at any moment, whichever you select in the app.
+
+**Three steps to sign up** (all inside the [Model Studio console · Model Market](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)):
+
+![Model Studio · Model Market — switch Region and UI language at the top right](../assets/modelstudio-market.png)
+
+1. Create a workspace (or just use the default one) and open it
+2. On its "Workspace Details" page, copy the **API Host prefix** — that leading part *is* the
+   **workspace ID**, e.g. `llm-xxxx`
+   (the full host looks like `llm-xxxx.ap-southeast-1.maas.aliyuncs.com`; take only the leading `llm-xxxx`)
+3. Create an API key (`sk-...`) **inside that same workspace** — the entry is `API-KEY` at the **bottom-left** of the console:
+
+![The API-KEY entry at the bottom-left of the console (red box)](../assets/modelstudio-api-key-entry.png)
+
+![Clicking it opens API Key management: create/copy your key here (you'll be asked to log in first)](../assets/modelstudio-api-key.png)
+
+**Four steps in the app**:
+
+1. `⚙ Settings → General → Service Line` → select "Alibaba Cloud Model Studio (International)"
+2. Enter `llm-xxxx` in "Workspace ID" (on the Qwen Cloud line this box is greyed out — nothing to fill in)
+3. Leave "Region" at the default **Singapore (`ap-southeast-1`)** — it is the only choice since this version (see below)
+4. Click "Save Line Settings", then paste your key into the "API key" box above and save it
+
+> 🔑 **The two keys are stored separately**: each line keeps its own key file
+> (`api_key.txt` / `api_key_bailian_intl.txt`), so switching back and forth **never** asks you to
+> re-enter a key. The status line "Current (line): source sk-****6789" follows the active line.
+> You must **start translation again** for a line change to take effect (if it is already running,
+> the app asks you to stop it first).
+
+**Region: only Singapore works** (and it is the only choice in the UI since this version)
+
+| Region id | City | This app |
+|---|---|---|
+| `ap-southeast-1` | Singapore (default) | ✅ everything |
+| `ap-northeast-1` | Japan (Tokyo) | ❌ no speech models |
+| `us-east-1` | US (Virginia) | ❌ no speech models |
+| `eu-central-1` | Germany (Frankfurt) | ❌ no speech models |
+| `cn-hongkong` | China (Hong Kong) | ❌ no speech models |
+
+> ⚠️ **Why Singapore only**: on Model Studio (International) **each region has its own endpoint,
+> API key and model list, and they cannot be used across regions** (official wording: *"Each region
+> has its own endpoint, API Key, and model list. These cannot be used across regions."*). The speech
+> chain this app needs — live interpretation `qwen3.8-livetranslate-flash-realtime`, voice preview /
+> typed speech `qwen3-tts-flash`, Omni voices `qwen3.5-omni-flash` — is deployed on the international
+> site **only in Singapore**. Tokyo, Virginia, Frankfurt and Hong Kong have no speech models at all
+> (Tokyo does not even have `qwen-mt-flash`, which typed translation uses). So the UI offers
+> **Singapore only**; if your config still holds an old region, pressing "Start translation" will
+> **stop you and tell you to change it** (it is never silently rewritten — the region goes into the
+> Host, so rewriting it would send your requests to the wrong domain).
+
+> ⚠️ **The key must belong to Singapore too**: a key only works in the region of the workspace it was
+> created in. A key from another region (say a workspace in Japan) fails to connect or returns
+> `Model not exist` — check in the console that both the workspace and the key are in Singapore.
+
+**The four corresponding `config.yaml` keys** (written in place when you click "Save Line Settings";
+no manual editing needed):
+
+```yaml
+session:
+  provider: qianwen          # line id: qianwen (Qwen Cloud) / bailian_intl (Model Studio International)
+  region: ap-southeast-1     # only meaningful for Model Studio (International)
+  workspace_id: ""           # workspace ID (llm-xxxx); leave empty on Qwen Cloud
+  base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime
+```
+
+After switching to Model Studio (International), `base_url` becomes the following (`{workspace_id}` is a
+**literal placeholder**, replaced only at connect time — so changing the workspace ID later does *not*
+mean editing this line):
+
+```yaml
+  base_url: wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime
+```
+
+**`base_url` is the only source of truth for where it actually connects**; `provider` only decides the
+UI defaults, which key file is used, and the validation rules (Model Studio (International) **must**
+have a workspace ID — without one, saving is refused in red and "Start translation" is blocked and
+takes you to the settings page).
+
+> 🔍 **Troubleshooting**: in the log, `[net] 线路=… host=…` is the address actually in use (the workspace ID is masked),
+> and `[gui] 服务线路已保存：…` is what the UI wrote to disk. If the two disagree, you changed the line
+> but have not restarted translation yet.
+
 ## 4. Self-check
 
 **Exe users**: launch it and confirm three things —
@@ -129,7 +217,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 - **Streaming display**: non-final deltas **redraw the same bubble in place** instead of appending a new one per delta
 - **Both at once**: two translation directions in one window (microphone → right side, game audio → left side); the second **starts with a 300 ms stagger** to avoid fighting over the audio device; if either side fails, the other keeps working
 - **Language mirroring**: one pair covers both directions — pick "Chinese → English" and the others-speak direction automatically becomes "English → Chinese".
-  Source language can be `Auto-detect` / Chinese / English / Japanese / Korean / French / German / Spanish / Russian (the target list is the same minus "Auto-detect");
+  Source language can be `Auto-detect` / Chinese / English / Japanese / Korean / French / German / Spanish / Russian / Thai (the target list is the same minus "Auto-detect");
   with `Auto-detect` as source, the other direction's target falls back to Chinese and the status bar says so. Changes **take effect immediately**, are written back to config, and persist across launches
 - **Settings dialog** (`⚙ Settings`): API key entry / clearing, three audio device dropdowns + `Refresh`, log area (`Export log bundle…`)
 - **Fine-tune panel** (`Fine-tune ▸`): wrist-display anchor + 14 sliders, **drag to hot-reload, no restart needed** (see "6. Configuration")
@@ -196,6 +284,13 @@ and **`run_overlay.bat`** (others speak → wrist display).
 > 📌 **No flag needed to pick audio devices**: choose in the GUI under "⚙ Settings" (the first dropdown entry, "Auto-detect", walks the fallback chain),
 > or edit `capture.mic_device` / `capture.loopback_device` in `config.yaml` directly.
 > What's stored is the **device name string**, not an index — indices shift wholesale with hot-plugs and session switches.
+>
+> ⚠️ **Only enabled devices are listed, and each sound card appears once**: the app lists just the
+> **WASAPI** endpoints — i.e. the ones **enabled** in Windows Sound settings (disabled endpoints are
+> not shown; enable them under "Sound → More sound settings" first). So you will no longer see the
+> same microphone two or three times with different sample rates, and the rate in parentheses **is
+> the rate that will actually be used** (usually 48000). Names saved in older configs still resolve
+> — they land on the same-named WASAPI endpoint.
 
 ---
 
@@ -317,10 +412,15 @@ as SteamVR's `setOverlayAlpha` on Windows.
 * **Config**: the `desktop_overlay:` section of `config.yaml` (`mode: latest` turns it into a
   lyric-style single line). Visual parameters (font / size / colours / lines / show-source)
   **inherit from `overlay:`** by default; override any of them in `desktop_overlay:`.
-* **Linux**: on an **X11 session** it matches Windows (window search / follow / click-through /
-  drag persistence / opacity); on a **Wayland session** (niri etc., the GUI runs through XWayland)
-  window placement and opacity are decided by the compositor and following will not work — see the
-  "Desktop subtitle" section of [GUIDE.linux.md](GUIDE.linux.md) for the exact boundaries.
+* **Linux**: on a **Wayland session** (niri / sway / Hyprland / KDE — compositors implementing
+  layer-shell) the caption runs as a **native overlay window**: per-pixel transparency (real
+  rounded corners, translucent plate), topmost, follows the game window, protocol-level
+  click-through, drag persistence — the same as Windows. X11 sessions (including GNOME/Weston with
+  XWayland) run a **native ARGB overlay window**: per-pixel alpha + X Shape click-through;
+  blending needs a compositor (picom etc.) — without one it automatically degrades to a 1-bit
+  shape mask that trims the transparent area (no black frame; corners become jagged, the plate
+  is opaque) and says so in the log. `desktop_overlay.backend` forces a specific path (handy when debugging
+  rendering) — see the "Desktop subtitle" section of [GUIDE.linux.md](GUIDE.linux.md) for boundaries.
 
 > ⚠️ VRChat must be in **windowed / borderless** mode (Unity `Fullscreen mode = 3`, the VRChat default).
 > In exclusive fullscreen any third-party topmost window gets covered — that's not a bug of this app.
@@ -427,7 +527,7 @@ vlt/
 
 server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
 scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    50 files, 411 test functions (all run offline; CI runs them file by
+tests/                    58 files, 467 test functions (all run offline; CI runs them file by
                           file, and does not include tests/test_engine.py, which needs a real API key)
 docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
 testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
@@ -478,7 +578,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.6.0 "RoomClient"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
   ```
 
 ---

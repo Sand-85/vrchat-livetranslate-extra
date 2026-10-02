@@ -52,17 +52,21 @@ def pick_output_device(
 ) -> tuple[int, str, int] | None:
     """按名称回退链找输出设备。返回 (index, name, sample_rate) 或 None。
 
-    devices 参数用于测试注入；为 None 时实时查询 sounddevice。
+    devices 参数用于测试注入；为 None 时走**平台层**的设备表（Windows 上它已经把设备
+    收敛到 WASAPI 已启用那一套 —— 不然同一块声卡会在 MME/DirectSound 下重复出现，
+    而回退链只取**第一条命中**，命中的往往是 MME 那条（44100Hz、延迟最高））。
     """
-    import sounddevice as sd
+    from .. import platform
 
     chain = [p.lower() for p in (patterns or OUTPUT_DEVICE_FALLBACK)]
-    devs = devices if devices is not None else list(sd.query_devices())
+    devs = devices if devices is not None else platform.device_backend().query_devices()
 
     for kw in chain:
         for i, d in enumerate(devs):
             if d.get("max_output_channels", 0) > 0 and kw in str(d.get("name", "")).lower():
-                return (i, str(d["name"]), int(d.get("default_samplerate", 48000)))
+                # ⚠️ 平台层过滤过 host API，列表下标**不再等于** PortAudio 索引 → 优先 pa_index
+                index = int(d.get("pa_index", i))
+                return (index, str(d["name"]), int(d.get("default_samplerate", 48000)))
     return None
 
 

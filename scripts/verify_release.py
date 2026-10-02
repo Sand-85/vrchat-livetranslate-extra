@@ -6,14 +6,13 @@
 （上游那份里的 `verify_appimage.py` 流程不适用于本仓库）。本版新增「多人房间文本中继」，
 needle 取新模块的类名 `RoomClient`（`vlt/room/client.py`，解包后在 `vlt/room/client.pyc` 里命中）。
 
-第二个参数 = 本版代码里必定出现的字符串。判据是「在解包出来的字节码里搜得到」——
-不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
+第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
+判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.6.1 "RoomClient"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.7.4 "needle1,needle2"
 
 ⚠️ **本仓库只发 Windows 版**：没有 AppImage / Linux 附件，所以本脚本就是全部验收面
-（上游那份里的 `verify_appimage.py` 流程不适用于本仓库）。本版新增「多人房间文本中继」，
-needle 取新模块的类名 `RoomClient`（`vlt/room/client.py`，解包后在 `vlt/room/client.pyc` 里命中）。
+（上游那份里的 `verify_appimage.py` 流程不适用于本仓库）。
 修复型发布没有新文案可挑时，用**修复引入的符号名**最可靠。
 
 复核项：
@@ -47,7 +46,9 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 TAG = sys.argv[1] if len(sys.argv) > 1 else "v0.0.2"
-NEEDLE = sys.argv[2] if len(sys.argv) > 2 else "俄语"      # 本版新功能里必定出现的字符串
+# 本版新功能里必定出现的字符串；**逗号可给多个**（每个都要命中才算过）
+NEEDLES = [s.strip() for s in
+           (sys.argv[2] if len(sys.argv) > 2 else "俄语").split(",") if s.strip()]
 ROOT = Path(__file__).resolve().parents[1]
 REPO_SLUG = "Sand-85/vrchat-livetranslate-extra"
 WORK = Path(tempfile.mkdtemp(prefix="verify_release_"))
@@ -149,11 +150,12 @@ else:
                        text=True, encoding="utf-8", errors="replace", timeout=900)
     check("pyinstxtractor-ng 解包成功", r.returncode == 0 and unpacked.is_dir(),
           f"rc={r.returncode}，产物目录 {'存在' if unpacked.is_dir() else '不存在'}")
-    needle = NEEDLE.encode("utf-8")
     pycs = [p for p in unpacked.rglob("*.pyc")] if unpacked.is_dir() else []
-    hits = [p.relative_to(unpacked).as_posix() for p in pycs if needle in p.read_bytes()]
-    check(f"exe 内含新增的「{NEEDLE}」（解包后在字节码里搜到）", bool(hits),
-          f"{len(pycs)} 个 pyc 里命中：{hits[:3]}")
+    for nd in NEEDLES:
+        hits = [p.relative_to(unpacked).as_posix() for p in pycs
+                if nd.encode("utf-8") in p.read_bytes()]
+        check(f"exe 内含新增的「{nd}」（解包后在字节码里搜到）", bool(hits),
+              f"{len(pycs)} 个 pyc 里命中：{hits[:3]}")
     # 顺带核：包内版本号是这次的、不是上一个版本的残留
     init = next((p for p in pycs if p.name == "__init__.pyc" and "vlt" in p.as_posix()), None)
     if init is not None:

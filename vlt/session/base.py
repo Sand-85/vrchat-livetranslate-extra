@@ -9,6 +9,8 @@ import abc
 from dataclasses import dataclass, field
 from typing import Callable
 
+from .. import endpoints
+
 # ---------------------------------------------------------------- 归一化事件
 
 
@@ -83,8 +85,13 @@ class SessionConfig:
     voice: str = "Tina"                 # 实测：不指定会抛 Voice 'Chelsie' is not supported
     hotwords: dict[str, str] = field(default_factory=dict)
     turn_detection: str | None = None   # None = 用服务端默认（3.8 为 speaker_detection）
-    base_url: str = "wss://maas.qianwenaiapi.com/api-ws/v1/realtime"
-    workspace_id: str = ""              # 非空则用 maas 域名
+    # base_url 是**唯一的地址真相源**（默认值也走 endpoints 派生，不再写第二份域名字面量）。
+    base_url: str = endpoints.default_base_url(endpoints.PROVIDER_QIANWEN)
+    workspace_id: str = ""              # 百炼线路的 base_url 占位符 {workspace_id} 用它替换
+    # provider / region **仅供日志与诊断**：实际连到哪永远以 base_url 为准（见 endpoints
+    # 模块的「宿主派生」口径）。切线路由界面同步改写 base_url，这里只是把选择带出来留痕。
+    provider: str = endpoints.DEFAULT_PROVIDER
+    region: str = endpoints.DEFAULT_REGION
     api_key: str = ""
     # 连接预算（RPM 10：每次 WS 连接算一次请求）
     reconnect_backoff: tuple[int, ...] = (2, 5, 10, 30)
@@ -101,11 +108,9 @@ class SessionConfig:
 
     @property
     def url(self) -> str:
-        base = self.base_url
-        if "{workspace_id}" in base:
-            if not self.workspace_id:
-                raise ValueError("该 base_url 需要 workspace_id（百炼控制台「业务空间详情」）")
-            base = base.replace("{workspace_id}", self.workspace_id)
+        # 占位符替换 / 缺 workspace_id 的报错口径统一交给 endpoints.resolve_base_url
+        # （全仓库只留一份），这里只负责拼上 ?model=。
+        base = endpoints.resolve_base_url(self.base_url, self.workspace_id)
         return f"{base}?model={self.model}"
 
 

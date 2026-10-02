@@ -132,3 +132,50 @@ class CaptureBackend(DeviceBackend, Protocol):
                  channels: int = 1, blocksize: int) -> AudioSource: ...
 
     def open_loopback(self, target: LoopbackTarget, *, blocksize: int) -> AudioSource: ...
+
+
+@runtime_checkable
+class DesktopWindow(Protocol):
+    """**原生桌面叠加窗**的窗口契约（Linux 的 Wayland / X11 两个后端共同遵守）。
+
+    共享模块（`vlt/output/desktop_overlay.py`）只认这套鸭子接口：门面
+    （`vlt.platform.create_desktop_window`）拿到的对象、以及将来任何新后端，
+    都要把下面的能力补齐 —— 缺哪个，对应的调用点就会炸给它看。
+
+    与 Tk 那条腿的关系：Tk 窗是**回落路径**（Windows / 没有原生能力的会话），
+    行为对等但实现完全不同，不走本契约。
+
+    ⚠️ 所有方法都在 GUI 线程被高频调用（`tick()` 每 50ms 一跳），实现里不许阻塞；
+    `close()` 幂等（重复调用不报错）。
+    """
+
+    #: 建起来了吗（建窗失败时必须为 False，调用方据此丢弃对象、回落 Tk）
+    available: bool
+
+    def set_panel(self, image: Any, alpha: float | None = None) -> None:
+        """贴一帧 RGBA 面板。`alpha` 是整层乘子（0~1）；**None = 保持当前值**。"""
+
+    def move(self, x: int, y: int) -> None:
+        """移到屏幕坐标（X11 语义；Wayland 后端自己换算到输出局部坐标系）。"""
+
+    def set_size(self, size: tuple[int, int]) -> None:
+        """改面板像素尺寸（配置热重载用）。"""
+
+    def set_alpha(self, alpha: float) -> None:
+        """整层透明度（0~1）。"""
+
+    def set_click_through(self, on: bool) -> None:
+        """鼠标穿透开关（拖动时临时关掉）。"""
+
+    def set_draggable(self, on: bool) -> None:
+        """解锁拖动；拖完由建窗时给的 `on_drag_end(x, y)` 回调报落点。"""
+
+    def tick(self) -> None:
+        """泵事件 + 出图（GUI 每 50ms 一跳）。"""
+
+    @property
+    def position(self) -> tuple[int, int]:
+        """当前屏幕坐标。"""
+
+    def close(self) -> None:
+        """销毁窗口；幂等。"""

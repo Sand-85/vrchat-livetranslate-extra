@@ -12,6 +12,14 @@
 两个方向都支持，实测：
   en→ru 译文 `Привет. Я посещаю ваш мир из Канады. …`
   ru→zh 译文 `你好。我来拜访你们的世界，来自加拿大。…`
+
+实测背景（2026-10-02）：用户要求加泰语（th）。同一个模型两个方向都支持，实测：
+  zh→th 译文 `สวัสดี, ฉันคือ Nixi. วันนี้เราจะมาทดสอบกัน …`
+  th→zh 译文 `你好，我叫尼克西。很高兴认识你。今天天气很好。`
+文本腿 `qwen-mt-flash`（zh↔th / en↔th 四条）与 `qwen3-tts-flash` 也都能处理 th。
+泰语比俄语多一层风险：**默认 CJK 字体（微软雅黑）不含泰文字形**，界面选得到、
+模型也翻得出，画到手腕屏上却是静默的豆腐块 —— 那一层由 `tests/test_thai_font.py`
+用位图比对钉住，本文件只守「语言表两侧都登记了 th」。
 """
 from __future__ import annotations
 
@@ -58,9 +66,55 @@ def test_name_lookup_does_not_silently_fall_back() -> None:
     print("  俄语取名不回落 OK")
 
 
+def test_thai_supported() -> None:
+    """用户要求：泰语（th）。模型侧两个方向都已实测，界面两个方向都必须能选到。"""
+    from vlt.gui import SOURCE_LANGS, TARGET_LANGS
+
+    assert TARGET_LANGS.get("泰语") == "th", f"目标语言表里没有泰语：{TARGET_LANGS}"
+    assert SOURCE_LANGS.get("泰语") == "th", f"源语言表里没有泰语：{SOURCE_LANGS}"
+    print("  泰语在源/目标两侧都可选 OK")
+
+
+def test_thai_name_lookup_does_not_silently_fall_back() -> None:
+    """★ 泰语取名不许回落 —— 回落是静默的（表里没 th 就默默给你「英语」/「自动检测」），
+    现象是「我明明选了泰语，它没生效」，和上面俄语那条是同一类坑。"""
+    from vlt.gui import _source_name, _target_name
+
+    assert _target_name("th") == "泰语", f"目标取名回落了：{_target_name('th')!r}"
+    assert _source_name("th") == "泰语", f"源取名回落了：{_source_name('th')!r}"
+    print("  泰语取名不回落 OK")
+
+
+def test_thai_has_ui_label_and_tts_name() -> None:
+    """泰语还得有两处配套词条，漏了同样是静默降级：
+
+    - 界面译名：`_lang_label("泰语")` 在 en/ja/ko/ru 四套词表下都必须翻出东西，
+      否则外国用户在方向下拉里看到的是汉字「泰语」（词表缺条目时 t() 原样返回）。
+    - TTS 语种名：`qwen3-tts-flash` 的 prompt 里要写自然语言语种名，
+      `LANG_NAMES` 缺 th 会退化成把语言码直接塞进 prompt。
+    """
+    from vlt import i18n
+    from vlt.gui import _lang_label
+    from vlt.tts import LANG_NAMES
+
+    want = {"zh": "泰语", "en": "Thai", "ja": "タイ語", "ko": "태국어", "ru": "Тайский"}
+    try:
+        for lang, label in want.items():
+            i18n.set_language(lang)
+            got = _lang_label("泰语")
+            assert got == label, f"界面语言 {lang} 下泰语显示 {got!r}，期望 {label!r}"
+    finally:
+        i18n.set_language("zh")
+    assert LANG_NAMES.get("th") == "Thai", f"TTS 语种名缺泰语：{LANG_NAMES.get('th')!r}"
+    print("  泰语界面译名（zh/en/ja/ko/ru）+ TTS 语种名 都就位 OK")
+
+
 if __name__ == "__main__":
     print("test_langs:")
     test_lang_tables_are_symmetric()
     test_russian_supported()
     test_name_lookup_does_not_silently_fall_back()
+    test_thai_supported()
+    test_thai_name_lookup_does_not_silently_fall_back()
+    test_thai_has_ui_label_and_tts_name()
     print("ALL PASSED")

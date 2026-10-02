@@ -32,11 +32,13 @@ import base64
 import json
 from typing import Iterator
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 ENDPOINT = "https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation"
 # cosyvoice 系走另一个端点（响应形态相同：output.audio.data / url）；同一网关，只是路径不同
-ENDPOINT_COSYVOICE = "https://maas.qianwenaiapi.com/api/v1/services/audio/tts/SpeechSynthesizer"
+COSYVOICE_PATH = "/api/v1/services/audio/tts/SpeechSynthesizer"
+ENDPOINT_COSYVOICE = "https://maas.qianwenaiapi.com" + COSYVOICE_PATH
 DEFAULT_MODEL = "qwen3-tts-flash"
 DEFAULT_VOICE = "Cherry"
 DEFAULT_TIMEOUT_S = 30.0
@@ -55,7 +57,7 @@ DEFAULT_OMNI_VOICE = "Tina"
 LANG_NAMES = {
     "zh": "Chinese", "en": "English", "ja": "Japanese", "ko": "Korean",
     "fr": "French", "de": "German", "es": "Spanish", "ru": "Russian",
-    "it": "Italian", "pt": "Portuguese",
+    "it": "Italian", "pt": "Portuguese", "th": "Thai",
 }
 
 _opener = None
@@ -133,11 +135,31 @@ def _validate(text: str, api_key: str) -> str:
     return text
 
 
+def _cosyvoice_url(endpoint: str | None) -> str:
+    """cosyvoice 系的端点：**同一 host、只换路径**。
+
+    上游 0.7.0 起「地址真相源只有 `session.base_url`」，多模态端点由调用方按线路派生后
+    传进来（`endpoints.multimodal_url`）。cosyvoice 与它同网关、只是路径不同，所以这里
+    从传进来的 endpoint 借 host —— **别再写第二份域名常量**（那正是上游禁止的漂移来源）。
+    没传 / 解析不出 host 时回落千问云的模块常量。
+    """
+    if not endpoint:
+        return ENDPOINT_COSYVOICE
+    parts = urlsplit(endpoint)
+    if not parts.netloc:
+        return ENDPOINT_COSYVOICE
+    return f"{parts.scheme or 'https'}://{parts.netloc}{COSYVOICE_PATH}"
+
+
 def _build_request(text: str, *, voice: str, model: str, api_key: str, language: str | None,
                    seed: int | None, instruction: str | None = None,
                    speech_rate: float | None = None,
-                   streaming: bool = False) -> Request:
+                   streaming: bool = False,
+                   endpoint: str | None = None) -> Request:
     """构造合成请求（两代后端 + 是否流式）。流式靠 SSE 头拿分片。
+
+    `endpoint`：多模态地址由**调用方**按当前线路从 base_url 的 host 派生后传入
+    （见 `endpoints.multimodal_url`）；不传则回落模块常量 `ENDPOINT`（千问云默认）。
 
     `speech_rate` 只对 qwen3-tts 系生效（实测 0.8 → 时长 +21%、1.2 → −19%，单调可控）；
     cosyvoice 端点不接受该参数，故只在 qwen 路径下发。
@@ -146,7 +168,7 @@ def _build_request(text: str, *, voice: str, model: str, api_key: str, language:
     voice = voice or DEFAULT_VOICE
     if str(model).lower().startswith("cosyvoice"):
         # cosyvoice 系：另一个端点、没有 language_type、多了 seed/instruction
-        endpoint = ENDPOINT_COSYVOICE
+        endpoint = _cosyvoice_url(endpoint)
         payload: dict = {"model": model,
                          "input": {"text": text, "voice": voice,
                                    "format": "wav", "sample_rate": SAMPLE_RATE}}
@@ -155,7 +177,7 @@ def _build_request(text: str, *, voice: str, model: str, api_key: str, language:
         if seed is not None:
             payload["parameters"] = {"seed": int(seed)}
     else:
-        endpoint = ENDPOINT
+        endpoint = endpoint or ENDPOINT
         payload = {"model": model, "input": {"text": text, "voice": voice}}
         lang_name = LANG_NAMES.get((language or "").lower())
         if lang_name:
@@ -217,16 +239,20 @@ def synthesize(
     instruction: str | None = None,
     speech_rate: float | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
+    endpoint: str | None = None,
 ) -> bytes:
     """整段合成：等到全部音频生成完才返回（首字延迟 ≈ 整段耗时，1.6~1.9s）。
 
     同步函数（调用方丢线程池里跑）；`language` 是目标语言码（zh/en/ja…），
     会映射成 service 的 `language_type`，拿不准就不传。
     `seed`/`instruction` 只对 `cosyvoice*` 生效（`seed=None` = 不传，即随机）。
+    `endpoint`：多模态地址由调用方按当前线路从 base_url 派生传入（`endpoints.multimodal_url`）；
+    不传回落千问云常量。
     """
     text = _validate(text, api_key)
     req = _build_request(text, voice=voice, model=model, api_key=api_key, language=language,
-                         seed=seed, instruction=instruction, speech_rate=speech_rate)
+                         seed=seed, instruction=instruction, speech_rate=speech_rate,
+                         endpoint=endpoint)
     try:
         with _get_opener().open(req, timeout=timeout) as r:
             body = r.read().decode("utf-8", "replace")
@@ -259,11 +285,16 @@ def synthesize_stream(
     instruction: str | None = None,
     speech_rate: float | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
+    endpoint: str | None = None,
 ) -> Iterator[bytes]:
     """流式合成（SSE）：边生成边 yield 24k 单声道 s16le 的 PCM 分片。
 
     为什么值得：首包 0.36~0.42s vs 整段 1.6~1.9s。虚拟声卡是抖动缓冲，拿到前几个
     分片就能开口，所以引擎默认走这条路 —— 打字后「开口」从 ~1.9s 压到 ~0.4s。
+
+    `endpoint`：同 `synthesize`（由调用方按线路派生传入，不传回落千问云常量）。
+    ⚠️ 退回整段的两条路径都要把 endpoint **一路透传**，否则兜底那条腿会悄悄
+    连回千问云 —— 用户切了海外线路却只有「偶尔降级的那几句」连错域名，最难查。
 
     退回策略（调用方不必写两套逻辑；**每一处降级都留痕，禁静默降级**）：
     - 服务端没给 `text/event-stream`（或一个分片都没拿到）→ 退回整段 `synthesize()`，yield 一整块；
@@ -276,7 +307,7 @@ def synthesize_stream(
     text = _validate(text, api_key)
     req = _build_request(text, voice=voice, model=model, api_key=api_key, language=language,
                          seed=seed, instruction=instruction, speech_rate=speech_rate,
-                         streaming=True)
+                         streaming=True, endpoint=endpoint)
     got = 0
     acc = bytearray()          # 已发出的音频（用于识别末尾的"整段汇总"分片）
     try:
@@ -340,7 +371,7 @@ def synthesize_stream(
         try:
             yield synthesize(text, voice=voice, model=model, api_key=api_key,
                              language=language, seed=seed, instruction=instruction,
-                             speech_rate=speech_rate, timeout=timeout)
+                             speech_rate=speech_rate, timeout=timeout, endpoint=endpoint)
         except TtsError:
             raise err from exc
         return
@@ -357,7 +388,7 @@ def synthesize_stream(
         _note("流式一个分片都没拿到 → 退回整段合成")
         yield synthesize(text, voice=voice, model=model, api_key=api_key, language=language,
                          seed=seed, instruction=instruction, speech_rate=speech_rate,
-                         timeout=timeout)
+                         timeout=timeout, endpoint=endpoint)
 
 
 def synthesize_omni(
@@ -367,11 +398,15 @@ def synthesize_omni(
     model: str = DEFAULT_OMNI_MODEL,
     api_key: str = "",
     timeout: float = DEFAULT_TIMEOUT_S,
+    endpoint: str | None = None,
 ) -> bytes:
     """用**非实时 Qwen-Omni** 合成一段文本 → 24kHz 单声道 s16le PCM（与 `synthesize` 同格式）。
 
     为何单独一条路：说话译音的音色（Tina/Cindy/Liora Mira…）属于 Qwen-Omni 系列，
     `qwen3-tts-flash` 不支持（跨模型混用会 InvalidParameter），要试听只能走 Omni。
+
+    `endpoint`：音色试听走的是 chat/completions（与打字翻译同一条），由调用方按线路
+    从 base_url 派生后传入（见 `endpoints.chat_url`）；不传回落模块常量 `OMNI_ENDPOINT`。
 
     实现要点（均有官方文档依据）：
     - Omni 是对话模型，音频输出**必须** `stream=True`；自己解 SSE，把分片的
@@ -395,7 +430,7 @@ def synthesize_omni(
         "stream": True,                             # ⚠️ Omni 音频输出必须流式
         "stream_options": {"include_usage": True},
     }
-    req = Request(OMNI_ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+    req = Request(endpoint or OMNI_ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                   headers={"Authorization": f"Bearer {api_key}",
                            "Content-Type": "application/json",
                            "Accept": "text/event-stream"}, method="POST")

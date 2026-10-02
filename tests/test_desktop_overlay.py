@@ -170,6 +170,34 @@ def test_clamp_alpha_bounds() -> None:
 
 
 # ---------------------------------------------------------------- 5. from_dict
+def test_alpha_mask_bits() -> None:
+    """形状蒙版字节口径：LSB-first、行末补零、阈值语义、只看面板自身 alpha。"""
+    from PIL import Image
+
+    from vlt.platform.overlay_pixels import alpha_mask_bits
+    # 9 像素宽（跨字节边界）2 行：第一行前 4 个实心，第二行全空
+    img = Image.new("RGBA", (9, 2), (0, 0, 0, 0))
+    for x in range(4):
+        img.putpixel((x, 0), (255, 0, 0, 255))
+    bits = alpha_mask_bits(img)
+    assert bits == b"\x0f\x00\x00\x00", bits     # LSB-first：0b0000_1111 → 0x0f
+    # 默认阈值 32：31 不算、32 算（只裁"几乎全透明"的外圈——
+    # 128 会误裁 border_alpha=120 的边框与低透明度底板，见函数文档）
+    img2 = Image.new("RGBA", (8, 1), (0, 0, 0, 0))
+    img2.putpixel((0, 0), (0, 0, 0, 31))
+    img2.putpixel((7, 0), (0, 0, 0, 32))
+    assert alpha_mask_bits(img2) == b"\x80", alpha_mask_bits(img2)
+    # 显式阈值仍然可用：127 不算、128 算
+    img2.putpixel((0, 0), (0, 0, 0, 127))
+    img2.putpixel((7, 0), (0, 0, 0, 128))
+    assert alpha_mask_bits(img2, threshold=128) == b"\x80", \
+        alpha_mask_bits(img2, threshold=128)
+    # 宽度不是 8 的倍数也照打包（行末补零）
+    img3 = Image.new("RGBA", (3, 1), (0, 0, 0, 255))
+    assert alpha_mask_bits(img3) == b"\x07", alpha_mask_bits(img3)
+    print("  alpha_mask_bits（LSB-first / 行补零 / 默认阈值 32 / 显式阈值）OK")
+
+
 def test_from_dict_defaults_inherit_and_override() -> None:
     # a) 缺段 → 全默认
     c = DesktopOverlayConfig.from_dict({})
@@ -224,6 +252,141 @@ def test_from_dict_defaults_inherit_and_override() -> None:
     assert abs(c.alpha - 0.5) < 1e-9, c.alpha      # None 视作「没写」→ 继承 visual
     assert c.font_size == 36, c.font_size
     print("  from_dict 默认 / visual 继承 / 显式覆盖 / 垃圾值回落 OK")
+
+
+def test_backend_config() -> None:
+    """`desktop_overlay.backend`：默认 auto、五个合法值都认、垃圾值回落，且**不从 overlay 段继承**。
+
+    `overlay.backend`（auto/null）是手腕屏那套，语义完全不同 —— 继承过来会让桌面字幕
+    跟着手腕屏的开关走，属于配置语义漂移。
+    """
+    from vlt.output.desktop_overlay import BACKENDS
+    assert BACKENDS == ("auto", "native", "tk", "wayland", "x11"), BACKENDS
+    assert DesktopOverlayConfig.from_dict({}).backend == "auto"
+    for want in ("native", "tk", "wayland", "x11"):
+        assert DesktopOverlayConfig.from_dict({"backend": want}).backend == want, want
+    assert DesktopOverlayConfig.from_dict({"backend": "glx"}).backend == "auto"    # 垃圾值
+    assert DesktopOverlayConfig.from_dict({}, visual={"backend": "null"}).backend == "auto"
+    print("  backend 配置（默认 / 五个合法值 / 垃圾值回落 / 不继承）OK")
+
+
+# ---------------------------------------------------------------- 原生窗接线
+
+
+class _FakeNative:
+    """假原生窗：只记录收到的调用（真协议由 tests/test_wayland_window.py 验）。"""
+
+    available = True
+
+    def __init__(self) -> None:
+        self.panels: list[tuple] = []
+        self.moves: list[tuple[int, int]] = []
+        self.sizes: list[tuple[int, int]] = []
+        self.alphas: list[float] = []
+        self.drag: list[bool] = []
+        self.ticks = 0
+        self.closed = 0
+        self.position = (11, 22)
+
+    def set_panel(self, image, alpha=1.0):  # noqa: ANN001
+        self.panels.append((tuple(image.size), float(alpha)))
+
+    def move(self, x, y):  # noqa: ANN001
+        self.moves.append((int(x), int(y)))
+        self.position = (int(x), int(y))
+
+    def set_size(self, size):  # noqa: ANN001
+        self.sizes.append(tuple(int(v) for v in size))
+
+    def set_alpha(self, alpha):  # noqa: ANN001
+        self.alphas.append(float(alpha))
+
+    def set_click_through(self, on):  # noqa: ANN001
+        pass
+
+    def set_draggable(self, on):  # noqa: ANN001
+        self.drag.append(bool(on))
+
+    def tick(self) -> None:
+        self.ticks += 1
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_native_window_wiring() -> None:
+    """backend=native 时共享模块走原生窗：贴图/移动/穿透/透明度/尺寸/关闭全部透传。"""
+    import vlt.platform as platform
+
+    fake = _FakeNative()
+    made: list[dict] = []
+
+    def _fake_create(**kw):  # noqa: ANN003
+        made.append(kw)
+        return fake
+
+    real = platform.create_desktop_window
+    platform.create_desktop_window = _fake_create
+    tmp = Path(tempfile.mkdtemp(prefix="vlt-native-cfg-"))
+    cfgp = tmp / "config.yaml"
+    cfgp.write_text("desktop_overlay:\n  size_px: [200, 100]\n", encoding="utf-8")
+    try:
+        cfg = DesktopOverlayConfig(enabled=True, backend="native", attach_to_game=False,
+                                   anchor="free", pos=(33, 44), size_px=(200, 100),
+                                   alpha=0.8, click_through=True)
+        ov = DesktopOverlay(cfg, config_path=cfgp)
+        assert ov.start() is True
+        assert made and made[0]["backend"] == "native", made
+        assert callable(made[0]["on_drag_end"]), "拖动回调没接线"
+        assert fake.moves and fake.moves[-1] == (33, 44), fake.moves
+        assert fake.panels and fake.panels[0][1] == 0.8, fake.panels
+        assert ov.position == (33, 44)
+
+        ov.tick()
+        assert fake.ticks >= 1, "原生窗的 tick 没被泵"
+        ov.set_draggable(True)
+        assert fake.drag == [True], fake.drag
+        ov.set_alpha(0.5)
+        assert fake.alphas and abs(fake.alphas[-1] - 0.5) < 1e-9, fake.alphas
+
+        # 热重载改尺寸 → 原生窗要跟着 set_size（不是只重渲染一张更大的图）
+        cfgp.write_text("desktop_overlay:\n  size_px: [220, 110]\n", encoding="utf-8")
+        ov._reload_config()
+        assert fake.sizes == [(220, 110)], fake.sizes
+
+        # 拖动落点 → 折算成配置（与 Tk 那条腿同一套逻辑）
+        ov._native_drag_end(120, 130)
+        assert ov.user_pos == (120, 130)
+
+        ov.close()
+        assert fake.closed == 1, fake.closed
+        ov.close()                      # 幂等
+        assert fake.closed == 1
+    finally:
+        platform.create_desktop_window = real
+    print("  原生窗接线：建窗/移动/贴图/拖动/透明度/热重载尺寸/关闭 OK")
+
+
+def test_native_backend_falls_back_to_tk() -> None:
+    """backend=native 但门面给不出原生窗 → 回落 Tk（仍能起来，后端自己留了原因）。"""
+    import vlt.platform as platform
+
+    root, _tk, why = _try_tk()
+    if root is None:
+        print(f"  跳过（无 Tk）：{why}")
+        return
+    real = platform.create_desktop_window
+    platform.create_desktop_window = lambda **kw: None       # noqa: ARG005
+    try:
+        cfg = DesktopOverlayConfig(enabled=True, backend="native", attach_to_game=False,
+                                   anchor="free", pos=(10, 10), size_px=(200, 100))
+        ov = DesktopOverlay(cfg, root=root)
+        assert ov.start() is True
+        assert ov._native is None and ov.available
+        ov.close()
+    finally:
+        platform.create_desktop_window = real
+    print("  backend=native 回落 Tk OK")
 
 
 # ---------------------------------------------------------------- 6. dry-run 出图
@@ -299,7 +462,7 @@ def _try_tk():
 
 def test_start_without_game_window() -> None:
     """CI 上没有 VRChat：不许抛异常，start() 仍要成功（退化成绝对定位）。"""
-    cfg = DesktopOverlayConfig(enabled=True, attach_to_game=True,
+    cfg = DesktopOverlayConfig(enabled=True, attach_to_game=True, backend="tk",
                                game_title="___vlt_不存在的窗口___",
                                size_px=(320, 120), pos=(40, 40))
     with tempfile.TemporaryDirectory() as tmp:
@@ -341,7 +504,7 @@ def test_tk_smoke_full_cycle() -> None:
         print(f"  跳过（无 Tk）：{why}")
         return
     try:
-        cfg = DesktopOverlayConfig(enabled=True, mode="conversation",
+        cfg = DesktopOverlayConfig(enabled=True, mode="conversation", backend="tk",
                                    attach_to_game=False, anchor="free",
                                    pos=(30, 30), size_px=(420, 180), alpha=0.9)
         ov = DesktopOverlay(cfg, root=root)
@@ -388,7 +551,8 @@ def test_attach_and_follow_fake_game_window() -> None:
         fake.geometry("500x300+40+40")
         fake.configure(bg="#204060")
         fake.update()                    # 真的映射出来，EnumWindows 才看得见
-        cfg = DesktopOverlayConfig(enabled=True, attach_to_game=True, follow=True,
+        cfg = DesktopOverlayConfig(enabled=True, attach_to_game=True, backend="tk",
+                                   follow=True,
                                    anchor="bottom_center", offset=(0, -40),
                                    size_px=(320, 120), game_title=FAKE_TITLE)
         ov = DesktopOverlay(cfg, root=root)
@@ -463,6 +627,7 @@ def test_work_area_follows_attached_monitor() -> None:
         fake.geometry("500x300+40+40")
         fake.update()
         cfg = DesktopOverlayConfig(enabled=True, attach_to_game=True, follow=False,
+                                   backend="tk",
                                    anchor="bottom_center", offset=(0, -40),
                                    size_px=(320, 120), game_title=FAKE_TITLE)
         ov = DesktopOverlay(cfg, root=root)
@@ -544,12 +709,29 @@ def test_facade_safe_defaults_without_backend() -> None:
         assert platform.is_window(1234) is False
         assert platform.set_click_through(1234, True) is False
         assert platform.set_tool_window(1234) is False
+        assert platform.set_window_shape(1234, b"\x00" * 25, 200, 100) is False   # 蒙版同样兜底
         assert platform.top_level_hwnd(4321) == 4321
         assert platform.screen_work_area() == (0, 0, 1920, 1080)
         assert platform.monitor_work_area(1234) == (0, 0, 1920, 1080)
+        assert platform.create_desktop_window((320, 120)) is None    # 没有原生窗 → 回落 Tk
     finally:
         platform.desktop_window_backend = real
     print("  门面兜底（没有桌面窗口后端时的安全默认值）OK")
+
+
+def test_create_desktop_window_refuses_in_test_process() -> None:
+    """测试进程里**不许**真的去连用户的合成器建原生窗（与虚拟声卡同一道防呆）。
+
+    实测踩过：旧的 GUI 用例在 Wayland 机器上会直接连用户正在用的 niri 弹出一块
+    layer 面。真协议验收（tests/test_wayland_window.py）直连**私有嵌套合成器**、
+    不走这个入口，所以这里可以一刀切拒绝。
+    """
+    if not platform.IS_LINUX:
+        print("  跳过（非 Linux：Windows 走 Tk，没有原生桌面窗）")
+        return
+    from vlt.platform import linux as lx
+    assert lx.create_desktop_window((64, 64)) is None, "测试进程居然建出了原生窗！"
+    print("  测试进程拒绝建原生窗（回落 Tk）OK")
 
 
 def test_monitor_work_area_falls_back_to_primary() -> None:
@@ -598,11 +780,13 @@ def test_shared_module_stays_platform_clean() -> None:
     src = (ROOT / "vlt" / "output" / "desktop_overlay.py").read_text(encoding="utf-8")
     for bad in ("import ctypes", "ctypes.", "windll", "user32",
                 "platform.win", "platform import win",
-                "EnumWindows", "GetWindowLong", "SetWindowLong"):
+                "EnumWindows", "GetWindowLong", "SetWindowLong",
+                "libwayland", "libX11", "zwlr_"):     # 原生后端只能走门面
         assert bad not in src, f"desktop_overlay.py 里出现了平台独占字样：{bad!r}"
     for name in ("desktop_window_backend", "find_game_window", "window_client_rect",
-                 "is_window", "set_click_through", "set_tool_window",
-                 "top_level_hwnd", "screen_work_area", "monitor_work_area"):
+                 "is_window", "set_click_through", "set_tool_window", "set_window_shape",
+                 "top_level_hwnd", "screen_work_area", "monitor_work_area",
+                 "create_desktop_window"):
         assert callable(getattr(platform, name, None)), f"platform 门面缺 {name}"
     if platform.IS_WINDOWS:
         from vlt.platform import win as w
@@ -721,7 +905,7 @@ def test_click_through_toggles_with_drag() -> None:
         print(f"  跳过（无 Tk）：{why}")
         return
     try:
-        cfg = DesktopOverlayConfig(enabled=True, attach_to_game=False,
+        cfg = DesktopOverlayConfig(enabled=True, attach_to_game=False, backend="tk",
                                    size_px=(320, 120), pos=(20, 20))
         ov = DesktopOverlay(cfg, root=root)
         assert ov.start() is True
@@ -777,7 +961,8 @@ def test_drag_moves_window_and_snaps_to_anchor() -> None:
         fake.title(FAKE_TITLE)
         fake.geometry("500x300+40+40")
         fake.update()
-        cfg = DesktopOverlayConfig(enabled=True, attach_to_game=True, follow=True,
+        cfg = DesktopOverlayConfig(enabled=True, attach_to_game=True, backend="tk",
+                                   follow=True,
                                    anchor="bottom_center", offset=(0, -40),
                                    size_px=(320, 120), game_title=FAKE_TITLE)
         ov = DesktopOverlay(cfg, root=root)
@@ -1126,7 +1311,11 @@ if __name__ == "__main__":
     test_clamp_stays_on_secondary_monitor()
     test_resolve_position_falls_back_to_cfg_pos()
     test_clamp_alpha_bounds()
+    test_alpha_mask_bits()
     test_from_dict_defaults_inherit_and_override()
+    test_backend_config()
+    test_native_window_wiring()
+    test_native_backend_falls_back_to_tk()
     test_dry_run_renders_frames()
     test_mode_dispatch_renders_differently()
     test_start_without_game_window()
@@ -1134,6 +1323,7 @@ if __name__ == "__main__":
     test_attach_and_follow_fake_game_window()
     test_work_area_follows_attached_monitor()
     test_facade_safe_defaults_without_backend()
+    test_create_desktop_window_refuses_in_test_process()
     test_monitor_work_area_falls_back_to_primary()
     test_shared_module_stays_platform_clean()
     test_win32_helpers_on_real_windows()

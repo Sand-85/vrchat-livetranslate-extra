@@ -26,7 +26,7 @@ from tkinter import messagebox, ttk
 
 import yaml
 
-from . import __version__, crashlog, i18n, tts, update_check
+from . import __version__, crashlog, endpoints, i18n, tts, update_check
 from .config import Direction, _as_str_map, DEFAULT_CONFIG, load_api_key, load_config
 from .config_io import (
     _fmt_scalar,
@@ -173,7 +173,116 @@ SPONSOR_QR_SIZE = 240          # 收款码等比缩放的目标边长（严禁�
 
 # ---- 千问云开通页（未配置 API key 时，状态按钮点击跳转）----
 # 链接逐字符照抄，不做任何 URL 解码/重组。
+# ⚠️ 这个常量**必须原样保留**：tests/test_api_key_gui.py 直接断言它的值，
+# 并断言未配置态点按钮时 webbrowser.open() 收到的就是它。千问云线路的实际跳转
+# 走下面的 `_signup_url()`（按当前线路取），在 provider=qianwen 时两者逐字符相同。
 QIANWEN_SIGNUP_URL = "https://www.qianwenai.com/"
+
+
+def _provider_choices() -> tuple[tuple[str, str], ...]:
+    """服务线路下拉的候选：`(显示名, 线路 id)`。
+
+    为什么是**函数**而不是常量表：显示名要走 `t()`，而模块 import 发生在
+    `i18n.set_language()` 之前，常量表会把中文冻在里面（英文界面就漏翻了）。
+
+    ⚠️ 配置里只写 id（`qianwen` / `bailian_intl`）：把显示名当 key 写进 config.yaml 的话，
+    用户一换界面语言配置就"失效"了 —— 同一件事存两份迟早漂移（见 endpoints.py 的铁律）。
+    """
+    return ((t("千问云"), endpoints.PROVIDER_QIANWEN),
+            (t("阿里云百炼·国际版"), endpoints.PROVIDER_BAILIAN_INTL))
+
+
+def _region_choices() -> tuple[tuple[str, str], ...]:
+    """地域下拉的候选：`(显示名, 地域 id)`。**只列能跑通全套模型的地域**。
+
+    依据见 `endpoints.REGIONS`：国际站的语音链路（实时同传 / TTS / Omni）只有新加坡有部署，
+    其余地域平台虽然存在、本程序却跑不通 —— 所以不放进候选里让人选。
+
+    显示名刻意用 `endpoints.REGIONS` 里的**纯 ASCII 英文名**、不进词表：地域是阿里云
+    的产品术语，五语各译一套只会让人对不上控制台里的原文（`Singapore (ap-southeast-1)`
+    在任何语言下都能一眼认出）。
+    """
+    return tuple((f"{name} ({rid})", rid) for rid, name in endpoints.REGIONS)
+
+
+def _region_display(rid: str) -> str:
+    """地域 id → 下拉里显示的那个串。**对已收口掉的老地域也成立**（绝不 KeyError）。
+
+    老配置里可能存着东京这种地域：直接 `_region_id_to_name[region]` 会 KeyError ——
+    设置页当场打不开，用户连「哪里不对、怎么改」都看不到。
+    """
+    return f"{endpoints.region_name(rid)} ({rid})"
+
+
+def _mask_workspace_id(workspace_id: str) -> str:
+    """业务空间 ID 打码（**日志专用**）：只留前 6 字符 + `…`。
+
+    它就是账号标识，整串打进日志等于把它写进用户磁盘上的日志文件；而排查
+    "切了线路没生效" 只需要能和控制台里那一条对上，前 6 字符足够。
+    （口径与 `endpoints._mask_workspace_in_host` 一致，两处都只露前 6 字符。）
+    """
+    s = str(workspace_id or "").strip()
+    return f"{s[:6]}…" if s else ""
+
+
+def _ws_id_error_text(code: str) -> str:
+    """业务空间 ID 校验失败的原因码 → 给用户看的一句话（**字面量 key，走词表**）。
+
+    为什么每个分支都写成字面量 `t("…")` 而不是 t(变量)：i18n 守卫是按 AST 扫
+    「源码里出现的字面量 key」来查漏译的，动态拼出来的 key 扫不到 → 会静默漏译。
+    """
+    if code == "key_like":
+        return t("业务空间 ID 填的是 API key —— 那里要填 API Host 的第一段"
+                 "（形如 llm-xxxx），key 请填在上面的「API key」框里")
+    if code == "too_long":
+        return t("业务空间 ID 太长 —— 它只是 API Host 的第一段（形如 llm-xxxx），"
+                 "不要把别的长串整段粘进来")
+    if code == "bad_chars":
+        return t("业务空间 ID 只能含字母、数字和短横线（形如 llm-xxxx）")
+    if code == "edge_dash":
+        return t("业务空间 ID 不能以短横线开头或结尾（形如 llm-xxxx）")
+    return t("百炼国际版必须填业务空间 ID（控制台「业务空间详情 → API Host」的前缀）")
+
+
+def _region_error_text(region: str) -> str:
+    """地域不可用时给用户看的一句话（**字面量 key，走词表**）。
+
+    为什么国际版只剩新加坡能选：本程序要用的语音链路（实时同传 / TTS / Omni）在国际站
+    只有新加坡有部署（官方模型页逐个核对过，2026-10-02）。别的地域选下去，表现是
+    「连不上 / 试听 404 / Model not exist」这类和地域看不出关系的错，所以要在前面拦。
+    """
+    return t("地域「{region}」用不了 —— 本程序要用的语音模型（实时同传 / 试听音色 / 打字译音）"
+             "国际站只有新加坡有部署。请在百炼国际版控制台把业务空间建在 Singapore "
+             "(ap-southeast-1)，并在该业务空间下创建 API key（key 不能跨地域使用）",
+             region=endpoints.region_name(region))
+
+
+def _persist_provider(cfg_path: "Path", provider: str, region: str,
+                      workspace_id: str, base_url: str) -> None:
+    """把线路四项就地写回 config.yaml；**先复检、后写盘**，写不进去就抛 RuntimeError。
+
+    为什么要复检：`_yaml_set_in_text` 找不到路径时**原样返回**（不报错、不抛），
+    于是 `_write_config_text` 写出的是同一份文本 —— 表现为「点了保存、界面还说成功、
+    配置其实一点没变」，正是本仓库最忌讳的静默降级。老版本 config.yaml 若没有
+    `session:` 段就会踩这条（room 段有补建逻辑，session 段没有）。
+
+    复检放在**写盘之前**：解析的是即将写入的文本，失败时磁盘上的文件一个字没动，
+    所以调用方那句「配置未改动」是真话。
+    """
+    text = cfg_path.read_text(encoding="utf-8")
+    text = _yaml_set_in_text(text, ["session", "provider"], provider)
+    text = _yaml_set_in_text(text, ["session", "region"], region)
+    # 业务空间 ID 走 _yaml_quote：从控制台复制时可能带上空格/引号，裸写会破坏 YAML
+    text = _yaml_set_in_text(text, ["session", "workspace_id"], _yaml_quote(workspace_id))
+    # base_url **裸写**：与模板口径一致（加引号会让手改配置的人以为它是个字符串常量）
+    text = _yaml_set_in_text(text, ["session", "base_url"], base_url)
+    got = (yaml.safe_load(text) or {}).get("session") or {}
+    if got.get("provider") != provider or got.get("base_url") != base_url:
+        raise RuntimeError(
+            "config.yaml 里没有 session: 段（或键名不符），线路写不进去 —— "
+            "请手工补一段 session: ，或删掉该文件让它按模板重新生成")
+    _write_config_text(cfg_path, text)
+
 
 # 老用户的 config.yaml（旧模板生成）没有 room 段，而 config_io 的就地改文本
 # 「找不到路径就原样返回」→ 表现为静默不保存。勾选房间时若发现缺段，就用这段补建
@@ -236,6 +345,7 @@ SOURCE_LANGS = {
     "德语": "de",
     "西班牙语": "es",
     "俄语": "ru",
+    "泰语": "th",
 }
 
 TARGET_LANGS = {
@@ -247,6 +357,7 @@ TARGET_LANGS = {
     "德语": "de",
     "西班牙语": "es",
     "俄语": "ru",
+    "泰语": "th",
 }
 
 
@@ -727,6 +838,9 @@ class TranslationGUI:
         style.configure("ChipWarn.TLabel", font=FONT_STATUS, foreground=COLOR_WARN)
         # 设置弹窗里「保存失败」这类就地提示：警示色，但只是文字（不抢按钮的视觉重量）
         style.configure("Warn.TLabel", font=FONT_STATUS, foreground=COLOR_WARN)
+        # 「保存被拒 · 什么都没写」的就地红字：警示橙只表达"注意一下"，而这种情况下
+        # 配置**一点没变**（用户以为切了线路、其实还在老线路上）—— 必须比橙更重一档。
+        style.configure("Error.TLabel", font=FONT_STATUS, foreground=COLOR_ERROR)
         # 未配置按钮：暗橙底 + 警示橙字，悬停/按下亮一档 —— 警示色系但不刺眼。
         style.configure("ChipWarn.TButton", font=FONT_STATUS, foreground=COLOR_WARN,
                         background="#33291c", borderwidth=0, focusthickness=0,
@@ -1759,7 +1873,11 @@ class TranslationGUI:
 
     # ---------------------------------------------------------------- 设置弹窗 · 常规页
     def _build_settings_general(self, body: ttk.Frame) -> None:
-        """「常规」页：API key（新用户第一件事，放最前）+ 界面语言。"""
+        """「常规」页：API key（新用户第一件事，放最前）→ 服务线路 → 界面语言。
+
+        线路排在 key 紧后面：它决定「连哪个域名 + 用哪一把 key」，和上面那块本来就是
+        同一件事的两半 —— 挨着放，用户才不会"填了海外的 key 却还连着国内"。
+        """
         # ---- API Key ----
         # 安全约束（与 vlt/credentials.py 一致）：
         # - 输入框用 ● 掩码；保存成功后**立刻清空输入框**，明文不留在界面上；
@@ -1788,6 +1906,11 @@ class TranslationGUI:
 
         ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
 
+        # ---- 服务线路（千问云 / 阿里云百炼·国际版，互斥）----
+        self._build_provider_section(body)
+
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+
         # ---- 界面语言 ----
         # 本批只做到「重启后生效」：控件文案全在建窗时按当前语言取词，
         # 运行中换语言不重建树（正在进行的翻译/设备列表状态绝不受影响）。
@@ -1806,6 +1929,216 @@ class TranslationGUI:
                                        style="Muted.TLabel", justify=tk.LEFT,
                                        wraplength=SETTINGS_WRAP)
         self._ui_lang_note.pack(anchor=tk.W)
+
+    # ---------------------------------------------------------------- 设置弹窗 · 服务线路
+    def _build_provider_section(self, body: ttk.Frame) -> None:
+        """「服务线路」区：千问云 / 阿里云百炼·国际版（**互斥**，同一时刻只有一条在工作）。
+
+        控件每次都重建（弹窗每次打开都走一遍 `_build_settings_general`），所以状态一律
+        从 `self._cfg.session_base` 回填 —— 不在别处另存一份，免得留脏值。
+        """
+        ttk.Label(body, text=t("服务线路"), style="Section.TLabel").pack(anchor=tk.W)
+
+        # 显示名 ↔ 线路 id：两张反向字典都每次重建（显示名随界面语言变）。
+        # ⚠️ 写进 config.yaml 的**只有 id**（见 _provider_choices 的说明）。
+        self._provider_name_to_id = dict(_provider_choices())
+        self._provider_id_to_name = {pid: name
+                                     for name, pid in self._provider_name_to_id.items()}
+        cur = self._provider()
+        self._provider_var = tk.StringVar(value=self._provider_id_to_name[cur])
+        self._provider_combo = ttk.Combobox(body, values=list(self._provider_name_to_id),
+                                            state="readonly",
+                                            textvariable=self._provider_var)
+        self._provider_combo.pack(fill=tk.X, pady=(8, 4))
+        self._provider_combo.bind("<<ComboboxSelected>>", self._on_provider_change)
+
+        # 两项输入用 grid 同一列：标签长度随语言不同（"ID de l'espace de travail" 之类）时
+        # 控件左缘也照样对齐；列宽由最长的标签自己撑，**不写死宽度**（俄语会超）。
+        form = ttk.Frame(body)
+        form.pack(fill=tk.X, pady=(4, 0))
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(form, text=t("业务空间 ID"), style="Dim.TLabel").grid(
+            row=0, column=0, sticky="w", pady=3)
+        self._workspace_var = tk.StringVar(
+            value=str(self._cfg.session_base.get("workspace_id") or ""))
+        # 宽度与 API key 输入框同量级（34）：空间 ID 是 `llm-` 开头的短串，再宽只是空白
+        self._workspace_entry = ttk.Entry(form, textvariable=self._workspace_var,
+                                          width=34, style="Key.TEntry", font=FONT_UI)
+        self._workspace_entry.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=3)
+        # 右键粘贴：空间 ID 是从百炼控制台复制来的，粘贴是这里最高频的动作
+        self._attach_edit_menu(self._workspace_entry)
+
+        ttk.Label(form, text=t("地域"), style="Dim.TLabel").grid(
+            row=1, column=0, sticky="w", pady=3)
+        self._region_name_to_id = dict(_region_choices())
+        self._region_id_to_name = {rid: name
+                                   for name, rid in self._region_name_to_id.items()}
+        region = endpoints.normalize_region(self._cfg.session_base.get("region"))
+        # 老配置里存着已收口掉的地域（东京等）时：**显示出来**（藏起来会让用户以为配置被改了），
+        # 但**不放进候选**（不给再选回去的机会）；能不能用由保存/开始翻译两处守卫拦。
+        # 名字→id 表里必须留一条，否则 `_selected_region()` 认不出来会回落成新加坡 ——
+        # 那等于把请求悄悄打到另一个地域的域名上（地域进 host）。
+        if region not in self._region_id_to_name:
+            self._region_name_to_id[_region_display(region)] = region
+        self._region_var = tk.StringVar(value=_region_display(region))
+        self._region_combo = ttk.Combobox(form, values=list(self._region_name_to_id),
+                                          state="readonly", textvariable=self._region_var)
+        self._region_combo.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=3)
+
+        ttk.Label(body,
+                  text=t("百炼控制台「业务空间详情」里的 API Host 前缀（形如 llm-xxxx）"),
+                  style="Muted.TLabel", justify=tk.LEFT,
+                  wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
+
+        save_row = ttk.Frame(body)
+        save_row.pack(fill=tk.X, pady=(10, 0))
+        self._provider_save_btn = ttk.Button(save_row, text=t("保存线路设置"),
+                                             command=self._on_save_provider)
+        self._provider_save_btn.pack(side=tk.RIGHT)
+        # 就地提示（红字）：保存被拒时必须**在这一屏里看得见**"什么都没写"——
+        # 只在状态栏闪一行会被漏掉，而漏掉的后果是用户以为已经切到海外线路了。
+        # 常态是空文本，但控件常驻（占一行高），出提示时布局不跳。
+        self._provider_err = ttk.Label(body, text="", style="Error.TLabel",
+                                       justify=tk.LEFT, wraplength=SETTINGS_WRAP)
+        self._provider_err.pack(anchor=tk.W, pady=(6, 0))
+        if endpoints.region_supported(region):
+            # 老配置存着已收口掉的地域（东京等）：一进设置页就把原因讲清，不等用户点保存
+            self._provider_err.configure(text=_region_error_text(region))
+
+        self._sync_provider_controls(cur)
+
+    def _sync_provider_controls(self, provider: str) -> None:
+        """按线路切「业务空间 ID / 地域」的可用态：**只有百炼国际版用得上这两项**。
+
+        千问云线路把它们**灰掉**而不是藏起来：藏起来会让人以为"这功能没了"，
+        灰掉配上下面那行说明，反而直接讲清了"这是百炼专用的"。
+        顺手清掉就地红字 —— 千问云线路不可能触发那条校验，留着就是过期信息。
+        """
+        intl = provider == endpoints.PROVIDER_BAILIAN_INTL
+        self._workspace_entry.configure(state="normal" if intl else tk.DISABLED)
+        # Combobox 灰掉必须用 disabled：readonly 虽然不可编辑，下拉却照样能点开
+        self._region_combo.configure(state="readonly" if intl else tk.DISABLED)
+        if not intl:
+            self._provider_err.configure(text="")
+
+    def _on_provider_change(self, _event=None) -> None:
+        """下拉选完线路：**只切控件可用态，不写盘** —— 落盘统一走「保存线路设置」。
+
+        为什么不即时保存：百炼线路还差一个业务空间 ID 才算完整，选一半就写盘会把
+        config.yaml 写成「provider=bailian_intl 但 base_url 还是千问云域名」的
+        自相矛盾状态（config.load 会为此打一行 WARN，用户看着莫名其妙）。
+        """
+        self._sync_provider_controls(self._selected_provider())
+
+    def _selected_provider(self) -> str:
+        """下拉当前选中的线路 id（认不出来就回落千问云，绝不 KeyError）。"""
+        return self._provider_name_to_id.get(self._provider_var.get(),
+                                             endpoints.PROVIDER_QIANWEN)
+
+    def _selected_region(self) -> str:
+        """下拉当前选中的地域 id（认不出来就回落默认地域，绝不 KeyError）。"""
+        return self._region_name_to_id.get(self._region_var.get(), endpoints.DEFAULT_REGION)
+
+    def _on_save_provider(self) -> None:
+        """把线路四项（provider / region / workspace_id / base_url）就地写回 config.yaml。
+
+        ⚠️ 百炼国际版**缺业务空间 ID 或形态不对**（填成了 API key / 太长 / 有非法字符）时
+        **什么都不写**（响亮失败）：静默回落千问云的话，用户看到的就是"我明明选了海外线路，
+        怎么还连国内" —— 那比直接报错难查十倍；而形态不对还硬写，会把一个连不上的 host
+        留在配置里，报错推迟到建链那一刻。
+
+        写法照 `_save_room_cfg`：就地改文本，保住注释与键顺序。`session:` 段是模板的
+        第一段，一定存在，**不需要**像 room 段那样补建。
+        """
+        provider = self._selected_provider()
+        region = self._selected_region()
+        workspace_id = (self._workspace_var.get() or "").strip()
+        if provider == endpoints.PROVIDER_BAILIAN_INTL:
+            code = endpoints.validate_workspace_id(workspace_id)
+            if code:
+                # 形态不对（填成了 API key / 太长 / 有非法字符）与「没填」一样**什么都不写**：
+                # 写下去的话 base_url 会拼出一个连不上的 host，报错还发生在建链那一刻。
+                msg = t("❌ 没保存：{msg}", msg=_ws_id_error_text(code))
+                self._provider_err.configure(text=msg)
+                self._set_status("error", msg)
+                print(f"[gui] ❌ 线路保存被拒：业务空间 ID 不合法（{code}）", flush=True)
+                return
+            why = endpoints.region_supported(region)
+            if why:
+                # 地域进 host（`{workspace_id}.{region}.maas.aliyuncs.com`）：写下去就是个
+                # 连不上的地址，且报错和「地域没部署模型」看不出关系 → 一样什么都不写。
+                msg = t("❌ 没保存：{msg}", msg=_region_error_text(region))
+                self._provider_err.configure(text=msg)
+                self._set_status("error", msg)
+                print(f"[gui] ❌ 线路保存被拒：地域不支持（region={region} 原因={why}）",
+                      flush=True)
+                return
+        self._provider_err.configure(text="")
+        # base_url 里刻意保留**字面量** `{workspace_id}` 占位符（连接时才替换）：
+        # 这样用户日后换空间 ID 不必回头改 base_url（见 endpoints.default_base_url）。
+        base_url = endpoints.default_base_url(provider, workspace_id, region)
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            print(f"[gui] ❌ 线路没保存：找不到 {p.name}（配置尚未生成）", flush=True)
+            self._provider_err.configure(text=t("❌ 没保存：{msg}", msg=p.name))
+            self._set_status("error", t("❌ 没保存：{msg}", msg=p.name))
+            return
+        try:
+            _persist_provider(p, provider, region, workspace_id, base_url)
+        except Exception as exc:                # noqa: BLE001  写盘失败只留痕，配置保持原样
+            print(f"[gui] ❌ 保存服务线路失败（配置未改动）：{exc}", flush=True)
+            self._provider_err.configure(text=t("❌ 没保存：{msg}", msg=exc))
+            self._set_status("error", t("❌ 没保存：{msg}", msg=exc))
+            return
+        # 写完同步内存：不同步的话「开始翻译」用的还是启动时那份（base_url 尤其致命）
+        self._cfg.session_base["provider"] = provider
+        self._cfg.session_base["region"] = region
+        self._cfg.session_base["workspace_id"] = workspace_id
+        self._cfg.session_base["base_url"] = base_url
+        # key 按线路分槽：线路一变，该显示/该用的就是**另一个槽**里那把 key
+        self._refresh_key_status()
+        self._refresh_api_key_in_cfg()
+        self._sync_provider_controls(provider)
+        if any(e.running for e in self._engines):
+            # 会话的 base_url 在建链时就定死了，运行中改配置不会重连 —— 必须明说
+            self._set_status("warn", t("当前线路需要先停止翻译，改完再重新开始"))
+            print("[gui] ⚠️ 服务线路已保存，但翻译正在进行中 —— 需先停止再重新开始才生效",
+                  flush=True)
+        else:
+            self._set_status("ok", t("已切换到 {line}（重启翻译后生效）",
+                                     line=self._provider_label()))
+        # 留痕：业务空间 ID **只打前 6 字符**（它是账号标识，绝不整串进日志）
+        print(f"[gui] 服务线路已保存：provider={provider} region={region} "
+              f"workspace_id={_mask_workspace_id(workspace_id)} base_url={base_url}",
+              flush=True)
+
+    # ---------------------------------------------------------------- 线路取值助手
+    def _provider(self) -> str:
+        """当前线路 id（脏值由 endpoints 归一化 + 留痕，这里绝不自己判第二遍）。"""
+        return endpoints.normalize_provider(self._cfg.session_base.get("provider"))
+
+    def _provider_label(self) -> str:
+        """当前线路的**界面显示名**（按界面语言取词）。给用户看的文案一律走这里，
+        日志才用 `endpoints.provider_name()`（那份恒为中文）。"""
+        for name, pid in _provider_choices():
+            if pid == self._provider():
+                return name
+        return t("千问云")          # 走不到：_provider() 已归一化成合法 id
+
+    def _current_key_slot(self) -> str:
+        """当前线路的密钥槽名。千问云与百炼的 key 不通用 → 分槽各存一份，切线路不用重填。
+
+        ⚠️ 名字里必须带 `current`：`self._key_slot` 已经被主界面第二行的**控件容器**
+        （一个 ttk.Frame）占了，方法同名会被那个实例属性盖掉 → 调用即
+        `TypeError: 'Frame' object is not callable`（i18n 那批真窗口用例当场就红）。
+        """
+        return endpoints.key_slot(self._provider())
+
+    def _signup_url(self) -> str:
+        """当前线路的开通页地址。qianwen 时与 `QIANWEN_SIGNUP_URL` 逐字符相同
+        （那个常量被测试直接断言，故保留不删）。"""
+        return endpoints.signup_url(self._provider())
 
     # ---------------------------------------------------------------- 设置弹窗 · 音频页
     def _build_settings_audio(self, body: ttk.Frame) -> None:
@@ -2224,11 +2557,29 @@ class TranslationGUI:
             return
         print(f"[gui] 已打开日志文件夹：{d}", flush=True)
 
+    # `_open_settings(page=…)` 的参数 → tab 标题。**新增可跳转的页只在这里加一行**：
+    # tab 是用标题登记的（`_settings_tabs[t(标题)]`），把映射散在各个调用点就会漂移。
+    _SETTINGS_PAGE_TAB = {"room": "房间", "general": "常规"}
+
+    def _select_settings_page(self, page: str) -> None:
+        """把设置弹窗切到某一页；切页失败只留痕，**绝不拦住弹窗打开**。"""
+        title = self._SETTINGS_PAGE_TAB.get(page)
+        if not title:
+            return                              # 没登记的 page：保持当前页，不自作主张
+        try:
+            tab = self._settings_tabs.get(t(title))
+            if tab is not None and self._settings_nb is not None:
+                self._settings_nb.select(tab)
+        except Exception as exc:  # noqa: BLE001 — 切页失败不该拦住弹窗打开
+            print(f"[ui] ⚠️ 设置弹窗切到「{title}」页失败（不影响使用）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+
     def _open_settings(self, page: str | None = None) -> None:
         """打开设置弹窗（已建好，只是显示出来），定位到主窗口附近且**整窗都在屏幕内**。
 
-        `page`：打开后停在哪一页（目前只用 `"room"`）。点「连接房间」却没填房间码时，
-        光弹一句提示等于让用户自己去找那个输入框 —— 直接把他送到该填的那一页。
+        `page`：打开后停在哪一页（见 `_SETTINGS_PAGE_TAB`）。点「连接房间」却没填房间码、
+        或点「开始翻译」却缺业务空间 ID 时，光弹一句提示等于让用户自己去找那个输入框 ——
+        直接把他送到该填的那一页。
         """
         win = self._settings_win
         self._refresh_key_status()          # 每次打开都刷新来源/打码显示
@@ -2250,14 +2601,8 @@ class TranslationGUI:
         win.deiconify()
         win.lift()
         win.focus_set()
-        if page == "room":
-            try:
-                tab = self._settings_tabs.get(t("房间"))
-                if tab is not None and self._settings_nb is not None:
-                    self._settings_nb.select(tab)
-            except Exception as exc:  # noqa: BLE001 — 切页失败不该拦住弹窗打开
-                print(f"[ui] ⚠️ 设置弹窗切到「房间」页失败（不影响使用）："
-                      f"{type(exc).__name__}: {exc}", flush=True)
+        if page:
+            self._select_settings_page(page)
         # 建窗时它处于 withdraw 状态，那时调 DWM 拿不到有效 hwnd、会静默失败
         # （实测弹窗标题栏仍是浅色、跟主窗口不一致）。显示出来之后再设一次。
         self._apply_dark_titlebar(win)
@@ -3076,17 +3421,24 @@ class TranslationGUI:
 
         写两处：设置弹窗里的完整状态（_key_status）+ 主界面第二行右侧的状态槽位
         ——已配置时显示纯展示标签（_key_chip），未配置时换成可点按钮（_key_btn，
-        点击打开千问云开通页）；保存/清除 key 后本方法会被再次调用，界面立刻切换。
+        点击打开**当前线路**的开通页）；保存/清除 key 后本方法会被再次调用，界面立刻切换。
+
+        ⚠️ key 按线路分槽（`_current_key_slot()`）：千问云与百炼各存一份、互不通用。所以这里
+        读的是**当前线路那一槽**，切完线路再调一次，显示的就是另一把 key 的状态。
         """
+        slot = self._current_key_slot()
         try:
             from .credentials import key_source
 
-            src, masked = key_source()
+            src, masked = key_source(slot=slot)
         except Exception as exc:  # noqa: BLE001
             self._key_status.config(text=t("⚠️ 读取 key 状态失败：{msg}", msg=exc))
             return
         if masked:
-            self._key_status.config(text=t("当前：{src} {masked}", src=src, masked=masked))
+            # 带上线路名：两条线路各有一把 key，不写清是哪条的话"我明明填了 key"
+            # 就会变成"界面说没填" —— 那其实是另一条线路的槽空着。
+            self._key_status.config(text=t("当前（{line}）：{src} {masked}",
+                                           line=self._provider_label(), src=src, masked=masked))
         else:
             self._key_status.config(text=t("⚠️ 未配置 API key —— 在上面粘贴后点「保存」"))
         if hasattr(self, "_key_chip"):
@@ -3098,35 +3450,45 @@ class TranslationGUI:
                 if not self._key_chip.winfo_manager():
                     self._key_chip.pack()
             else:
-                # 未配置：换成可点按钮（跳转千问云开通页）
-                # 文案档位：最小宽度 928 下能完整显示（实测见改动报告）
-                self._key_btn.configure(text=t("⚠ 未配置 API key · 点此开通千问云 ▸"))
+                # 未配置：换成可点按钮（跳转当前线路的开通页）
+                # 文案档位：最小宽度 928 下能完整显示（实测见改动报告）。
+                # 百炼那条**刻意更短**（"开通百炼" 而不是 "开通阿里云百炼·国际版"）：
+                # 主界面这一行右侧还挤着四个输出勾选，写长了英文/俄语文案就会被裁。
+                self._key_btn.configure(
+                    text=(t("⚠ 未配置 API key · 点此开通千问云 ▸")
+                          if self._provider() == endpoints.PROVIDER_QIANWEN
+                          else t("⚠ 未配置 API key · 点此开通百炼 ▸")))
                 if self._key_chip.winfo_manager():
                     self._key_chip.pack_forget()
                 if not self._key_btn.winfo_manager():
                     self._key_btn.pack()
 
     def _open_qianwen_signup(self) -> None:
-        """「未配置」状态按钮：用默认浏览器打开千问云开通页。
+        """「未配置」状态按钮：用默认浏览器打开**当前线路**的开通页。
+
+        函数名保留 `_open_qianwen_signup`（主界面按钮的 command 与既有测试都按它绑定），
+        但地址已改为按线路取：千问云 → QIANWEN_SIGNUP_URL，百炼国际版 → Model Studio 控制台。
 
         绝不抛异常、绝不影响主功能：失败时把链接写进状态栏让用户手动复制；
-        成功/失败都打一行日志。链接原文使用，不做任何解码/重组。
+        成功/失败都打一行日志（**写清是哪条线路**，否则"打开了个不相干的页面"无从查起）。
+        链接原文使用，不做任何解码/重组。
         """
+        url = self._signup_url()
+        line = endpoints.provider_name(self._provider())      # 日志恒用中文名
         try:
-            ok = bool(webbrowser.open(QIANWEN_SIGNUP_URL))
+            ok = bool(webbrowser.open(url))
         except Exception as exc:  # noqa: BLE001
             ok = False
-            print(f"[gui] ⚠ 打开浏览器失败（{exc}），请手动访问：{QIANWEN_SIGNUP_URL}",
+            print(f"[gui] ⚠ 打开浏览器失败（{exc}），请手动访问{line}开通页：{url}",
                   flush=True)
         else:
             if ok:
-                print(f"[gui] 已在默认浏览器打开千问云开通页：{QIANWEN_SIGNUP_URL}", flush=True)
+                print(f"[gui] 已在默认浏览器打开{line}开通页：{url}", flush=True)
             else:
-                print(f"[gui] ⚠ webbrowser.open 返回 False，请手动访问：{QIANWEN_SIGNUP_URL}",
+                print(f"[gui] ⚠ webbrowser.open 返回 False，请手动访问{line}开通页：{url}",
                       flush=True)
         if not ok:
-            self._set_status("warn", t("打不开浏览器，请手动复制访问：{url}",
-                                       url=QIANWEN_SIGNUP_URL))
+            self._set_status("warn", t("打不开浏览器，请手动复制访问：{url}", url=url))
 
     def _refresh_api_key_in_cfg(self) -> None:
         """按既有优先级链重新解析 API key 并写回 self._cfg.session_base["api_key"]。
@@ -3140,23 +3502,28 @@ class TranslationGUI:
         from .config import load_api_key
         from .credentials import key_source, mask_key
 
+        slot = self._current_key_slot()
         try:
-            key = load_api_key()
+            key = load_api_key(slot=slot)
         except SystemExit:
             key = ""
         self._cfg.session_base["api_key"] = key
         if key:
-            source, _ = key_source()
-            print(f"[gui] API key 已刷新：来源={source}（{mask_key(key)}）", flush=True)
+            source, _ = key_source(slot=slot)
+            print(f"[gui] API key 已刷新：线路={endpoints.provider_name(self._provider())} "
+                  f"来源={source}（{mask_key(key)}）", flush=True)
         else:
-            print("[gui] API key 已刷新：没有任何来源（尚未配置）", flush=True)
+            print(f"[gui] API key 已刷新：线路="
+                  f"{endpoints.provider_name(self._provider())} 没有任何来源（尚未配置）",
+                  flush=True)
 
     def _on_save_key(self) -> None:
         from .credentials import load_saved_key, mask_key, save_api_key
 
+        slot = self._current_key_slot()       # 存进**当前线路那一槽**：两条线路的 key 不通用
         raw = self._key_var.get()
         try:
-            path = save_api_key(raw)
+            path = save_api_key(raw, slot=slot)
         except ValueError as exc:
             self._key_var.set("")                      # 明文不留在界面上
             self._key_status.config(text=t("❌ 没保存：{msg}", msg=exc))
@@ -3164,24 +3531,26 @@ class TranslationGUI:
             print(f"[gui] ❌ API key 保存失败：{exc}", flush=True)
             return
         self._key_var.set("")
-        shown = mask_key(load_saved_key() or "")
+        shown = mask_key(load_saved_key(slot) or "")
         self._refresh_key_status()
         self._refresh_api_key_in_cfg()      # 关键：写回内存快照，否则开始翻译还读启动时的旧值
         self._set_status("ok", t("API key 已保存（{shown}）", shown=shown))
-        print(f"[gui] ✅ API key 已保存（{shown}）→ {path}", flush=True)
+        print(f"[gui] ✅ API key 已保存（线路={endpoints.provider_name(self._provider())}，"
+              f"{shown}）→ {path}", flush=True)
         self._check_api_key()
 
     def _on_clear_key(self) -> None:
         from .credentials import clear_saved_key
 
-        removed = clear_saved_key()
+        # 只清**当前线路那一槽**：另一条线路的 key 原样留着（切回去还能用）
+        removed = clear_saved_key(slot=self._current_key_slot())
         self._refresh_key_status()
         self._refresh_api_key_in_cfg()      # 清除后可能回退到别的来源、也可能变空 —— 内存同步
         msg = t("已清除保存的 API key") if removed else t("本来就没有保存过 API key")
         self._set_status("info", msg)
         # 日志保持中文（诊断用），界面已走 i18n
-        print(f"[gui] {'已清除保存的 API key' if removed else '本来就没有保存过 API key'}",
-              flush=True)
+        print(f"[gui] {'已清除保存的 API key' if removed else '本来就没有保存过 API key'}"
+              f"（线路={endpoints.provider_name(self._provider())}）", flush=True)
         self._check_api_key()
 
     def _build_chat(self) -> None:
@@ -3274,7 +3643,7 @@ class TranslationGUI:
         self._refresh_key_status()
         try:
             from .config import load_api_key
-            load_api_key()
+            load_api_key(slot=self._current_key_slot())     # 只认**当前线路那一槽**，别拿另一条的 key 充数
         except SystemExit as e:
             self._set_status("error", str(e))
 
@@ -3753,27 +4122,54 @@ class TranslationGUI:
         if not api_key:
             self._set_status("warn", t("还没配置 API key，无法试听（见右上角「设置」）"))
             return
+        # 端点必须按**当前线路**从 base_url 派生：不传的话 tts 会回落到自己的模块常量
+        # （千问云域名）—— 海外用户点「试听」就会连到根本用不了的地方，
+        # 而报错看起来还像"音色不支持"，排查方向全错。
+        base_url = str(self._cfg.session_base.get("base_url") or "")
+        workspace_id = str(self._cfg.session_base.get("workspace_id") or "")
+        try:
+            omni_endpoint = endpoints.chat_url(base_url, workspace_id)
+            tts_endpoint = endpoints.multimodal_url(base_url, workspace_id)
+        except ValueError as exc:
+            self._set_status("error", t("试听失败：{msg}", msg=exc))
+            print(f"[gui] ❌ 试听取消：无法从当前线路派生端点（{exc}）", flush=True)
+            return
         self._preview_busy = True
         if btn is not None:
             btn.configure(state=tk.DISABLED, text=t("试听中…"))
         self._set_status("info", t("正在试听「{v}」…", v=voice))
-        print(f"[gui] 试听音色 → {voice!r}（{kind}，模型 {VOICE_PREVIEW_MODEL}）", flush=True)
-        threading.Thread(target=self._preview_worker, args=(kind, voice, api_key),
+        # 日志带上线路摘要（endpoints.describe：空间 ID 已打码），试听连错地方时第一眼就能看出
+        line = endpoints.describe(self._provider(),
+                                  str(self._cfg.session_base.get("region") or ""),
+                                  base_url, workspace_id)
+        print(f"[gui] 试听音色 → {voice!r}（{kind}，模型 {VOICE_PREVIEW_MODEL}）| {line}",
+              flush=True)
+        threading.Thread(target=self._preview_worker,
+                         args=(kind, voice, api_key),
+                         kwargs={"omni_endpoint": omni_endpoint,
+                                 "tts_endpoint": tts_endpoint},
                          daemon=True, name="vlt-voice-preview").start()
 
-    def _preview_worker(self, kind: str, voice: str, api_key: str) -> None:
+    def _preview_worker(self, kind: str, voice: str, api_key: str, *,
+                        omni_endpoint: str | None = None,
+                        tts_endpoint: str | None = None) -> None:
         """守护线程体：合成 + 播放，结果（含失败原因）回主线程。绝不静默。
 
         两条腿走**各自的模型**（音色不通用）：打字侧 qwen3-tts-flash；说话侧非实时
         Qwen-Omni（Tina 等实时音色只有它认）。两者输出同为 24k 单声道 PCM，播放路径一致。
+
+        两个 endpoint 参数由 `_preview_voice` 按当前线路派生后传入；为 None 时 tts 内部
+        回落到模块常量（千问云默认）—— 保留这个回落只是为了让直接调本函数的老路径不变。
         """
         err = ""
         try:
             if kind == "speech":
-                pcm = tts.synthesize_omni(VOICE_PREVIEW_TEXT, voice=voice, api_key=api_key)
+                pcm = tts.synthesize_omni(VOICE_PREVIEW_TEXT, voice=voice, api_key=api_key,
+                                          endpoint=omni_endpoint)
             else:
                 pcm = tts.synthesize(VOICE_PREVIEW_TEXT, voice=voice,
-                                     model=VOICE_PREVIEW_MODEL, api_key=api_key)
+                                     model=VOICE_PREVIEW_MODEL, api_key=api_key,
+                                     endpoint=tts_endpoint)
             _play_pcm_local(pcm)
         except tts.TtsError as exc:
             err = str(exc)
@@ -3802,9 +4198,9 @@ class TranslationGUI:
 
     def _resolve_api_key_safe(self) -> str:
         """按 config.load_api_key 的口径取 key，但**取不到返回空串而不是抛 SystemExit**
-        —— 试听失败不该把整个界面带走。"""
+        —— 试听失败不该把整个界面带走。取的是**当前线路那一槽**（两条线路的 key 不通用）。"""
         try:
-            return load_api_key()
+            return load_api_key(slot=self._current_key_slot())
         except SystemExit:
             return ""
         except Exception:  # noqa: BLE001
@@ -3833,6 +4229,31 @@ class TranslationGUI:
             self._set_status("error", t("还没配置 API key —— 点右上角「API key ›」填一个再开始"))
             self._open_settings()
             return
+        if self._provider() == endpoints.PROVIDER_BAILIAN_INTL:
+            # 百炼线路的 base_url 里带 {workspace_id} 占位符，值不对就别白连一次：
+            # 空 → 老文案（把人送到设置页）；**形态**不对（填成了 API key / 太长 /
+            # 有非法字符）→ 说清哪里不对，而不是让 websockets 抛一句看不懂的 idna 错。
+            ws_code = endpoints.validate_workspace_id(self._cfg.session_base.get("workspace_id"))
+            if ws_code:
+                if ws_code == "empty":
+                    msg = t("未配置业务空间 ID —— 请在「设置 → 常规」里选线路并填写")
+                else:
+                    msg = t("❌ 无法开始：{msg}", msg=_ws_id_error_text(ws_code))
+                self._set_status("error", msg)
+                print(f"[gui] ❌ 未启动：业务空间 ID 不合法（{ws_code}）", flush=True)
+                self._open_settings(page="general")
+                return
+            # 地域：国际站的语音链路（同传 / TTS / Omni）只有新加坡有部署 —— 老配置里存着
+            # 东京这类地域时直接拦下并指路，别让它连出去换回一句和地域无关的报错。
+            raw_region = self._cfg.session_base.get("region")
+            reg_why = endpoints.region_supported(raw_region)
+            if reg_why:
+                msg = t("❌ 无法开始：{msg}", msg=_region_error_text(raw_region))
+                self._set_status("error", msg)
+                print(f"[gui] ❌ 未启动：地域不支持（region={raw_region} 原因={reg_why}）",
+                      flush=True)
+                self._open_settings(page="general")
+                return
         d = self._direction_var.get()
 
         sinks: set[str] = set()

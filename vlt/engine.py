@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 from .config import AppConfig, Direction, load_config
 from .devices import enumerate_mic_devices, resolve_device_name
+from . import endpoints
 from . import platform
 from .platform.audio import MixedAudioSource
 from .platform.base import LoopbackTarget
@@ -615,6 +616,24 @@ class Engine:
         self._input_gate = _LevelGate(*input_gate_settings(
             (cfg.output or {}).get("capture") or {}))
 
+        # ---- 出网端点（打字翻译 / 打字译音）：从 base_url 的 host 派生，启动时算一次并缓存 ----
+        # 单一真相源 = session.base_url（见 vlt/endpoints.py 的「宿主派生」口径）：这里派生出
+        # 另外两条 HTTP 端点，绝不在别处再写一份域名。派生失败（base_url 带 {workspace_id}
+        # 占位符却没填 workspace_id 之类）→ **留痕**并回落千问云默认端点，绝不让 Engine 构造
+        # 就崩；真正连接时实时那条腿会用 SessionConfig.url 再报一次明确错误。
+        sb = cfg.session_base or {}
+        base_url = sb.get("base_url") or endpoints.default_base_url(endpoints.DEFAULT_PROVIDER)
+        ws_id = sb.get("workspace_id") or ""
+        try:
+            self._chat_endpoint = endpoints.chat_url(base_url, ws_id)
+            self._tts_endpoint = endpoints.multimodal_url(base_url, ws_id)
+        except ValueError as exc:
+            print(f"[net] ⚠️ 出网端点派生失败（{exc}）→ 打字翻译/译音回落千问云默认端点",
+                  flush=True)
+            _dflt = endpoints.default_base_url(endpoints.DEFAULT_PROVIDER)
+            self._chat_endpoint = endpoints.chat_url(_dflt)
+            self._tts_endpoint = endpoints.multimodal_url(_dflt)
+
     # ---------------------------------------------------------------- 公开接口
 
     def start(self) -> None:
@@ -742,7 +761,11 @@ class Engine:
         return scfg
 
     def _speak_kwargs(self) -> dict:
-        """TTS 参数（打字腿与 B 模式共用同一套配置 → 音色天然一致）。"""
+        """TTS 参数（打字腿与 B 模式共用同一套配置 → 音色天然一致）。
+
+        `endpoint`：多模态地址按当前服务线路从 base_url 的 host 派生（启动时已算好）。
+        整段 / 流式两条路共用这份 kw，故都必须带上它 —— 漏了会悄悄连回千问云。
+        """
         tts_cfg = self._tts_cfg()
         d = self._cfg.directions.get(self._direction)
         return dict(
@@ -754,6 +777,7 @@ class Engine:
             instruction=str(tts_cfg.get("instruction") or "") or None,
             speech_rate=tts_cfg.get("speech_rate"),
             timeout=float(tts_cfg.get("timeout_s", DEFAULT_TTS_TIMEOUT_S)),
+            endpoint=self._tts_endpoint,
         )
 
     def set_voice_output(self, mode: str) -> bool:
@@ -978,6 +1002,11 @@ class Engine:
 
     async def _build_and_run(self) -> None:
         scfg = self._session_cfg()
+
+        # 宿主 + 线路必须留痕：换线路排查时第一眼要看它（describe 内部对 host 解析失败会降级，
+        # 空间 ID 只打前缀、绝不打完整值，key 更不出现）。
+        print(f"[net] {endpoints.describe(scfg.provider, scfg.region, scfg.base_url, scfg.workspace_id)}",
+              flush=True)
 
         if "chatbox" in self._sinks and not self._chatbox_wanted:
             msg = ("chatbox 只发『我说的话』的译文"
@@ -1541,6 +1570,8 @@ class Engine:
                     model=str(tcfg.get("model") or DEFAULT_TEXT_MODEL),
                     api_key=str(self._cfg.session_base.get("api_key") or ""),
                     timeout=float(tcfg.get("timeout_s", DEFAULT_TEXT_TIMEOUT_S)),
+                    # 地址按当前线路从 base_url 的 host 派生（启动时已算好并缓存）。
+                    endpoint=self._chat_endpoint,
                     # 专有词库：与说话那条腿同一份（全局 + 方向级覆盖），
                     # 让社团名/人名/术语按用户指定译法走，而不是被模型自由发挥。
                     terms=terms_from_mapping(self._cfg.merged_hotwords(self._direction)),
@@ -1851,12 +1882,13 @@ def pick_input_device(pattern: str | None) -> int | None:
     """按名称子串匹配输入设备。"""
     if not pattern:
         return None
-    import sounddevice as sd
 
     want = pattern.lower()
-    for i, d in enumerate(sd.query_devices()):
+    # 走平台层的设备表（Windows 上已收敛到 WASAPI 已启用那一套）：不然同名设备会在
+    # MME/DirectSound/WASAPI 下各命中一次，而这里取**第一条**，命中的是 MME（44100Hz）。
+    for i, d in enumerate(platform.device_backend().query_devices()):
         if d["max_input_channels"] > 0 and want in str(d["name"]).lower():
-            return i
+            return int(d.get("pa_index", i))    # 过滤后列表下标 ≠ PortAudio 索引
     return None
 
 
@@ -2230,13 +2262,24 @@ async def _pump_vrchat_capture(session, tele, stop_event,
 
 
 def list_devices() -> None:
-    import sounddevice as sd
+    """打印设备表（`--list-devices`）。**列的是程序实际会用的那一套**。
+
+    Windows 上平台层已把设备收敛到 WASAPI 已启用端点（见 `platform/win.py: query_devices`），
+    所以这里不再出现 MME/DirectSound/WDM-KS 的重复项与未启用幽灵 —— 与界面下拉一致。
+    设备号打的是**真实 PortAudio 索引**（`pa_index`），可直接用于排查「打开到哪一路」。
+    """
+    devs = platform.device_backend().query_devices()
+
+    def idx_of(d: dict, i: int) -> int:
+        return int(d.get("pa_index", i))
 
     print("=== 输入设备（麦克风）===")
-    for i, d in enumerate(sd.query_devices()):
+    for i, d in enumerate(devs):
         if d["max_input_channels"] > 0:
-            print(f"  {i:3d} | in={d['max_input_channels']} | {int(d['default_samplerate'])}Hz | {d['name']}")
+            print(f"  {idx_of(d, i):3d} | in={d['max_input_channels']} | "
+                  f"{int(d['default_samplerate'])}Hz | {d['name']}")
     print("\n=== 输出设备 ===")
-    for i, d in enumerate(sd.query_devices()):
+    for i, d in enumerate(devs):
         if d["max_output_channels"] > 0:
-            print(f"  {i:3d} | out={d['max_output_channels']} | {int(d['default_samplerate'])}Hz | {d['name']}")
+            print(f"  {idx_of(d, i):3d} | out={d['max_output_channels']} | "
+                  f"{int(d['default_samplerate'])}Hz | {d['name']}")

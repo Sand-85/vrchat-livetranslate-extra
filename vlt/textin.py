@@ -90,6 +90,7 @@ def translate_text(
     api_key: str = "",
     timeout: float = DEFAULT_TIMEOUT_S,
     terms: list[dict[str, str]] | None = None,
+    endpoint: str | None = None,
 ) -> str:
     """同步翻译一段文本（调用方放在线程里跑，别阻塞事件循环）。
 
@@ -98,6 +99,10 @@ def translate_text(
     terms 非空 → 作为**术语干预**下发（`translation_options.terms`），让专有名词
     （社团名 / 人名 / 术语）保持用户指定的译法；空/None 时**完全不传**该字段，
     免得服务端把空数组当成非法参数。
+
+    `endpoint`：请求地址由**调用方**（engine / gui）按当前线路从 base_url 的 host 派生
+    后传入（见 endpoints.chat_url）；不传则回落到模块常量 ENDPOINT（= 千问云默认，
+    现有测试与老调用据此保持不变）。这里**不自己算地址**：host 派生的口径只留一处。
     """
     text = (text or "").strip()
     if not text:
@@ -122,7 +127,7 @@ def translate_text(
         "translation_options": options,
     }
     req = Request(
-        ENDPOINT,
+        endpoint or ENDPOINT,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",

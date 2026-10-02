@@ -29,6 +29,18 @@ import vlt.i18n as _i18n  # noqa: E402
 
 _i18n.detect_system_language = lambda: "zh"
 
+# 电平探针的「打开设备」这一环打桩：用例会打开设置窗，探针若真去开设备，
+# 就会碰到**用户真实的 VRChat 播放流** —— 离线测试的硬规则是绝不碰真声卡。
+# 打桩后探针走「打不开 → 低频重试」路径，线程照常起停，界面逻辑不受影响。
+import vlt.level_probe as _level_probe  # noqa: E402
+
+
+def _no_audio_probe(device_name: str | None = None) -> None:  # noqa: ANN001
+    raise RuntimeError("测试进程：不打开真实电平采集（用例只验界面逻辑）")
+
+
+_level_probe.open_level_source = _no_audio_probe
+
 
 def check(events: list[tuple], expect_finals: int) -> bool:
     from vlt.gui import TranslationGUI

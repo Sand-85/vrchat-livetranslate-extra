@@ -13,10 +13,21 @@
 session:
   # 默认 3.8；可换 qwen3.5-livetranslate-flash-realtime（字段/事件自动切换）
   model: qwen3.8-livetranslate-flash-realtime
-  # 实测：旧域名可用，无需 WorkspaceId。要迁到 maas 域名时改成
-  #   wss://{workspace_id}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime 并填 workspace_id
-  base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime
+  # 服务线路（互斥）：qianwen = 千问云（国内，默认）；bailian_intl = 阿里云百炼·国际版（海外）
+  # ⚠️ 实际连接地址一律以 base_url 为准；切线路请在界面「⚙ 设置 → 常规」里切（会同步改写 base_url）
+  provider: qianwen
+  # 百炼国际版专用：业务空间 ID（控制台「业务空间详情」里的 API Host 前缀，形如 llm-xxxx）
+  # 千问云不需要；填了它 base_url 里的 {workspace_id} 会被替换
   workspace_id: ""
+  # 百炼国际版专用地域：**只有 ap-southeast-1(新加坡) 可用**（本版起界面里也只给这一个）。
+  #   ⚠️ 原因：本程序要用的语音链路（实时同传 / 试听音色 / 打字译音 / Omni 音色）在国际站
+  #   只在**新加坡**部署；东京/弗吉尼亚/法兰克福/香港都没有语音类模型（东京连打字翻译用的
+  #   qwen-mt-flash 都没有）。填了别的地域**不会静默回落**，而是「开始翻译」时被拦下并提示。
+  #   地域会进 host（{workspace_id}.{region}.maas.aliyuncs.com），且 API key 不能跨地域使用。
+  region: ap-southeast-1
+  # 千问云（默认）：免业务空间 ID；百炼国际版会被界面写成
+  #   wss://{workspace_id}.{region}.maas.aliyuncs.com/api-ws/v1/realtime
+  base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime
   # ⚠️ 必须显式指定：不填会抛 Voice 'Chelsie' is not supported（纯文本模式也校验）
   # 这是「说话译音」的音色（实时模型直出）；也可在界面「⚙ 设置 → 音色」里选。
   # 音色 id 按模型区分，不能与下面 text_input.tts 的音色表混用。
@@ -92,7 +103,7 @@ directions:
   # ① 我说 → chatbox（对方看得见，我自己也看得见）
   mine:
     source_lang: zh
-    target_lang: en          # 可改 ja / ko / fr / de / es / ru ...
+    target_lang: en          # 可改 ja / ko / fr / de / es / ru / th ...
     output_audio: false      # true 则同时拿译音（走虚拟声卡那条腿）
     hotwords: {}             # 方向级热词（可选）：只对**这个方向**生效，覆盖下面 glossary 的同名词条
                              # 例：{"Nekoya": "Nekoya"} —— 我说英文名、英文译文保持原样
@@ -236,10 +247,21 @@ overlay:
 #
 # 开了之后：勾选界面上的「桌面字幕」，字幕窗会立刻出现；「微调 ▸」里有透明度滑块和
 # 「解锁拖动 / 锁定位置」——鼠标穿透是默认开的（不挡你点 VRChat），要拖动得先解锁。
+#
+# 后端（`backend`）：Wayland 会话（niri / sway / Hyprland / KDE 等实现了 layer-shell 的
+# 合成器）自动用**原生 layer-shell 窗**；X11 会话（含带 XWayland 的 GNOME/Weston）用
+# **原生 ARGB 覆盖窗**——两者都是逐像素透明（真圆角、底板半透明）、置顶、协议级鼠标穿透。
+# X11 的透明需要合成器（picom 等）：没检测到时会自动降级用 1 位形状蒙版裁掉透明区
+#（没有黑框；圆角为锯齿、底板是实色），启动日志有一行说明。
+# 两条原生腿都建不起来时回落到 Tk 窗（Windows 靠色键透明；Linux 会用 1 位形状蒙版
+# 抠掉面板外的键色底，但做不到逐像素半透明）。
 desktop_overlay:
   enabled: false             # 总开关（界面上的勾选状态存在 ui.desktop_overlay，两边都认）
   mode: conversation         # conversation=镜像聊天区（最近几条，带说话人侧边条）
                              # latest=只显示最新一句（更像歌词）
+  backend: auto              # auto=有原生就用（Wayland→原生 layer-shell）| native=显式要求原生
+                             #   （回落 Tk 时留一行警告）| tk=强制 Tk | wayland / x11=强制指定
+                             #   某一原生后端（建不起来自动回落 Tk 并留日志；启动时生效）
   attach_to_game: true       # true=贴在 VRChat 窗口上并**跟随**它的移动/缩放
                              #      找不到窗口时自动退化成 pos 的绝对屏幕坐标（会留日志）
   game_title: VRChat         # 目标窗口标题（不区分大小写的子串匹配）

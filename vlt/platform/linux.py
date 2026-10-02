@@ -37,6 +37,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -358,6 +359,60 @@ def find_cjk_font() -> str | None:
     return None
 
 
+# 泰文字体兜底路径（fc-match 找不到时用）。
+#
+# ⚠️ **不能复用 CJK 字体**：Noto Sans CJK 不含泰文字形，渲染泰文会出豆腐块
+# （与 Windows 侧 msyh.ttc 同因）。所以泰语必须走这条独立探测，渲染侧按书写系统
+# 切 run、各用各的字体画。
+#
+# 常见 Linux 泰文字体包：
+#   * `noto-fonts-thai` / `fonts-noto-thai` → NotoSansThai-Regular.ttf
+#   * `ttf-thai-tlwg` → Loma.ttf / Garuda.ttf / Norasi.ttf 等
+#   * `fonts-thai-tlwg` → 同上（Debian/Ubuntu 包名）
+_THAI_FONT_FALLBACKS = (
+    "/usr/share/fonts/noto-thai/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/truetype/tlwg/Loma.ttf",
+    "/usr/share/fonts/truetype/tlwg/Garuda.ttf",
+    "/usr/share/fonts/truetype/tlwg/Norasi.ttf",
+    "/usr/share/fonts/TTF/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/truetype/thai-tlwg/Loma.ttf",
+)
+
+
+def find_thai_font() -> str | None:
+    """用 fontconfig 找一个**确实含泰文字形**的字体；找不到返回 None。
+
+    ⚠️ 判据必须是 `fc-list :lang=th`（只列**覆盖泰文**的字体），**不能只信 `fc-match`**：
+    `fc-match` 永远会返回一个字体（哪怕它不含泰文字形，例如 DejaVu Sans），于是
+    「拿到路径」≠「能画泰文」→ 既不告警、渲染出来还是豆腐块，属于**静默降级**。
+    所以：fc-list 拿不到 → 再走下面的已知路径兜底 → 都没有就返回 None，
+    由调用方（`overlay.resolve_thai_font_path`）打一次性告警后回落 CJK 字体。
+
+    Windows 侧对应的是 `LeelawUI.ttf` / `tahoma.ttf`（见 win.py）。
+    """
+    if shutil.which("fc-list"):
+        try:
+            res = subprocess.run(
+                ["fc-list", ":lang=th", "-f", "%{file}\n"],
+                capture_output=True, timeout=5,
+            )
+            if res.returncode == 0:
+                for line in res.stdout.decode("utf-8", "replace").splitlines():
+                    cand = line.strip()
+                    # 字体集合（.ttc）在部分 fontconfig 版本里会带 `:index=0` / `:face=0` 后缀
+                    cand = re.sub(r":(?:index|face)=\d+$", "", cand)
+                    if cand and Path(cand).exists():
+                        return cand
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    for cand in _THAI_FONT_FALLBACKS:
+        if Path(cand).exists():
+            return cand
+    return None
+
+
 # ---------------------------------------------------------------- 界面语言
 
 # 语言代码前缀 → 本项目支持的界面语言。与 win.py 的口径必须一致：
@@ -491,8 +546,8 @@ def assert_not_default_output_candidate(node_name: str) -> tuple[bool, str]:
     return True, f"{node_name!r} 的类 {media_class!r} 不在默认输出候选里（安全）"
 
 
-def _test_process_guard() -> str | None:
-    """防呆：**测试进程里拒绝真的声明虚拟声卡**。
+def _test_process_guard(action: str = "真的声明虚拟声卡") -> str | None:
+    """防呆：**测试进程里拒绝做「会碰用户会话」的真实操作**（默认：声明虚拟声卡）。
 
     写这个不是洁癖 —— 实测踩过四次：单元测试只桩住了 Windows 侧
     （`E.pick_output_device` / `E.VirtualMic`），于是 Linux 分支绕过打桩、
@@ -501,6 +556,9 @@ def _test_process_guard() -> str | None:
     这里只是**最后一道保险**：万一又漏了，宁可这条腿不启用，也不能动用户的音频。
 
     正常使用（`python -m vlt.gui` / `-m vlt.app`）永远不会命中这个判断。
+
+    `action` 给第二类用途：桌面字幕的原生窗（测试进程建窗会连到**用户正在用的
+    合成器**上 —— 实测 GUI 用例在 Wayland 机器上真的弹出了一块 layer 面）。
     """
     main = sys.modules.get("__main__")
     path = getattr(main, "__file__", None)
@@ -508,7 +566,7 @@ def _test_process_guard() -> str | None:
         return None
     p = Path(path)
     if p.name.startswith("test_") or "tests" in p.parts:
-        return f"检测到测试进程（{p.name}）→ 拒绝真的声明虚拟声卡"
+        return f"检测到测试进程（{p.name}）→ 拒绝{action}"
     return None
 
 
@@ -849,9 +907,13 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
 #      「鼠标穿透」会设了个寂寞：穿透区的点击直接消失，上层下层谁都不收（实测）。
 #   2. **点击穿透 = `XShapeCombineRectangles(ShapeInput, 空)`**，实测点击会正确落到
 #      下层窗口；恢复 = `XShapeCombineMask(None)`（回到默认输入区）。
-#   3. Wayland 会话（Tk 走 XWayland）下这组调用**仍可用**（能找到窗口、能读几何），
-#      但**窗口位置 / 置顶 / 透明度由合成器决定**：niri 实测忽略位置请求（按平铺
-#      管理）、忽略 `_NET_WM_WINDOW_OPACITY`（属性写进去了、像素扫描仍不透明）。
+#   3. **Tk 回落路径**（Wayland 会话里 Tk 走 XWayland）下这组调用仍可用（能找到窗口、
+#      能读几何），但窗口位置 / 置顶 / 透明度由合成器决定：niri 实测忽略位置请求（按
+#      平铺管理）、忽略 `_NET_WM_WINDOW_OPACITY`（属性写进去了、像素扫描仍不透明）。
+#      ⚠️ 字幕窗现在**优先走两条原生腿**：Wayland 会话走 layer-shell
+#      （`vlt/platform/wayland.py`）、X11 会话（含 XWayland）走 32 位 ARGB 覆盖窗
+#      （`vlt/platform/x11.py`）；本组 X11 调用用于「找 VRChat 窗口、读几何」，
+#      以及被两个原生后端复用（穿透 / 不抢焦点）。只有原生窗都建不起来时才回落 Tk。
 #      首次用到本组能力时打印一行说明；边界见 `docs/GUIDE.linux.md` 的「桌面字幕」。
 #
 # 语义与 Windows 侧对齐（facade 的文档就是契约）：
@@ -861,6 +923,7 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
 #     被 WM 管理的窗口则是 WM 框（用于「排除自己」时同样正确）。
 
 _MAX_SEARCH_DEPTH = 6         # find_window_by_title 的树深上限（帧/客户一层就够，留余量）
+_SHAPE_BOUNDING = 0           # SHAPE_KIND：0=Bounding 1=Clip 2=Input
 _SHAPE_INPUT = 2              # SHAPE_KIND：0=Bounding 1=Clip 2=Input
 _SHAPE_SET = 0                # SHAPE_OP：0=Set
 _IS_VIEWABLE = 2              # XWindowAttributes.map_state
@@ -983,6 +1046,12 @@ def _load_x11() -> tuple[Any, Any, Any] | None:
         xext.XShapeCombineMask.argtypes = [
             ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
             ctypes.c_int, ctypes.c_int, ctypes.c_ulong, ctypes.c_int]
+        x11.XCreateBitmapFromData.restype = ctypes.c_ulong
+        x11.XCreateBitmapFromData.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
+            ctypes.c_uint, ctypes.c_uint]
+        x11.XFreePixmap.restype = ctypes.c_int
+        x11.XFreePixmap.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
         dpy = x11.XOpenDisplay(None)
         if not dpy:
             _X11_DEAD = True
@@ -1026,8 +1095,10 @@ def _wayland_note() -> None:
         return
     _WAYLAND_NOTE_DONE = True
     if os.environ.get("WAYLAND_DISPLAY"):
-        print("[desktop] ⚠️ 检测到 Wayland 会话（界面经 XWayland）：窗口位置/置顶/透明度"
-              "由合成器决定——niri 实测按平铺管理、忽略透明度，字幕跟随可能不生效；"
+        print("[desktop] ℹ️ 检测到 Wayland 会话：字幕窗优先走原生 layer-shell 后端"
+              "（本组 X11 调用只用来找 VRChat 窗口、读几何）；没有 layer-shell 的合成器"
+              "（GNOME/Weston）只要有 XWayland 会走原生 ARGB 覆盖窗。两条原生腿都建不起来"
+              "才回落 Tk（位置/透明度由合成器决定：niri 实测按平铺管理、忽略透明度）；"
               "边界见 docs/GUIDE.linux.md「桌面字幕」")
 
 
@@ -1239,6 +1310,45 @@ def set_click_through(hwnd: int, on: bool) -> bool:
     return _guarded(x11, dpy, call) is not None
 
 
+def set_window_shape(hwnd: int, mask: bytes, width: int, height: int) -> bool:
+    """给窗口设/换 1 位**形状蒙版**（X Shape Bounding）；蒙版外的像素不画、点击也不收。
+
+    `mask` 口径：每行 `ceil(width/8)` 字节、**LSB-first**（最左像素 = 最低位）、行序
+    自上而下 —— 即 `np.packbits(..., bitorder="little")` / XBM 的打包方式
+    （`vlt/output/desktop_overlay.py:alpha_mask_bits()` 产的就是它）。Tk 回落路径用它
+    抠掉面板外的键色底（Windows 的 Tk 有色键，Linux 只能靠蒙版）。
+
+    ⚠️ 尺寸变了要**重设**（形状不会跟着窗口缩放）；尺寸对不上的蒙版比不设更糟（窗口
+    会被裁成花形），所以字节数不够直接拒绝。
+    """
+    loaded = _load_x11()
+    if not loaded:
+        return False
+    x11, xext, dpy = loaded
+    wid = int(hwnd)
+    w, h = int(width), int(height)
+    if w <= 0 or h <= 0 or not mask or len(mask) < ((w + 7) // 8) * h:
+        return False
+    if _attrs(x11, dpy, wid) is None:      # 句柄已失效：别喂 Xlib 出错误日志
+        return False
+    buf = ctypes.create_string_buffer(bytes(mask), len(mask))   # 保活到请求吐给服务器
+
+    def call() -> bool:
+        pix = x11.XCreateBitmapFromData(dpy, ctypes.c_ulong(wid),
+                                        ctypes.cast(buf, ctypes.c_void_p),
+                                        ctypes.c_uint(w), ctypes.c_uint(h))
+        if not pix:
+            return False
+        try:
+            xext.XShapeCombineMask(dpy, ctypes.c_ulong(wid), _SHAPE_BOUNDING,
+                                   0, 0, ctypes.c_ulong(pix), _SHAPE_SET)
+        finally:
+            x11.XFreePixmap(dpy, ctypes.c_ulong(pix))
+        return True
+
+    return _guarded(x11, dpy, call) is True
+
+
 def set_tool_window(hwnd: int) -> bool:
     """标「不抢焦点」：WM_HINTS 的 input=False。
 
@@ -1298,3 +1408,59 @@ def screen_work_area() -> tuple[int, int, int, int]:
     if a is not None and a.width > 0 and a.height > 0:
         return (0, 0, int(a.width), int(a.height))
     return (0, 0, 1920, 1080)
+
+
+# ---------------------------------------------------------------- 桌面叠加窗：原生窗
+
+
+def create_desktop_window(size: tuple[int, int], alpha: float = 1.0,
+                          click_through: bool = True,
+                          on_drag_end: Any = None, backend: str = "auto") -> Any:
+    """给桌面字幕开一个**原生窗**（Wayland：layer-shell；X11：32 位 ARGB 覆盖窗）。
+
+    返回 `None` 表示「本会话用不了原生窗」，调用方（`desktop_overlay`）回落 Tk：
+      * `backend="tk"`：显式要求 Tk；
+      * `auto`/`native` 的候选顺序：有 `WAYLAND_DISPLAY` → 原生 Wayland
+        （没有 layer-shell 的合成器由后端自己失败）→ 有 `DISPLAY` → 原生 X11
+        （纯 Xorg 会话、以及带 XWayland 的 GNOME/Weston 都吃这条腿）；
+      * 建窗失败 / 没有 32 位 visual / 缺库 → 继续/回落。
+    每一步的**原因**都在这里/后端模块里打出来（门面与共享模块不吭声）。
+    """
+    if backend == "tk":
+        return None
+    blocked = _test_process_guard("建原生桌面窗（会连到用户正在用的合成器）")
+    if blocked:
+        print(f"[desktop] ⚠️ {blocked} → 回落 Tk", flush=True)
+        return None
+
+    order: list[str] = []
+    if backend in ("auto", "native"):
+        if os.environ.get("WAYLAND_DISPLAY"):
+            order.append("wayland")
+        if os.environ.get("DISPLAY"):
+            order.append("x11")
+    else:
+        order.append(backend)
+
+    for kind in order:
+        if kind == "wayland":
+            from .wayland import LayerShellWindow as cls      # noqa: PLC0415
+            label = "Wayland"
+        elif kind == "x11":
+            from .x11 import ArgbWindow as cls                # noqa: PLC0415
+            label = "X11"
+        else:  # pragma: no cover —— BACKENDS 已挡掉未知值，兜底不崩
+            print(f"[desktop] ⚠️ backend={kind!r} 不认识 → 跳过", flush=True)
+            continue
+        try:
+            win = cls(size=size, alpha=alpha, click_through=click_through,
+                      on_drag_end=on_drag_end)
+        except Exception as exc:  # noqa: BLE001 —— 缺库/构造异常都不该带崩进程
+            print(f"[desktop] ⚠️ 建原生 {label} 窗异常（继续/回落 Tk）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            continue
+        if not win.available:
+            win.close()
+            continue
+        return win
+    return None

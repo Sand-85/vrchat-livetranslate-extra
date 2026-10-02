@@ -225,20 +225,24 @@ overlay:
 **不需要头显**（issue #11）：界面上勾「桌面字幕」，屏幕上会出现一块**无边框、鼠标穿透**的
 字幕窗，默认贴在 VRChat 窗口下沿并跟着它走（细节与配置见 GUIDE.md 的「桌面字幕」一节）。
 
-| 会话类型 | 找窗 / 跟随 | 鼠标穿透 | 透明度（滑块） |
-|---|---|---|---|
-| **X11 会话** | ✅ 全功能：按标题找窗 + 逐帧跟随移动/缩放 | ✅ X Shape 输入区置空，点击落到 VRChat 上 | ✅ 需要合成器（常见桌面的 X11 会话默认开） |
-| **Wayland 会话**（niri 等，界面走 XWayland） | ⚠️ 能找窗、能读到几何，但**窗口位置/置顶由合成器决定**——niri 实测按平铺窗口管理，跟随不生效 | 未在真机验证 | ⚠️ niri 实测忽略 `_NET_WM_WINDOW_OPACITY`（属性写进去了也不渲染） |
+有**三条窗口后端**（两条原生 + 一条 Tk 回落），按会话自动选（日志会写明走的哪条；
+`desktop_overlay.backend` 可强制：`auto | native | tk | wayland | x11`）：
 
-- X11 后端在 `vlt/platform/linux.py`（纯 `ctypes` 直调 libX11/libXext，不新增依赖），
+| 后端 | 什么时候走 | 透明 | 定位 / 跟随 | 鼠标穿透 |
+|---|---|---|---|---|
+| **原生 layer-shell 窗**<br>（`vlt/platform/wayland.py`） | Wayland 会话，且合成器实现了 `zwlr_layer_shell_v1`（niri / sway / Hyprland / KWin 6.x / labwc / Cage / gamescope …） | ✅ **逐像素 alpha**：真圆角、底板半透明、整层透明度滑块全生效 | ✅ overlay 层置顶 + anchor/margin 精确定位；跟随用 X11 读 VRChat 几何（与全局坐标一致） | ✅ 协议级：输入区置空 |
+| **原生 ARGB 覆盖窗**<br>（`vlt/platform/x11.py`） | X11 会话（纯 Xorg）；Wayland 会话只要带 XWayland（**GNOME/Mutter**、Weston 等没有 layer-shell 的同样吃这条腿） | ✅ **逐像素 alpha**（32 位 visual + 预乘出图）；⚠️ **需要合成器**（picom 等）——没有时自动降级：1 位形状蒙版裁掉透明区（没有黑框；圆角为锯齿、底板是实色），启动日志有一行说明 | ✅ 覆盖窗置顶 + `XMoveWindow` 精确定位；跟随同左 | ✅ X Shape：输入区置空 |
+| **Tk 窗**（最后回落） | `backend=tk`；或两条原生腿都建不起来（没有对应协议 / 库 / 32 位 visual） | ⚠️ Windows 靠色键；Linux 用 **1 位形状蒙版**抠掉面板圆角外的键色底（圆角有锯齿；**逐像素半透明仍不行**——那是原生窗的能力） | ⚠️ X11 会话全功能；GNOME/Wayland 下客户端不能自定位 → 跟随不生效 | ✅ X11 输入区置空（X Shape）；GNOME 下未真机验证 |
+
+- 日志会写出走的哪条：`后端=原生`（某条原生腿）或 `后端=Tk`。原生窗建不起来时，后端模块会打一行**具体原因**（没有 layer-shell / 没有 32 位 visual / libwayland 加载失败等）再回落。
+- **拖动**：解锁后按住面板拖动。Wayland 后端两种位移源自动切换 —— 支持相对指针的合成器（sway/wlroots 系）用相对增量；niri 系不发相对位移事件，自动改用 `wl_pointer.motion` 的本地坐标差（niri 的 click-grab 冻结焦点坐标，位移精确）。X11 原生窗走 `XGrabPointer` + 绝对坐标（`x_root/y_root`），一步算式，**拖动全程自由跨屏**。
+- **跨屏拖动（仅 Wayland 后端）**：拖动过程中面板夹在本屏边缘（中途换面会打断指针 grab），**松手时自动落到指针所在的那块屏**；拖动全程平滑跨屏跟手属后续项。多屏位置取自 xdg-output（wlroots 的 `wl_output.geometry` x/y 恒为 0，不能拿来认屏）。X11 原生窗没有协议层限制，拖动中直接跨屏。
+- 找窗/跟随走 `vlt/platform/linux.py`（纯 `ctypes` 直调 libX11/libXext，不新增依赖），
   与 Windows 侧同名同语义；找窗走 `_NET_WM_NAME`（退回 `WM_NAME`），几何经
   `XTranslateCoordinates` 折算到屏幕坐标（多屏 / 负坐标都对）。
 - **所有 X 侧操作必须落在「顶层包装窗」上**：Tk 的 `winfo_id()` 是内层客户窗，
   合成器/命中测试看的是外层包装窗（`top_level_hwnd()` 负责换出来）。设错窗口时，
   穿透区里的点击会**直接消失**（上层下层都不收）——这条在 Xvfb + openbox 下做过对照实验。
-- **Wayland 会话**想至少能摆位：给合成器加窗口规则（niri 例：`open-floating` + `opacity`）
-  再手动拖到想要的位置；「自动贴窗跟随」在 Wayland 协议层做不到（客户端不能自己给
-  窗口定坐标），属于已知边界。
 - 找不到 VRChat 窗口时退回屏幕绝对定位（`config.yaml` 的 `desktop_overlay.pos`），
   日志里会写一行 `没找到窗口 … → 退化成屏幕绝对定位`。
 
@@ -255,7 +259,7 @@ overlay:
 | `output.audio.device` / `device_name` | 虚拟声卡回退链（VoiceMeeter / VB-Cable） | **不用管** —— 程序自己声明 `vlt_mic_sink`，`device_name` 被忽略 |
 | `overlay.font` | `C:/Windows/Fonts/msyh.ttc` | **留空即可**，自动用 fontconfig 找中日韩字体 |
 | `overlay.backend` | `auto` | `auto`（= 自建 OpenXR）/ `null`（禁用） |
-| `desktop_overlay.*` | 贴窗跟随 / 鼠标穿透（Win32 扩展样式） | X11 会话与 Windows 同款（X11 后端）；Wayland 会话由合成器决定（见「桌面字幕」一节） |
+| `desktop_overlay.*` | 贴窗跟随 / 鼠标穿透（Win32 扩展样式） | **原生 layer-shell 窗**（逐像素透明 + 协议级穿透；`backend` 可强制）/ Tk 回落（见「桌面字幕」一节） |
 | `capture.gate_*`（输入门限） | ✅ 生效 | ✅ **一致** —— 判在 VRChat 多路输出**混音之后**的同一块上（远处小声的玩家一样被拦，hold / preroll / 拦截计数同样成立） |
 
 其它（方向、语言、chatbox 参数、静默闸门、repeat 抑制、字号、配色……）**完全一致**。
@@ -306,8 +310,10 @@ overlay:
 |---|---|---|
 | 勾了但在屏幕上找不到字幕窗 | 窗口贴到了别处 / 被别的窗口盖住 | 看日志第一行是 `已贴到 'VRChat'` 还是 `没找到窗口 … 退化成屏幕绝对定位`；用 `微调 ▸` 的「解锁拖动」把它拖回来 |
 | 点字幕窗时 VRChat 收不到这一下 | 鼠标穿透没设上 | 日志里会有 `鼠标穿透（开）没设上`；报 bug 时附 `xprop -root _NET_SUPPORTED` |
-| Wayland 会话下字幕不跟随 / 透明度滑块没效果 | 合成器不认客户端的定位与透明度（预期边界，不是 bug） | 用合成器自己的窗口规则（如 niri 的 `open-floating` / `opacity`）代替 |
-| 字幕窗被平铺、把桌面布局挤开 | 同上（客户端不能自定位） | 给字幕窗加浮动窗口规则，或改用 X11 会话 |
+| 圆角外一圈是黑的 / 底板看着不透明 | 走了 Tk 回落路径（日志 `后端=Tk`） | 确认合成器支持 `zwlr_layer_shell_v1`（niri/sway/Hyprland/KDE 支持；GNOME/Weston 不支持）；`desktop_overlay.backend=wayland` 可让日志给出具体原因 |
+| 字幕窗被平铺、把桌面布局挤开 | 走了 Tk 回落（原生窗在 overlay 层，不会被平铺） | 同上：看日志确认后端；支持 layer-shell 的合成器里不该出现 |
+| 拖不动 / 拖动后落点没变 | 旧版只认 relative-pointer，而 niri 不发相对位移事件 | 升级到含「拖动双源」的版本；仍不对就附日志里 `[desktop:wayland]` 的几行 |
+| 泰语字幕显示成一排方块 | 宿主机没装含泰文字形的字体（AppImage **不自带字体**，用的是宿主 fontconfig；CJK 字体不含泰文） | 装一个泰文字体，例如 Debian/Ubuntu：`apt install fonts-thai-tlwg`（用 `fc-list :lang=th` 可确认装上没有）；日志里会有一行「找不到含泰文字形的字体 → …豆腐块」提示 |
 
 ### 其它
 
@@ -341,9 +347,14 @@ overlay:
      界面会直接给你下载页链接，手动下一个替换掉即可（这是刻意的：不能悄悄改不动的东西）。
    - 只有 `$APPIMAGE`（AppImage 运行时自己设的）指向的文件才认，且不发任何「安装」动作给系统：
      全程只动那一个文件。
-6. **桌面字幕的自动贴窗跟随只在 X11 会话成立**。Wayland 会话（niri 等）下窗口位置、
-   置顶与透明度由合成器决定，字幕会退化成一块「普通窗口」；鼠标穿透的 Wayland 行为
-   尚未真机验证（X11 会话已实测可用）。
+6. **桌面字幕优先走原生窗**：Wayland（niri / sway / Hyprland / KWin 6.x 等实现了
+   layer-shell 的合成器）走原生 layer-shell 窗 —— 逐像素透明、overlay 层置顶、精确跟随、
+   协议级穿透、拖动全部成立（niri 真机实测，见平台约束记录第九节）；**X11 会话**（含带
+   XWayland 的 GNOME/Weston）走原生 ARGB 覆盖窗（32 位 visual + 预乘出图，逐像素透明；
+   需要合成器 picom 等——没有时**自动降级**用 1 位形状蒙版裁掉透明区：没有黑框，但圆角
+   是锯齿、底板是实色，启动日志有一行说明）。两条原生腿都建不起来时最后回落 Tk：
+   Linux 的 Tk 同样用 1 位形状蒙版抠掉面板圆角外的键色底（圆角有锯齿；逐像素半透明
+   做不到——那是原生窗的事）。
 
 ---
 
@@ -363,4 +374,7 @@ overlay:
 - 手腕屏另外两个「改回去就出怪现象」的坑：图层 alpha 的两个 flag（漏了 = 蓝框外一圈黑边）、
   柱面层的 `pose` 是圆柱的轴而不是面板中心（弄错 = 圆心跑位、面板飘走）
 - 构建期平台隔离怎么保证的
-- 测试纪律（测试进程不许碰用户的运行时）
+- 测试纪律（测试进程不许碰用户的运行时；桌面字幕的原生窗也归这条管 —— 测试进程
+  拒绝建原生窗，真协议验收走**私有嵌套**合成器）
+- 桌面字幕为什么在 Wayland 上必须走原生 layer-shell 窗、拖动为什么要**双源**
+  （relative-pointer + 本地坐标法 —— niri 不发相对位移事件的实测记录）

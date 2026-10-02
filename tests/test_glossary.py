@@ -42,6 +42,19 @@ os.environ.setdefault("DASHSCOPE_API_KEY", "sk" + "-glossary-testonly0123456789a
 import vlt.i18n as _i18n  # noqa: E402
 _i18n.detect_system_language = lambda: "zh"
 
+# 电平探针的「打开设备」这一环打桩：GUI 用例会打开设置窗，探针若真去开设备，
+# 就会碰到**用户真实的 VRChat 播放流** —— 离线测试的硬规则是绝不碰真声卡，
+# 而且本机（Tcl 9）实测：留着这路活采集退出时必崩 `Tcl_AsyncDelete`（核心转储）。
+# 打桩后探针走「打不开 → 低频重试」路径，线程照常起停，界面逻辑不受影响。
+import vlt.level_probe as _level_probe  # noqa: E402
+
+
+def _no_audio_probe(device_name: str | None = None) -> None:  # noqa: ANN001
+    raise RuntimeError("测试进程：不打开真实电平采集（用例只验界面逻辑）")
+
+
+_level_probe.open_level_source = _no_audio_probe
+
 import vlt.config as config_mod  # noqa: E402
 import vlt.engine as engine_mod  # noqa: E402
 from vlt.config import AppConfig, Direction, load_config, merge_hotwords  # noqa: E402

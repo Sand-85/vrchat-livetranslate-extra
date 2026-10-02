@@ -883,6 +883,131 @@ def test_unsupported_tracker_path_degrades_only_that_anchor():
     print("  ★ tracker 不可用（没扩展 / 路径不认）时：只有该锚点降级到 VIEW，左右手绑定不受影响 OK")
 
 
+# ---------------------------------------------------------------- 面板尺寸热重载（回归）
+
+
+class _FakeXrSwap(types.ModuleType):
+    """只覆盖 swapchain 那几条调用链的假 xr（`set_size` / 重建的回归用）。"""
+
+    def __init__(self) -> None:
+        super().__init__("xr")
+        self.created: list[tuple[int, int]] = []
+        self.destroyed: list[object] = []
+        self.SwapchainCreateInfo = _Rec
+        self.SwapchainImageOpenGLKHR = object()
+
+    def enumerate_swapchain_formats(self, sess):  # noqa: ANN001
+        return [0x8058]                           # GL_RGBA8
+
+    def create_swapchain(self, sess, info):  # noqa: ANN001
+        self.created.append((int(info.width), int(info.height)))
+        return object()
+
+    def destroy_swapchain(self, sc):  # noqa: ANN001
+        self.destroyed.append(sc)
+
+    def enumerate_swapchain_images(self, sc, cls):  # noqa: ANN001
+        return [types.SimpleNamespace(image=7)]
+
+
+def test_session_set_size_rebuilds_swapchain():
+    """★ 回归（用户实测）：面板尺寸热重载必须**重建交换链**。
+
+    430 → 440 一步就触发：新图比交换链大 → 上传越界（GL 0x501）+ image_rect 越界
+    （SwapchainRectInvalid）→ 每帧提交失败；而自愈重建用的还是旧尺寸 → 232 次
+    「已重建 swapchain」也不恢复。这里钉住 set_size 的交换链行为（同尺寸幂等）。
+    """
+    fake = _FakeXrSwap()
+    saved = sys.modules.get("xr")
+    sys.modules["xr"] = fake
+    try:
+        sess = XrOverlaySession(None, (1024, 430))      # type: ignore[arg-type]
+        sess.session = object()
+        sess._create_swapchain()                        # noqa: SLF001
+        assert fake.created == [(1024, 430)], fake.created
+        first = sess.swapchain
+
+        sess.set_size((1024, 440))
+        assert sess.size_px == (1024, 440)
+        assert fake.created[-1] == (1024, 440), f"新尺寸没建出新交换链：{fake.created}"
+        assert fake.destroyed == [first], "旧交换链没销毁"
+        assert sess.textures == [7], "新交换链的纹理没接管"
+
+        n = len(fake.created)
+        sess.set_size((1024, 440))                      # 同尺寸：幂等
+        assert len(fake.created) == n, "同尺寸不该重建"
+    finally:
+        _restore_xr(saved)
+    print("  set_size：交换链跟随重建 / 旧链销毁 / 同尺寸幂等 OK")
+
+
+def test_panel_size_reload_resizes_swapchain():
+    """★ 回归（用户实测的入口）：热重载改了 `overlay.size_px` → 会话交换链跟随换。
+
+    老实现只把新图重渲染一遍、交换链不动 —— 这正是「面板高拖过当前值就挂死」的入口。
+    """
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp(prefix="vlt-xr-resize-"))
+    cfg_path = tmp / "config.yaml"
+    cfg_path.write_text("overlay:\n  size_px: [1024, 430]\n", encoding="utf-8")
+
+    ov = OpenXrOverlay(OverlayConfig(enabled=True, size_px=(1024, 430)),
+                       config_path=cfg_path)
+
+    class _Sess:
+        def __init__(self) -> None:
+            self.size_px = (1024, 430)
+            self.sizes: list[tuple[int, int]] = []
+
+        def set_size(self, s):  # noqa: ANN001
+            self.sizes.append(tuple(s))
+            self.size_px = tuple(s)
+
+    ov._sess = _Sess()                                  # noqa: SLF001
+    cfg_path.write_text("overlay:\n  size_px: [1024, 440]\n", encoding="utf-8")
+    ov._reload_config_if_changed()                      # noqa: SLF001
+    assert ov._sess.sizes == [(1024, 440)], ov._sess.sizes
+    assert tuple(ov.cfg.size_px) == (1024, 440)
+    print("  热重载改 size_px：会话交换链跟随重建 OK")
+
+
+def test_escalation_ladder_climbs_to_session_and_instance():
+    """★ 回归（用户实测）：自愈必须**逐级升高**（swapchain → session → instance）。
+
+    老实现每做一级就把 `_stage` 放回 "none" → 永远停在第一级（日志实测：
+    232 次重建 swapchain、0 次重建会话）。梯子的回落只在真的恢复上传时
+    （帧循环 `_fails = 0` 处）——所以这里只验「动作后 stage 不回落、逐级往上」。
+    """
+    ov = OpenXrOverlay.__new__(OpenXrOverlay)
+    calls: list[tuple] = []
+
+    class _S:
+        def rebuild_swapchain(self):  # noqa: ANN201
+            calls.append(("swapchain",))
+
+    ov._sess = _S()                     # noqa: SLF001
+    ov._stage = "none"                  # noqa: SLF001
+    ov._fails_in_stage = 3              # noqa: SLF001
+    ov._rebuilds = 0                    # noqa: SLF001
+    ov._reinits = 0                     # noqa: SLF001
+    ov._teardown = lambda *, keep_gl: calls.append(("teardown", keep_gl))        # noqa: SLF001,E731
+    ov._bring_up = lambda *, rebuild_gl: calls.append(("bring_up", rebuild_gl))  # noqa: SLF001,E731
+
+    ov._escalate()                      # noqa: SLF001
+    assert calls == [("swapchain",)], calls
+    assert ov._stage == "swapchain"     # noqa: SLF001
+    ov._fails_in_stage = 3              # noqa: SLF001
+    ov._escalate()                      # noqa: SLF001
+    assert calls[-2:] == [("teardown", True), ("bring_up", False)], calls
+    assert ov._stage == "session"       # noqa: SLF001
+    ov._fails_in_stage = 3              # noqa: SLF001
+    ov._escalate()                      # noqa: SLF001
+    assert calls[-2:] == [("teardown", True), ("bring_up", True)], calls
+    assert ov._stage == "instance" and ov._reinits == 1   # noqa: SLF001
+    print("  自愈阶梯：swapchain → session → instance 逐级升高 OK")
+
+
 if __name__ == "__main__":
     print("test_openxr_overlay:")
     test_quaternion_matches_matrix_convention()
@@ -906,4 +1031,7 @@ if __name__ == "__main__":
     test_create_gl_context_selection()
     test_anchor_actions_are_built_once_and_switchable()
     test_unsupported_tracker_path_degrades_only_that_anchor()
+    test_session_set_size_rebuilds_swapchain()
+    test_panel_size_reload_resizes_swapchain()
+    test_escalation_ladder_climbs_to_session_and_instance()
     print("ALL PASSED")

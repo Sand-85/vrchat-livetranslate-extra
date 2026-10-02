@@ -37,14 +37,18 @@ class DeviceInfo:
 
 
 def enumerate_mic_devices(devices: list[dict] | None = None) -> list[DeviceInfo]:
-    """枚举麦克风（输入）设备。devices 参数用于测试注入。"""
+    """枚举麦克风（输入）设备。devices 参数用于测试注入。
+
+    ⚠️ 索引取 `pa_index`（Windows 平台层过滤过 host API，列表下标已不等于 PortAudio 索引），
+    没有该键时回落**列表下标**（Linux 的 PipeWire 枚举与自己注入的假表走的都是这条）。
+    """
     try:
         devs = devices if devices is not None else platform.device_backend().query_devices()
         result = []
         for i, d in enumerate(devs):
             if d.get("max_input_channels", 0) > 0:
                 result.append(DeviceInfo(
-                    index=i,
+                    index=int(d.get("pa_index", i)),
                     name=str(d.get("name", "")),
                     sample_rate=int(d.get("default_samplerate", 0)),
                     channels=int(d.get("max_input_channels", 0)),
@@ -77,14 +81,17 @@ def enumerate_loopback_devices(devices: list[dict] | None = None) -> list[Device
 
 
 def enumerate_audio_out_devices(devices: list[dict] | None = None) -> list[DeviceInfo]:
-    """枚举译音输出（输出）设备。devices 参数用于测试注入。"""
+    """枚举译音输出（输出）设备。devices 参数用于测试注入。
+
+    索引口径同 `enumerate_mic_devices`：优先 `pa_index`，没有才用列表下标。
+    """
     try:
         devs = devices if devices is not None else platform.device_backend().query_devices()
         result = []
         for i, d in enumerate(devs):
             if d.get("max_output_channels", 0) > 0:
                 result.append(DeviceInfo(
-                    index=i,
+                    index=int(d.get("pa_index", i)),
                     name=str(d.get("name", "")),
                     sample_rate=int(d.get("default_samplerate", 0)),
                     channels=int(d.get("max_output_channels", 0)),

@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from . import endpoints
 from .session.base import (SessionConfig, DEFAULT_FINAL_SILENCE_S,
                            DEFAULT_FAST_FINAL_SILENCE_S, DEFAULT_FAST_FINAL_MIC_QUIET_S)
 
@@ -64,25 +65,33 @@ def ensure_config(path: Path | None = None) -> Path:
     return p
 
 
-def load_api_key(explicit: str | None = None) -> str:
-    """API key 读取顺序：显式参数 → 界面保存的 → 环境变量 → ~/.bailian/config.json（bl CLI）。
+def load_api_key(explicit: str | None = None, slot: str = "qianwen") -> str:
+    """API key 读取顺序：显式参数 → 界面保存的（按 slot 分槽）→ 环境变量 → ~/.bailian/config.json。
 
     界面保存的排第二（仅次于显式传参）：用户在界面上填了 key，就是最明确的意图，
     不该被环境变量或 CLI 配置盖掉。来源会打一行日志（**只打码、绝不打明文**），
     否则"为什么连的还是旧 key"根本查不出来。
+
+    `slot` 是密钥槽名（= 线路 id，见 endpoints.key_slot）：千问云与百炼**各存一份**
+    key，切线路不用重填 —— 故界面保存的这一步按 slot 取对应那份。
+    ⚠️ 但 `DASHSCOPE_API_KEY` 环境变量与 `~/.bailian/config.json`（bl CLI）这两条兜底
+    **两条线路共用**：阿里官方对国际站也用同一个环境变量名 / 同一份 CLI 配置，
+    没有「按线路分」的说法，所以这里不按 slot 区分。
     """
     if explicit:
         return explicit.strip()
     try:
         from .credentials import load_saved_key, mask_key
 
-        saved = load_saved_key()
+        saved = load_saved_key(slot)
         if saved:
-            print(f"[config] API key 来源：界面保存（{mask_key(saved)}）", flush=True)
+            print(f"[config] API key 来源：界面保存（线路={endpoints.provider_name(slot)}，"
+                  f"{mask_key(saved)}）", flush=True)
             return saved
     except Exception as exc:  # noqa: BLE001
         print(f"[config] ⚠️ 读取界面保存的 key 失败，继续走其它来源："
               f"{type(exc).__name__}: {exc}", flush=True)
+    # ↓ 环境变量 / bl CLI 两条兜底：两条线路共用（见上方 docstring）
     env = os.environ.get("DASHSCOPE_API_KEY")
     if env:
         return env.strip()
@@ -129,6 +138,9 @@ class Direction:
             turn_detection=base.get("turn_detection"),
             base_url=base["base_url"],
             workspace_id=base.get("workspace_id") or "",
+            # provider / region 只随会话带出去供日志/诊断；实际地址仍由 base_url 决定。
+            provider=base.get("provider", endpoints.DEFAULT_PROVIDER),
+            region=base.get("region", endpoints.DEFAULT_REGION),
             api_key=base["api_key"],
             reconnect_backoff=tuple(base.get("reconnect_backoff", (2, 5, 10, 30))),
             max_new_sessions_per_minute=int(base.get("max_new_sessions_per_minute", 4)),
@@ -195,21 +207,45 @@ def _opt_float(value) -> float | None:
         return None
 
 
-def _resolve_api_key(api_key: str | None, require_key: bool) -> str:
+def _resolve_api_key(api_key: str | None, require_key: bool, slot: str = "qianwen") -> str:
     """取 key；`require_key=False` 时"还没有 key"不抛错，而是返回空串。
 
     界面用得上：启动时**不能**因为没填 key 就起不来 —— 那样用户连"去哪填 key"
     的入口都看不到（首次使用、或换台电脑给朋友用，就是死局）。
     调用方（`_start`）会检查空 key 并给出明确指引。
+
+    `slot` 透传给 `load_api_key`（按线路分槽取界面保存的那份）；日志里带上线路名，
+    免得两条线路各存一份 key 时"哪条线路没配"看不出来。
     """
     try:
-        return load_api_key(api_key)
+        return load_api_key(api_key, slot=slot)
     except SystemExit:
         if require_key:
             raise
-        print("[config] ⚠️ 尚未配置 API key —— 界面照常启动；"
+        print(f"[config] ⚠️ 尚未配置 API key（线路={endpoints.provider_name(slot)}）—— 界面照常启动；"
               "开始翻译前请点主界面右上角的 API key 入口填一个", file=sys.stderr, flush=True)
         return ""
+
+
+def _warn_provider_host_mismatch(provider: str, base_url: str, workspace_id: str) -> None:
+    """provider 与 base_url 的 host 对不上时打一行 WARN（**不报错**，地址仍以 base_url 为准）。
+
+    为什么会不一致：切换线路本该由界面同步改写 base_url（第 2 轮），但用户可能只手改了
+    `provider:` 忘了改 base_url（或反过来）。这时**绝不**自作主张改地址 —— base_url 是
+    唯一真相源；只留一行痕，告诉用户「以 base_url 为准，去哪切」。host 解析失败也只留痕。
+    """
+    try:
+        host = endpoints.host_of(base_url, workspace_id).lower()
+    except ValueError as exc:
+        print(f"[config] ⚠️ 无法从 session.base_url 解析 host（{exc}）；地址仍以 base_url 为准",
+              flush=True)
+        return
+    if provider == endpoints.PROVIDER_BAILIAN_INTL and host.endswith("qianwenaiapi.com"):
+        print("[config] ⚠️ 线路=阿里云百炼·国际版，但 session.base_url 还是千问云的域名 "
+              "—— 地址以 base_url 为准；要切线路请在界面「设置 → 常规」里切换", flush=True)
+    elif provider == endpoints.PROVIDER_QIANWEN and host.endswith(".maas.aliyuncs.com"):
+        print("[config] ⚠️ 线路=千问云，但 session.base_url 指向阿里云百炼的域名 "
+              "—— 地址以 base_url 为准；要切线路请在界面「设置 → 常规」里切换", flush=True)
 
 
 def load_config(path: str | Path | None = None, api_key: str | None = None,
@@ -238,12 +274,28 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 shutil.copyfile(EXAMPLE_CONFIG, p)
                 raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     s = raw.get("session", {}) or {}
+    # 线路 / 地域：区分「键缺失」与「填了但填错」两种情况 ——
+    #   · 键缺失（老配置）→ 用 get 的默认值兜进去，normalize 收到的是合法默认，**不留痕**：
+    #     老 config.yaml 全都没有这两键（且被 gitignore、升级时不会自动补），若把 None 直接
+    #     喂给 normalize，会让每个老用户**每次启动**都看到一行「未识别的服务线路 None」的
+    #     噪声 —— 那既不是他填的值、也违背「老配置行为零变化」（设计口径 §1.5）。
+    #   · 填了非法值（如 provider: nope）→ 原样送 normalize，照旧留痕 + 回落（§1.4：不静默）。
+    # region 只对百炼国际版有意义，千问云线路带着默认值也无妨（仅供日志）。
+    provider = endpoints.normalize_provider(s.get("provider", endpoints.DEFAULT_PROVIDER))
+    region = endpoints.normalize_region(s.get("region", endpoints.DEFAULT_REGION))
+    # base_url 默认值也走 endpoints 派生（值不变，只是不再写第二份域名字面量 = 单一真相源）。
+    base_url = s.get("base_url", endpoints.default_base_url(endpoints.PROVIDER_QIANWEN))
+    workspace_id = s.get("workspace_id") or ""
+    # provider 与 base_url 的 host 对不上 → 打一行 WARN（不报错，地址仍以 base_url 为准）。
+    _warn_provider_host_mismatch(provider, base_url, workspace_id)
     session_base = {
         "model": s.get("model", "qwen3.8-livetranslate-flash-realtime"),
-        "base_url": s.get("base_url", "wss://maas.qianwenaiapi.com/api-ws/v1/realtime"),
+        "base_url": base_url,
+        "provider": provider,
+        "region": region,
         "voice": s.get("voice", "Tina"),
         "turn_detection": s.get("turn_detection"),
-        "workspace_id": s.get("workspace_id") or "",
+        "workspace_id": workspace_id,
         "reconnect_backoff": s.get("reconnect_backoff", [2, 5, 10, 30]),
         "max_new_sessions_per_minute": s.get("max_new_sessions_per_minute", 4),
         "final_silence_s": float(s.get("final_silence_s", DEFAULT_FINAL_SILENCE_S)),  # 默认值必须 > 服务端增量间隔（实测最大 2.3s），改小会让最终版在句子中间抢跑
@@ -263,7 +315,8 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         # 全局专有词库放在这个公共底座里：`to_session_config` 只有这一个入参，
         # 而词库对两条腿（实时会话 / 打字翻译）是同一份 —— 放在这里两处都拿得到。
         "glossary": _as_str_map(raw.get("glossary"), "glossary（专有词库）"),
-        "api_key": _resolve_api_key(api_key, require_key),
+        # 密钥按线路分槽：千问云与百炼各存一份（切线路不用重填）。slot = 线路 id。
+        "api_key": _resolve_api_key(api_key, require_key, slot=endpoints.key_slot(provider)),
     }
     directions = {}
     for name, d in (raw.get("directions") or {}).items():

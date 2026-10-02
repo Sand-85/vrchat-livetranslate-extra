@@ -25,11 +25,12 @@ IS_LINUX = sys.platform.startswith("linux")
 __all__ = [
     "IS_WINDOWS", "IS_LINUX",
     "backend", "device_backend",
-    "open_path", "find_cjk_font", "detect_ui_language",
+    "open_path", "find_cjk_font", "find_thai_font", "detect_ui_language",
     # 桌面叠加窗（issue #11）：缺失实现的平台会拿到下面的安全默认值
     "desktop_window_backend", "find_game_window", "window_client_rect", "is_window",
-    "set_click_through", "set_tool_window", "top_level_hwnd", "screen_work_area",
-    "monitor_work_area",
+    "set_click_through", "set_tool_window", "set_window_shape",
+    "top_level_hwnd", "screen_work_area",
+    "monitor_work_area", "create_desktop_window",
 ]
 
 _backend: Any = None
@@ -151,6 +152,19 @@ def find_cjk_font() -> str | None:
     return backend().find_cjk_font()
 
 
+def find_thai_font() -> str | None:
+    """找一个含泰文字形的字体文件路径；找不到返回 None（由调用方回落）。
+
+    与 `find_cjk_font()` 是**两条独立**的探测：CJK 字体（雅黑 / Noto Sans CJK 等）
+    不含泰文字形，泰文字体（Leelawadee UI / Noto Sans Thai 等）不含中日韩字形 ——
+    混排时必须按书写系统切 run、各用各的字体画，否则会出豆腐块。
+
+    Windows 侧在 `win.py` 的 `_THAI_FONT_CANDIDATES`（LeelawUI.ttf → tahoma.ttf → …），
+    Linux 侧在 `linux.py` 用 `fc-match "Noto Sans Thai:lang=th"` + 已知路径兜底。
+    """
+    return backend().find_thai_font()
+
+
 def detect_ui_language() -> str:
     """探测系统界面语言，返回本项目支持的代码（zh/en/ja/ko/ru）。
 
@@ -167,14 +181,16 @@ def detect_ui_language() -> str:
 # ---------------------------------------------------------------- 桌面叠加窗（issue #11）
 #
 # 桌面模式的字幕窗（`vlt/output/desktop_overlay.py`，**共享模块**）需要几件平台事实：
-# 找游戏窗口、拿它的客户区、给自己的窗口打上鼠标穿透/不抢焦点、知道屏幕工作区多大。
-# 这些能力目前只有 Windows 侧实现（Tk + Win32 扩展样式）。
+# 找游戏窗口、拿它的客户区、给自己的窗口打上鼠标穿透/不抢焦点、知道屏幕工作区多大，
+# 以及在 Linux 上要一个**原生窗**（Wayland layer-shell，逐像素透明/协议级穿透）。
+# Windows 侧在 `win.py` 用 Win32 扩展样式实现；Linux 侧在 `linux.py`
+# （X11 直调 libX11/libXext；Wayland 直调 libwayland-client，见 `wayland.py`）。
 #
 # ⚠️ 门面在这里**兜底**而不是让共享模块去 import 平台独占模块：
-#   * `linux.py` 没有这些属性 → 下面每个函数返回安全默认值（None / False / 原值 /
-#     (0,0,1920,1080)），Linux 侧**一个文件都不用改**就能导入共享模块；
-#   * 于是桌面字幕在 Linux 上退化成「固定在屏幕坐标上的一块置顶面板」（不跟随游戏窗口），
-#     降级由调用方（desktop_overlay）打日志说明，门面自己不吭声。
+#   * 缺失的实现 → 每个函数返回安全默认值（None / False / 原值 / (0,0,1920,1080)；
+#     `create_desktop_window` 返回 None 让调用方回落 Tk）；
+#   * 降级（回落 Tk、没找到窗口等）由调用方/后端打日志说明，门面自己不吭声；
+#     测试进程里建原生窗会被 `linux.py` 的防呆拒绝（不许碰用户会话的合成器）。
 #
 # 判定「有没有桌面窗口能力」用 `find_window_by_title` 这一个属性作探针：它是这套能力里
 # 最核心的一个，缺了它其余几个也没有意义。
@@ -248,6 +264,17 @@ def set_tool_window(hwnd: int) -> bool:
     return bool(_desktop_call("set_tool_window", False, hwnd))
 
 
+def set_window_shape(hwnd: int, mask: bytes, width: int, height: int) -> bool:
+    """给窗口设/换 1 位形状蒙版（蒙版外的像素不画、也不吃鼠标）。返回是否设上了。
+
+    Linux 的 **Tk 回落路径**用它抠掉面板外的键色底（Tk 没有 Windows 那种
+    `-transparentcolor`）：每帧把 RGBA 面板转成蒙版字节（口径见 `linux.set_window_shape`
+    与 `desktop_overlay.alpha_mask_bits`），尺寸对不上/句柄失效会被后端拒绝 → False，
+    调用方降级（留一行日志，不再重试刷屏）。本平台没实现（Windows）→ 同样 False。
+    """
+    return bool(_desktop_call("set_window_shape", False, hwnd, mask, width, height))
+
+
 def top_level_hwnd(widget_id: int) -> int:
     """Tk 的 `winfo_id()` 给的是子窗口句柄 → 换成能设扩展样式的顶层句柄。
 
@@ -292,3 +319,25 @@ def monitor_work_area(hwnd: int) -> tuple[int, int, int, int]:
     """
     return (_as_work_area(_desktop_call("monitor_work_area", None, hwnd))
             or screen_work_area())
+
+
+def create_desktop_window(size: tuple[int, int], alpha: float = 1.0,
+                          click_through: bool = True, on_drag_end: Any = None,
+                          backend: str = "auto") -> Any:
+    """本平台的**原生桌面叠加窗**（Linux：Wayland layer-shell / X11 ARGB 覆盖窗）。
+
+    返回 `None` = 本平台/本会话没有原生实现（Windows、没有 layer-shell 的合成器、
+    强制 `backend=tk` 等），调用方（`vlt/output/desktop_overlay.py`）回落 Tk 那条腿。
+
+    `backend` 是上层配置透传的选择（`auto|native|tk|wayland|x11`，见
+    `vlt/output/desktop_overlay.py:BACKENDS`）—— **怎么挑、挑不到为什么**由后端
+    模块（`linux.py`）自己打日志，门面不吭声、也不兜异常（调用方接了异常）。
+
+    返回对象必须满足 `vlt/platform/base.py:DesktopWindow` 的窗口契约。
+    """
+    mod = desktop_window_backend()
+    fn = getattr(mod, "create_desktop_window", None) if mod is not None else None
+    if fn is None:
+        return None
+    return fn(size=size, alpha=alpha, click_through=click_through,
+              on_drag_end=on_drag_end, backend=backend)

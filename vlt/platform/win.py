@@ -21,14 +21,68 @@ from .base import PA_LOCK, AudioSource, LoopbackTarget
 # ---------------------------------------------------------------- 设备枚举
 
 def query_devices() -> list[dict]:
-    """sounddevice 的设备表（麦克风 + 播放）。
+    """sounddevice 的设备表 —— **只保留 Windows 已启用（WASAPI）那一套**。
 
     失败**不在这里吞**：调用方（`vlt/devices.py`）负责把异常翻成「空列表」，
     这样「枚举不到设备」与「库坏了」在日志里还分得开。
+
+    ## 为什么要按 host API 收敛（2026-10-02 实机对照）
+
+    Windows 上 PortAudio 有 4 个 host API（MME / DirectSound / WASAPI / WDM-KS），
+    **同一块声卡在每个 API 下各算一条**，还夹着一堆已禁用 / 未插入的幽灵端点。
+    本机实测 `sd.query_devices()` **41 条**，而 Windows「声音」里真正**已启用**的只有 **7 个**：
+
+      · Windows 已启用端点（`Get-PnpDevice -Class AudioEndpoint`，Status=OK）：**7 个**
+      · PortAudio 的 **WASAPI** 那一套：**正好这 7 个**（名字逐个对得上，采样率统一 48000）
+      · MME(8) + DirectSound(9) + WDM-KS(16) 共 33 条 = 那 7 个的重复 **+**
+        `立体声混音` / `Realtek HD Audio` 旧滤镜 / `耳机 ()` 空名幽灵 / 蓝牙免手操
+        这类**未启用**的端点
+
+    不收敛的后果（都是用户实测报上来的）：
+      1. 界面上同一支麦克风出现两三条（界面按「名字 (采样率Hz)」显示）；
+      2. 同名那几条**采样率还不一样** —— MME/DirectSound 报 44100、WASAPI 报 48000；
+      3. 会列出**根本没启用**的设备，选了当然打不开；
+      4. 按名字解析（`devices.resolve_device_name`）总是命中**第一条**，而 MME 排最前
+         —— 于是用户就算挑了 WASAPI 那条，实际打开的仍是 MME（最老、延迟最高的一路）。
+
+    ## 口径
+
+    只返回 WASAPI host API 的设备（= Windows 已启用端点，且天然去重）。
+    **只在 WASAPI 一个都枚举不到时才回落完整设备表**并留痕 —— 极端环境下宁可列表丑，
+    也不能让用户一个设备都选不到。
+
+    另外给每条 dict 打上 `pa_index`（**真实 PortAudio 索引**）：过滤后列表下标不再等于
+    PortAudio 索引，`devices.py` 靠这个键取索引，否则会打开到错位的设备。
     """
     import sounddevice as sd
     with PA_LOCK:                    # PortAudio 串行（并发 init/destroy 会段错误）
-        return [dict(d) for d in sd.query_devices()]
+        devices = [dict(d) for d in sd.query_devices()]
+        try:
+            apis = [dict(a) for a in sd.query_hostapis()]
+        except Exception as exc:     # noqa: BLE001 — 老版本/打桩环境可能没有这个接口
+            print(f"[devices] ⚠️ 拿不到 host API 列表（{type(exc).__name__}: {exc}）"
+                  "→ 设备表按原样返回（可能含重复项）", flush=True)
+            return devices
+    for i, d in enumerate(devices):
+        d["pa_index"] = i            # 真实索引：过滤后 devices.py 也拿它当设备号
+
+    wasapi = next((i for i, a in enumerate(apis)
+                   if "WASAPI" in str(a.get("name", "")).upper()), None)
+    if wasapi is None:
+        print("[devices] ⚠️ 没有 WASAPI host API，设备表按原样返回"
+              "（可能含 MME/DirectSound 的重复项）", flush=True)
+        return devices
+    kept = [d for d in devices if d.get("hostapi") == wasapi]
+    if not kept:
+        print("[devices] ⚠️ WASAPI 下没枚举到任何设备，回落完整设备表"
+              "（可能含未启用的端点，列表会变长）", flush=True)
+        return devices
+    dropped = len(devices) - len(kept)
+    if dropped:
+        print(f"[devices] 设备表收敛到 WASAPI 已启用设备：{len(kept)} 个"
+              f"（另有 {dropped} 条是 MME/DirectSound/WDM-KS 的重复项或未启用端点，已隐藏）",
+              flush=True)
+    return kept
 
 
 def query_loopback_devices() -> list[dict]:
@@ -97,6 +151,41 @@ def find_cjk_font() -> str | None:
     return None
 
 
+# 泰文字体候选（按优先级）。
+#
+# ⚠️ **不能复用 CJK 字体**：实测 `C:/Windows/Fonts/msyh.ttc`（微软雅黑，默认 CJK 字体）
+# 不含泰文字形 —— 用 PIL 渲染 `สวัสดี`，位图与「私有区缺字位 U+E000」的位图**完全相同**
+# （= 豆腐块）。所以泰语必须走这条独立探测，渲染侧按书写系统切 run、各用各的字体画。
+#
+# 候选顺序：
+#   1. Leelawadee UI（`LeelawUI.ttf`）—— Windows 8+ 自带的泰文 UI 字体，观感最好；
+#   2. Tahoma（`tahoma.ttf`）—— Windows XP 起就带泰文字形，兜底最稳；
+#   3. Noto Sans Thai —— 用户自己装过 Noto 字体族的话；
+#   4. 其它可能含泰文的 Windows 字体（Arial Unicode MS 等）。
+# 一个都没有时返回 None，由调用方降级并留痕：`overlay.resolve_thai_font_path` 先试
+# 用户配置的字体，再回落到 CJK 字体（泰文会出豆腐块）+ 打一行告警（禁静默降级）。
+_THAI_FONT_CANDIDATES = (
+    "C:/Windows/Fonts/LeelawUI.ttf",     # Leelawadee UI（泰文 UI 字体，Win 8+）
+    "C:/Windows/Fonts/tahoma.ttf",       # Tahoma（含泰文，Win XP 起）
+    "C:/Windows/Fonts/NotoSansThai-Regular.ttf",
+    "C:/Windows/Fonts/NotoSansThaiVF.ttf",
+    "C:/Windows/Fonts/ARIALUNI.TTF",     # Arial Unicode MS（老版 Office 会装）
+)
+
+
+def find_thai_font() -> str | None:
+    """找一个含泰文字形的字体文件路径；找不到返回 None（由调用方回落）。
+
+    与 `find_cjk_font()` 是**两条独立**的探测：CJK 字体（雅黑等）不含泰文字形，
+    泰文字体（Leelawadee UI 等）不含中日韩字形 —— 混排时必须按书写系统切 run、
+    各用各的字体画，否则会出豆腐块。
+    """
+    for cand in _THAI_FONT_CANDIDATES:
+        if Path(cand).exists():
+            return cand
+    return None
+
+
 # ---------------------------------------------------------------- 界面语言
 
 # Windows 主语言 ID → 界面语言。表里没有的（德语/法语等已知但未支持的语言）按 en 接待；
@@ -140,21 +229,45 @@ class PyaudioLoopbackSource(QueueAudioSource):
 
     def __init__(self, loop, *, device_index: int, name: str, rate: int,
                  channels: int) -> None:
-        ch = min(2, channels or 2)
-        super().__init__(loop, rate=rate, channels=ch)
-        self.device_name = name
+        # ⚠️ **按设备原生声道数打开，不要压成 2。**
+        # WASAPI 的 loopback 端点只能用**端点混音格式**的声道数打开；压成 2 会被
+        # PortAudio 直接拒掉 → `OSError: [Errno -9998] Invalid number of channels`，
+        # 端点上一条音频都收不到。海外用户实测（2026-10-02，7.1 / 8 声道设备）：
+        # 采集腿与设置里的电平条**都**报这个错 —— 电平条复用同一处代码。
+        # 降混到单声道由下游负责（`to_16k_mono(pcm, rate, source.channels)` 按声道数取均值），
+        # 所以这里按原生声道数开是安全的。
+        # 个别设备只吃立体声 → 逐个候选试，**每个分支各留一行日志**（禁静默降级）。
+        # 日志用 print：`[loopback]` 这一族在引擎里就是 print 进日志文件的（用户在界面上
+        # 「打开日志文件夹」看的就是它），走 logging 会因 root 级别不够而整条消失。
+        wanted = max(1, int(channels or 2))
+        candidates = [wanted] if wanted == 2 else [wanted, 2]
         import pyaudiowpatch as pyaudio
 
+        self.device_name = name
         self._chunk_max = int(rate * 0.1)
         self._pa = pyaudio.PyAudio()
-        try:
-            self._stream = self._pa.open(
-                format=pyaudio.paInt16, channels=ch, rate=rate,
-                frames_per_buffer=int(rate * 0.1), input=True,
-                input_device_index=device_index)
-        except Exception:
+        self._stream = None
+        last_exc: Exception | None = None
+        for ch in candidates:
+            try:
+                self._stream = self._pa.open(
+                    format=pyaudio.paInt16, channels=ch, rate=rate,
+                    frames_per_buffer=int(rate * 0.1), input=True,
+                    input_device_index=device_index)
+            except Exception as exc:  # noqa: BLE001 — 换声道数再试
+                last_exc = exc
+                print(f"[loopback] 采集端点「{name}」按 {ch} 声道打开失败：{exc}", flush=True)
+                continue
+            if ch == wanted:
+                print(f"[loopback] 采集端点「{name}」{rate}Hz ×{ch}ch 打开成功", flush=True)
+            else:
+                print(f"[loopback] 采集端点「{name}」原生 {wanted}ch 打不开，"
+                      f"已回落 {ch}ch 打开", flush=True)
+            break
+        else:
             self._pa.terminate()
-            raise
+            raise last_exc if last_exc is not None else RuntimeError("loopback 打不开")
+        super().__init__(loop, rate=rate, channels=ch)
 
     def _pump(self, stop: threading.Event) -> None:
         while not stop.is_set():
