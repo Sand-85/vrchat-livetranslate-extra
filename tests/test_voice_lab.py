@@ -260,8 +260,9 @@ def test_preview_cache() -> bool:
 
 def test_recipes() -> bool:
     ok = True
-    cond = len(vl.RECIPES) == 8
-    print(f"  配方条数 = {len(vl.RECIPES)}（期望 8）  {'OK' if cond else '✗'}")
+    cond = len(vl.RECIPES) == 5
+    print(f"  配方条数 = {len(vl.RECIPES)}（期望 5 = 用户 2026-10-03 试听后保留的 1·2·4·6·8）"
+          f"  {'OK' if cond else '✗'}")
     ok &= cond
     labels = vl.recipe_labels()
     rt_ok = all(vl.recipe_from_label(lbl) is r for lbl, r in zip(labels, vl.RECIPES))
