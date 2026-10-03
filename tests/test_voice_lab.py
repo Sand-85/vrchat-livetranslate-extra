@@ -152,7 +152,7 @@ def test_create_request_shape() -> bool:
             and inp["target_model"] == vl.DEFAULT_TARGET_MODEL
             and inp["preferred_name"] == "demo"
             and inp["voice_prompt"] == "年轻女性，语速偏慢"
-            and inp["preview_text"] == vl.PREVIEW_TEXT)
+            and inp["preview_text"] == vl.TEST_TEXT)
     print(f"  请求体（model={payload['model']} / action={inp['action']} / "
           f"名字={inp['preferred_name']}）  {'OK' if cond else '✗'}")
     ok &= cond
@@ -291,6 +291,67 @@ def test_describe_rows() -> bool:
     return cond
 
 
+def test_sample_pcm() -> bool:
+    """试听已有音色：测试文本固定 + 参数透传 + 失败给人话（不吞异常）。
+
+    这条路的由来：官方只在**创建**时回 `preview_audio`，账号里原有的音色没有预览音频 →
+    想试听只能自己合成一句。要钉住的是「合成谁、用哪句、哪个模型、失败了说什么」。
+    """
+    ok = True
+    cond = vl.TEST_TEXT == "你好，我是SAND，现在是音色测试"
+    print(f"  测试文本 = {vl.TEST_TEXT!r}（{len(vl.TEST_TEXT)} 字）{'OK' if cond else '✗'}")
+    ok &= cond
+
+    calls: list[dict] = []
+    orig = vl.tts.synthesize
+    try:
+        def fake_synth(text, *, voice="", model="", api_key="", endpoint=None, timeout=None, **kw):
+            calls.append({"text": text, "voice": voice, "model": model, "endpoint": endpoint})
+            return b"\x00\x01" * 64
+
+        vl.tts.synthesize = fake_synth
+        pcm = vl.sample_pcm("qwen-tts-vd-x-voice-1", "qwen3-tts-vd-2026-01-26",
+                            api_key="sk-t", endpoint="https://ep.example/api/v1")
+        c = calls[-1]
+        cond = (pcm == b"\x00\x01" * 64 and c["text"] == vl.TEST_TEXT
+                and c["voice"] == "qwen-tts-vd-x-voice-1"
+                and c["model"] == "qwen3-tts-vd-2026-01-26"
+                and c["endpoint"] == "https://ep.example/api/v1")
+        print(f"  参数透传（句/音色/模型/端点）{'OK' if cond else '✗ ' + repr(c)}")
+        ok &= cond
+
+        # 没给模型 → 回落默认 TTS 模型（列表接口没带 target_model 时不至于直接崩）
+        vl.sample_pcm("v1", "", api_key="sk-t")
+        cond = calls[-1]["model"] == vl.tts.DEFAULT_MODEL
+        print(f"  模型缺省回落 = {calls[-1]['model']}  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # 空音色 → 直接拒（别发一个必然失败的请求）
+        try:
+            vl.sample_pcm("", "m", api_key="sk-t")
+            print("  空音色没被拒 ✗")
+            ok = False
+        except vl.VoiceLabError:
+            print("  空音色被拒 OK")
+
+        # 底层异常 → 包成 VoiceLabError（界面只显示人话，不吐栈）
+        def boom(*a, **kw):
+            raise RuntimeError("connection reset")
+
+        vl.tts.synthesize = boom
+        try:
+            vl.sample_pcm("v1", "m", api_key="sk-t")
+            print("  合成异常没被包装 ✗")
+            ok = False
+        except vl.VoiceLabError as exc:
+            cond = "connection reset" in str(exc)
+            print(f"  合成异常包装成人话 OK（{exc}）")
+            ok &= cond
+    finally:
+        vl.tts.synthesize = orig
+    return ok
+
+
 if __name__ == "__main__":
     print("test_voice_lab:")
     print(" 1) 音色名规范化")
@@ -313,5 +374,7 @@ if __name__ == "__main__":
     ok &= test_recipes()
     print(" 10) 展示行")
     ok &= test_describe_rows()
+    print(" 11) 试听测试文本与合成入口")
+    ok &= test_sample_pcm()
     assert ok, "voice_lab 用例失败（见上）"
     print("ALL PASSED")

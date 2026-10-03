@@ -2463,6 +2463,9 @@ class TranslationGUI:
         self._lab_recipe_btn = ttk.Button(rrow, text=t("用配方一键生成"),
                                           command=self._on_lab_recipe_generate)
         self._lab_recipe_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self._lab_recipe_preview_btn = ttk.Button(rrow, text=t("试听配方"),
+                                                  command=self._on_lab_recipe_preview)
+        self._lab_recipe_preview_btn.pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(body, text=t("过往生成（本账号的自定义音色）:"),
                   style="Dim.TLabel").pack(anchor=tk.W, pady=(10, 0))
@@ -2509,8 +2512,8 @@ class TranslationGUI:
     def _lab_running(self, job: str, on: bool) -> None:
         """置忙/闲：按钮禁用 + 状态行提示（网络活儿全在守护线程里，界面绝不卡）。"""
         self._lab_busy = on
-        for btn in (self._lab_gen_btn, self._lab_recipe_btn, self._lab_refresh_btn,
-                    self._lab_del_btn):
+        for btn in (self._lab_gen_btn, self._lab_recipe_btn, self._lab_recipe_preview_btn,
+                    self._lab_refresh_btn, self._lab_del_btn):
             try:
                 if btn is not None and btn.winfo_exists():
                     btn.configure(state=tk.DISABLED if on else tk.NORMAL)
@@ -2637,20 +2640,57 @@ class TranslationGUI:
               f"voice={info.voice!r}", flush=True)
 
     def _on_lab_preview(self) -> None:
-        """回放本地缓存的试听音频（创建那一刻存下来的，回放不花钱）。"""
+        """试听所选音色：**有本地缓存就直接放**（不花钱）；没有就现场合成一句测试文本。
+
+        为什么要有「现场合成」这条路：官方只在**创建**时回一份 `preview_audio` ——
+        账号里原有的音色（用户在控制台/旧脚本建的，正是「我预设的那几条」）根本没有缓存，
+        只按「没缓存就拒绝」的话，那些音色永远听不了，列表也就成了摆设。
+        合成 17 字 ≈ 0.002 元，比「听不到没法比」便宜得多。
+        """
         info = self._lab_selected()
         if info is None:
             self._lab_set_status(t("还没选音色"))
             return
-        wav = voice_lab.load_preview(APP_DIR, info.voice)
-        if not wav:
-            self._lab_set_status(t("这条音色没有本地试听缓存：请先「生成并试听」一次"))
+        self._lab_audition(info)
+
+    def _on_lab_recipe_preview(self) -> None:
+        """试听所选配方对应的音色（账号里已有同名音色时）—— **不创建、不花 0.2 元**。"""
+        if self._lab_busy:
             return
-        try:
-            _play_pcm_local(tts._decode_to_24k_mono(wav))
-            self._lab_set_status(t("试听完成：{v}", v=info.name or info.voice[-12:]))
-        except Exception as exc:  # noqa: BLE001
-            self._lab_set_status(t("试听失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
+        recipe = voice_lab.recipe_from_label(self._lab_recipe_combo.get())
+        if recipe is None:
+            self._lab_set_status(t("请先选一个配方"))
+            return
+        info = voice_lab.find_by_name(self._lab_voices, recipe.key)
+        if info is None:
+            self._lab_set_status(t("账号里还没有「{v}」，先点「用配方一键生成」", v=recipe.label))
+            return
+        self._lab_audition(info)
+
+    def _lab_audition(self, info: voice_lab.VoiceInfo) -> None:
+        """试听的唯一实现：缓存命中 → 直接放；未命中 → 后台合成一句并落盘。"""
+        label = info.name or info.voice[-12:]
+        wav = voice_lab.load_preview(APP_DIR, info.voice)
+        if wav:
+            try:
+                _play_pcm_local(tts._decode_to_24k_mono(wav))
+                self._lab_set_status(t("试听完成：{v}", v=label))
+            except Exception as exc:  # noqa: BLE001
+                self._lab_set_status(t("试听失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
+            return
+        if self._lab_busy:
+            return
+        api_key, base_url, ws_id = self._lab_ctx()
+        if not api_key:
+            self._lab_set_status(t("还没配置 API key，无法试听（见右上角「设置」）"))
+            return
+        self._lab_running("audition", True)
+        self._lab_set_status(t("正在合成试听「{v}」（{n} 字，约 0.002 元）…",
+                               v=label, n=len(voice_lab.TEST_TEXT)))
+        threading.Thread(target=self._lab_worker, args=("audition",), kwargs={
+            "voice": info.voice, "model": info.target_model, "name": label,
+            "api_key": api_key, "base_url": base_url, "ws_id": ws_id,
+        }, daemon=True).start()
 
     def _on_lab_delete(self) -> None:
         """删除所选音色（不可恢复，先确认）。"""
@@ -2693,6 +2733,16 @@ class TranslationGUI:
                 rows = voice_lab.list_voices(api_key=kw["api_key"], base_url=kw["base_url"],
                                              workspace_id=kw["workspace_id"])
                 self._q.put(("voice_lab", "list", True, "", rows))
+            elif job == "audition":
+                # 试听已有音色：用测试文本现场合成一句（按字符计费，17 字 ≈ 0.002 元）。
+                # 端点按当前线路派生 —— 与「试听」同一条纪律，别回落到模块常量。
+                endpoint = endpoints.multimodal_url(kw["base_url"], kw["ws_id"])
+                pcm = voice_lab.sample_pcm(kw["voice"], kw["model"], api_key=kw["api_key"],
+                                          endpoint=endpoint)
+                if pcm:
+                    voice_lab.save_preview(APP_DIR, kw["voice"], pcm)
+                self._q.put(("voice_lab", "audition", True, "", {
+                    "voice": kw["voice"], "name": kw["name"], "pcm": pcm}))
             else:
                 voice_lab.delete_voice(kw["voice"], api_key=kw["api_key"],
                                        base_url=kw["base_url"],
@@ -2746,6 +2796,19 @@ class TranslationGUI:
             self._lab_banner = t("已删除音色：{v}", v=str(payload)[-12:])
             self._lab_set_status(self._lab_banner)
             self._on_lab_refresh()
+            return
+        if job == "audition":
+            label = str((payload or {}).get("name") or "")
+            pcm = (payload or {}).get("pcm") or b""
+            if not pcm:
+                self._lab_set_status(t("试听失败：{msg}", msg=t("服务端没回音频")))
+                return
+            try:
+                _play_pcm_local(tts._decode_to_24k_mono(pcm))
+                self._lab_set_status(t("试听完成：{v}（已存本地，下次直接放）", v=label))
+            except Exception as exc:  # noqa: BLE001
+                self._lab_set_status(t("试听失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
+            print(f"[gui] 试听合成完成 → {label!r}（{len(pcm)}B）", flush=True)
 
     # ---------------------------------------------------------------- 设置弹窗 · 房间页
     def _build_settings_room(self, body: ttk.Frame) -> None:

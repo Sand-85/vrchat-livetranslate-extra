@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import endpoints
+from . import tts                       # 试听要复用它的合成口径（同一份解码/端点纪律）
 from .tts import _get_opener          # 与 tts.py 共用「直连、绕开系统代理」的同一份策略
 
 # 创建与合成必须用同一个模型；换模型就得重新炼（官方硬约束）。
@@ -46,11 +47,11 @@ DEFAULT_TIMEOUT_S = 30.0
 NAME_MAX_LEN = 16          # 官方：preferred_name 只允许字母数字下划线，长度 ≤16
 PROMPT_MAX_LEN = 2048      # 官方：Qwen-TTS 的 voice_prompt 上限（CosyVoice 是 500）
 
-# 试听句（约 5 秒）——创建音色时用它生成 preview_audio，**同一句**才能横向比听感。
-# 选它而不是随便一句话的理由：① 含标点与停顿，能听出语调处理；② 中英混排片段能听出
-# 多语言能力；③ 长度约 5s，落成 WAV 约 240KB，缓存进磁盘毫无压力。
-PREVIEW_TEXT = ("你好，这是一段用来试听音色的样本。今天的天气还不错，"
-                "我们晚一点出门，顺便买点东西，OK？")
+# 试听用的固定测试文本（用户指定）。三处共用同一句，保证「听的都是同一句」：
+#   ① 创建音色时作为 `preview_text`（接口回一份预览音频）；
+#   ② 账号里已有的音色没缓存时，现场合成一句来试听（按字符计费，极便宜）；
+#   ③ 「过往生成」列表里的回放（缓存落盘后不再花钱）。
+TEST_TEXT = "你好，我是SAND，现在是音色测试"
 
 
 class VoiceLabError(RuntimeError):
@@ -245,7 +246,7 @@ def list_voices(*, api_key: str, base_url: str = "", workspace_id: str = "",
 
 def create_voice(name: str, prompt: str, *, api_key: str, base_url: str = "",
                  workspace_id: str = "", target_model: str = DEFAULT_TARGET_MODEL,
-                 preview_text: str = PREVIEW_TEXT, url: str = "",
+                 preview_text: str = TEST_TEXT, url: str = "",
                  timeout: float = DEFAULT_TIMEOUT_S, opener=None) -> VoiceCreation:  # noqa: ANN001
     """创建一个音色并取回预览音频（**要花钱**：0.2 元/个；失败不计费）。
 
@@ -258,7 +259,7 @@ def create_voice(name: str, prompt: str, *, api_key: str, base_url: str = "",
                "input": {"action": "create", "target_model": target_model,
                          "preferred_name": nm,
                          "voice_prompt": normalize_prompt(prompt),
-                         "preview_text": str(preview_text or PREVIEW_TEXT)},
+                         "preview_text": str(preview_text or TEST_TEXT)},
                "parameters": {"sample_rate": 24000, "response_format": "wav"}}
     obj = _post(payload, api_key=api_key, url=url or customization_url(base_url, workspace_id),
                 timeout=timeout, opener=opener)
@@ -319,6 +320,29 @@ def delete_voice(voice: str, *, api_key: str, base_url: str = "", workspace_id: 
 
 
 # ---------------------------------------------------------------- 试听缓存（本地存储）
+
+
+def sample_pcm(voice: str, model: str = "", *, api_key: str, endpoint: str | None = None,
+               timeout: float = 60.0, text: str = TEST_TEXT) -> bytes:
+    """用测试文本合成一句，供**试听已有音色**（不创建、不再花 0.2 元）。
+
+    为什么需要它：官方只在**创建**时回一份 `preview_audio`；账号里已有的音色（例如用户在
+    控制台或用脚本建的）拿不到预览音频 → 想试听只能自己合成一句。按字符计费，
+    `TEST_TEXT` 只有 17 字（约 0.002 元），相对「听不到就没法比」这个代价可以忽略。
+
+    `model` 必须与创建该音色时的 `target_model` 一致（列表接口会带回来）——设计音色与内置
+    音色不通用，传错必失败。
+    """
+    if not voice:
+        raise VoiceLabError("没有指定音色")
+    model = str(model or "").strip() or tts.DEFAULT_MODEL
+    try:
+        return tts.synthesize(text, voice=voice, model=model, api_key=api_key,
+                              endpoint=endpoint, timeout=timeout)
+    except tts.TtsError as exc:
+        raise VoiceLabError(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — 网络/解码异常也要给用户一句人话
+        raise VoiceLabError(f"{type(exc).__name__}: {exc}") from exc
 
 
 def preview_dir(app_dir: Path) -> Path:

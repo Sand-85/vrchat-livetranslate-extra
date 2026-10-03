@@ -63,8 +63,9 @@ class FakeVoiceLab:
             vl.VoiceInfo(voice="qwen-tts-vd-clear_auto-voice-20260926233229068-247d",
                          name="clear_auto", created="2026-09-26 23:32:29")]
         self._reused = reused
+        self.sampled: list[tuple[str, str]] = []      # (voice, model)：现场合成试听了几次
         self._real = {n: getattr(vl, n) for n in
-                      ("create_or_reuse", "list_voices", "delete_voice")}
+                      ("create_or_reuse", "list_voices", "delete_voice", "sample_pcm")}
 
     def install(self) -> None:
         def create_or_reuse(name, prompt, **kw):                    # noqa: ANN001
@@ -81,6 +82,11 @@ class FakeVoiceLab:
             self.deleted.append(voice)
             self._voices = [v for v in self._voices if v.voice != voice]
 
+        def sample_pcm(voice, model="", **kw):                      # noqa: ANN001
+            self.sampled.append((voice, model))
+            return _tiny_wav()
+
+        vl.sample_pcm = sample_pcm                                  # type: ignore[assignment]
         vl.create_or_reuse = create_or_reuse                        # type: ignore[assignment]
         vl.list_voices = list_voices                                # type: ignore[assignment]
         vl.delete_voice = delete_voice                              # type: ignore[assignment]
@@ -218,6 +224,7 @@ def _install_widgets(gui) -> None:
     gui._tts_voice_var = _Var("")                                   # type: ignore[assignment]
     gui._tts_voice_combo = _Btn()                                   # type: ignore[assignment]
     for name in ("_lab_gen_btn", "_lab_save_btn", "_lab_del_btn", "_lab_recipe_btn",
+                 "_lab_recipe_preview_btn",
                  "_lab_preview_btn", "_lab_refresh_btn"):
         setattr(gui, name, _Btn())
     gui._lab_voices = []
@@ -395,7 +402,7 @@ def test_cost_confirm_blocks_request() -> bool:
 
 
 def test_preview_uses_local_cache() -> bool:
-    """试听读本地缓存（回放不花钱）；没缓存时给明确提示而不是静默失败。"""
+    """试听：**没缓存 → 现场合成一句并落盘**（覆盖账号里原有的音色）；有缓存 → 只回放、不再花钱。"""
     ok = True
     fake = FakeVoiceLab()
     with _gui() as (gui, _cfg_path, tmp):
@@ -408,15 +415,68 @@ def test_preview_uses_local_cache() -> bool:
             gui._lab_list.selection_clear(0, "end")
             gui._lab_list.selection_set(0)
             gui._on_lab_select()
+            PLAYED.clear()
+            # ① 没缓存 → 合成一句（对应用户「预设的那几条音色」：它们没有创建时的预览音频）
             gui._on_lab_preview()
-            cond = "没有本地试听缓存" in _status(gui)
-            print(f"  无缓存 → 提示：{_status(gui)[:26]}…  {'OK' if cond else '✗'}")
-            ok &= cond
+            for m in _drain(gui):
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
             voice = fake._voices[0].voice
-            vl.save_preview(gui_mod.APP_DIR, voice, _tiny_wav())
+            cond = (len(fake.sampled) == 1 and fake.sampled[0][0] == voice
+                    and bool(PLAYED) and bool(vl.load_preview(gui_mod.APP_DIR, voice)))
+            print(f"  无缓存 → 合成 {len(fake.sampled)} 次（音色 {fake.sampled[0][0][-12:] if fake.sampled else '—'}）"
+                  f"、播放 {len(PLAYED)} 次、已落盘  {'OK' if cond else '✗'}")
+            ok &= cond
+            # ② 有缓存 → 直接回放，**不再调合成**（这是省钱的那条不变量）
+            PLAYED.clear()
             gui._on_lab_preview()
-            cond = bool(PLAYED)
-            print(f"  有缓存 → 播放调用 {len(PLAYED)} 次（且没再请求网络）  {'OK' if cond else '✗'}")
+            cond = len(fake.sampled) == 1 and bool(PLAYED)
+            print(f"  有缓存 → 合成仍 {len(fake.sampled)} 次、播放 {len(PLAYED)} 次  {'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            fake.restore()
+    return ok
+
+
+def test_recipe_audition_never_creates() -> bool:
+    """配方试听：账号里没有 → 只提示、一个请求都不发；有 → 只合成这一句，**绝不创建音色**。
+
+    「绝不创建」是这里最要紧的一条：点「试听」不该花 0.2 元建一个音色。
+    """
+    ok = True
+    fake = FakeVoiceLab(voices=[])                     # 账号里一开始什么都没有
+    with _gui() as (gui, _cfg_path, tmp):
+        fake.install()
+        try:
+            gui._on_lab_refresh()
+            for m in _drain(gui):
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            gui._lab_recipe_combo.current(0)
+            recipe = vl.recipe_labels()[0]
+            gui._on_lab_recipe_preview()
+            cond = (not fake.sampled and not fake.created
+                    and "先点" in _status(gui))
+            print(f"  账号里没有 → 提示「{_status(gui)[:30]}…」、请求 0 个  {'OK' if cond else '✗'}")
+            ok &= cond
+            # 账号里有这条（名字 = 配方的 key）→ 试听它：只合成、不新建
+            key = vl.recipe_from_label(recipe).key
+            fake._voices = [vl.VoiceInfo(voice=f"qwen-tts-vd-{key}-voice-20260926233229068-247d",
+                                         name=key, created="2026-09-26 23:32:29",
+                                         target_model="qwen3-tts-vd-2026-01-26")]
+            gui._on_lab_refresh()
+            for m in _drain(gui):
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            PLAYED.clear()
+            gui._on_lab_recipe_preview()
+            for m in _drain(gui):
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            cond = (len(fake.sampled) == 1 and not fake.created
+                    and fake.sampled[0][1] == "qwen3-tts-vd-2026-01-26" and bool(PLAYED))
+            print(f"  账号里有 → 合成 {len(fake.sampled)} 次（模型 {fake.sampled[0][1] if fake.sampled else '—'}）"
+                  f"、创建 {len(fake.created)} 次（必须 0）、播放 {len(PLAYED)} 次  {'OK' if cond else '✗'}")
             ok &= cond
         finally:
             fake.restore()
@@ -537,15 +597,17 @@ if __name__ == "__main__":
     ok &= test_reuse_message_and_no_extra_cost()
     print(" 3) 花钱确认")
     ok &= test_cost_confirm_blocks_request()
-    print(" 4) 试听读本地缓存")
+    print(" 4) 试听：无缓存→合成并落盘；有缓存→只回放")
     ok &= test_preview_uses_local_cache()
     print(" 5) 配方一键生成")
     ok &= test_recipe_fills_and_generates()
-    print(" 6) 删除与未选中的兜底")
+    print(" 6) 配方试听（只合成、绝不创建）")
+    ok &= test_recipe_audition_never_creates()
+    print(" 7) 删除与未选中的兜底")
     ok &= test_delete_and_guards()
-    print(" 7) 空描述 / 没 key")
+    print(" 8) 空描述 / 没 key")
     ok &= test_empty_prompt_and_no_key()
-    print(" 8) _poll 接线")
+    print(" 9) _poll 接线")
     ok &= test_poll_dispatch_wired()
     assert ok, "音色页接线用例失败（见上）"
     print("ALL PASSED")
