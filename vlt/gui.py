@@ -2487,6 +2487,13 @@ class TranslationGUI:
                                            command=self._on_lab_refresh)
         self._lab_refresh_btn.pack(fill=tk.X, pady=(4, 0))
 
+        # 试听的花费提示：**常显**，不靠点击后的状态行 —— 用户点之前就该知道要不要花钱。
+        # 只写「试听免费」是不诚实的（首次试听一条已有音色确实要合成一句）。
+        self._lab_preview_hint = ttk.Label(
+            body, text=t("试听：命中本地缓存不花钱；没有缓存时用测试文本合成一句（约 0.002 元）"),
+            style="Dim.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP)
+        self._lab_preview_hint.pack(anchor=tk.W, pady=(4, 0))
+
         self._lab_status = ttk.Label(body, text="", style="Muted.TLabel", justify=tk.LEFT,
                                      wraplength=SETTINGS_WRAP)
         self._lab_status.pack(anchor=tk.W, pady=(8, 0))

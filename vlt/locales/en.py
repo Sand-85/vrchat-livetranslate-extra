@@ -518,4 +518,6 @@ STRINGS: dict[str, str] = {
     "试听完成：{v}（已存本地，下次直接放）":
         "Preview done: {v} (cached locally, plays instantly next time)",
     "服务端没回音频": "the server returned no audio",
+    "试听：命中本地缓存不花钱；没有缓存时用测试文本合成一句（约 0.002 元）":
+        "Audition: free when cached locally; otherwise one sentence is synthesized with the test text (about 0.002 CNY)",
 }
