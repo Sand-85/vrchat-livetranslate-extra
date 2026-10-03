@@ -513,4 +513,36 @@ STRINGS: dict[str, str] = {
     '正在克隆音色「{v}」（上传素材并送审）…': 'Cloning voice "{v}" (uploading sample for review)...',
     '音色已克隆：{v}（0.01 元，服务端审核中）': 'Voice cloned: {v} (0.01 CNY, under server review)',
     '[复刻] ': '[clone] ',
+    "克隆预设（拼接范本）:":
+        "Clone preset (clip template):",
+    "用此范本":
+        "Use this template",
+    "复制范本":
+        "Copy template",
+    "导出范本…":
+        "Export template…",
+    "导出范本":
+        "Export template",
+    "样本音频已就位：{p}":
+        "Sample audio found: {p}",
+    "样本音频没找到：把 {n} 放到 {d}（或点「选择音频文件…」手工挑一份）":
+        "Sample audio not found: put {n} into {d} (or pick one with \"Choose audio file…\")",
+    "范本的样本音频没找到：把 {n} 放到 {d}":
+        "The template's sample audio was not found: put {n} into {d}",
+    "范本样本":
+        "template sample",
+    " —— 已按范本备好，点「克隆并试听」即可":
+        " — template ready; click \"Clone & Preview\" to continue",
+    "（还没有预设）":
+        "(no presets yet)",
+    "范本已复制到剪贴板":
+        "Template copied to clipboard",
+    "复制失败：{msg}":
+        "Copy failed: {msg}",
+    "范本已导出：{p}":
+        "Template exported: {p}",
+    "导出失败：{msg}":
+        "Export failed: {msg}",
+    "文本文件":
+        "Text file",
 }

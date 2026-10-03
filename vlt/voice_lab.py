@@ -633,6 +633,161 @@ def label_mapper(labels: dict[str, str]):                            # noqa: ANN
     return lookup
 
 
+# ---------------------------------------------------------------- 克隆预设（拼接范本）
+
+
+@dataclass(frozen=True)
+class ClonePreset:
+    """一条「克隆预设」= 复刻素材该怎么拼出来的**范本**。
+
+    为什么要它：复刻素材是拼出来的（多条朗读按顺序 + 固定间隔），拼法本身就是可复用的资产 ——
+    用户要能看/复制/导出这份范本，交给别人照着录，或自己下次照着再拼一份。
+    `key` 是稳定标识（**别改名**：本地登记表按它对齐）。
+    """
+
+    key: str
+    label: str                                  # 中文显示名
+    spec: str                                   # 范本文本（人话：几段、什么顺序、多长、什么规格）
+    sample_name: str = ""                       # 期望的样本文件名（本地按名找）
+    labels: dict = field(default_factory=dict)  # 其它语言的显示名（缺省回落 label）
+
+
+# 内置预设：用户 2026-10-03 复刻 MetroPolice 时用的那份拼接范本
+# （4 条连续朗读 → 0.2s 间隔拼到 19.7s，44.1kHz 单声道 16bit；实测一次通过、无降级）
+BUILTIN_CLONE_PRESETS: tuple[ClonePreset, ...] = (
+    ClonePreset(
+        key="my_clip_4x",
+        label="我的拼接范本（4 条朗读 · 19.7s）",
+        spec=(
+            "素材：4 条连续朗读，44.1kHz 单声道 16bit\n"
+            "顺序：standardloyaltycheck(5.69s) → citizensummoned(5.56s) → "
+            "loyaltycheckfailure(4.57s) → classifyasdbthisblockready(3.29s)\n"
+            "段间：0.2 秒静音（别贴在一起，也别加长）\n"
+            "合计：19.7 秒（官方 10~20 秒；留 0.3 秒余量，别贴 20 秒上限）\n"
+            "规格：≥24kHz · 单声道 · ≤10MB · 无背景音／音乐／他人声 · 正常语速\n"
+            "产出：source_sample_v2.wav\n"
+            "注：样本逐字文本（input.text）**别用文件名猜** —— 要么不填，要么拿 ASR 转写样本原样填，"
+            "填错会被判 wer_too_high 静默降级。"
+        ),
+        sample_name="source_sample_v2.wav",
+        labels={
+            "en": "My clip template (4 clips · 19.7s)",
+            "ja": "自分の連結テンプレ（4本 · 19.7秒）",
+            "ko": "내 이어붙이기 템플릿(4개 · 19.7초)",
+            "ru": "Мой шаблон склейки (4 фрагмента · 19.7 с)",
+        },
+    ),
+)
+
+
+def _presets_path(app_dir) -> Path:
+    return preview_dir(app_dir) / "clone_presets.json"
+
+
+def load_clone_presets(app_dir) -> dict[str, dict]:
+    """本地那份克隆预设（用户可改样本路径/自己加）。坏文件当空，绝不炸。"""
+    try:
+        obj = json.loads(_presets_path(app_dir).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    out: dict[str, dict] = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, dict):
+                out[str(k)] = v
+    return out
+
+
+def save_clone_preset(app_dir, key: str, *, label: str = "", spec: str = "",
+                      sample_path: str = "") -> Path | None:
+    """把一条预设（或对内置预设的本地覆盖，例如「样本在我这儿的位置」）写进本地登记表。"""
+    k = str(key or "").strip()
+    if not k:
+        return None
+    data = load_clone_presets(app_dir)
+    row = dict(data.get(k) or {})
+    if label:
+        row["label"] = str(label)
+    if spec:
+        row["spec"] = str(spec)
+    if sample_path:
+        row["sample_path"] = str(sample_path)
+    data[k] = row
+    d = preview_dir(app_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    p = _presets_path(app_dir)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
+
+
+def all_clone_presets(app_dir) -> list[ClonePreset]:
+    """界面要列的全部预设：内置 + 本地（同 key 时本地覆盖显示名/范本）。"""
+    local = load_clone_presets(app_dir)
+    out: list[ClonePreset] = []
+    for p in BUILTIN_CLONE_PRESETS:
+        row = local.get(p.key) or {}
+        out.append(ClonePreset(key=p.key, label=str(row.get("label") or p.label),
+                               spec=str(row.get("spec") or p.spec),
+                               sample_name=p.sample_name, labels=dict(p.labels)))
+    for k, row in local.items():
+        if any(p.key == k for p in BUILTIN_CLONE_PRESETS):
+            continue
+        out.append(ClonePreset(key=str(k), label=str(row.get("label") or k),
+                               spec=str(row.get("spec") or ""),
+                               sample_name=str(row.get("sample_name") or ""),
+                               labels={}))
+    return out
+
+
+def preset_label(preset: ClonePreset, lang: str = "zh") -> str:
+    """预设显示名（按界面语言）。"""
+    if lang == "zh" or not preset.labels:
+        return preset.label
+    return str(preset.labels.get(lang) or preset.label)
+
+
+def preset_text(preset: ClonePreset, *, title: str = "") -> str:
+    """范本的导出/复制文本（标题 + 正文），交给别人照着录也看得懂。"""
+    head = f"{title or preset.label}"
+    return f"{head}\n{'=' * max(8, len(head))}\n{preset.spec}\n"
+
+
+def find_preset_sample(app_dir, preset: ClonePreset) -> Path | None:
+    """按范本找样本音频：本地登记表里显式指的那份 → 应用数据目录 → 仓库 out/clone（开发机）。"""
+    rows = load_clone_presets(app_dir)
+    cands: list[Path] = []
+    explicit = str((rows.get(preset.key) or {}).get("sample_path") or "")
+    if explicit:
+        cands.append(Path(explicit))
+    name = str(preset.sample_name or "").strip()
+    if name:
+        base = preview_dir(app_dir)
+        cands.append(base / name)
+        try:
+            repo = Path(__file__).resolve().parents[1]
+            cands.append(repo / "out" / "clone" / name)
+        except Exception:
+            pass
+    for c in cands:
+        try:
+            if c.is_file() and c.stat().st_size > 0:
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def export_preset(app_dir, preset: ClonePreset, path, *, title: str = "") -> Path:
+    """把范本导出成 txt（给用户发给别人照着录）。"""
+    p = Path(str(path))
+    if p.suffix.lower() != ".txt":
+        p = p.with_suffix(".txt")
+    if p.parent and not p.parent.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(preset_text(preset, title=title), encoding="utf-8")
+    return p
+
+
 # ---------------------------------------------------------------- 配方库
 
 

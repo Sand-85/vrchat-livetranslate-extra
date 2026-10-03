@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -496,6 +497,53 @@ def test_labels_registry() -> bool:
     return ok
 
 
+def test_clone_presets() -> bool:
+    """克隆预设（拼接范本）：内置那条在、本地能覆盖、样本能定位、导出成 txt。"""
+    ok = True
+    tmp = Path(tempfile.mkdtemp(prefix="vlt-presets-"))
+    try:
+        presets = vl.all_clone_presets(tmp)
+        builtin = next((p for p in presets if p.key == "my_clip_4x"), None)
+        cond = builtin is not None and "19.7" in builtin.spec and "standardloyaltycheck" in builtin.spec
+        print(f"  内置范本在（{builtin.label if builtin else '无'}）且含条名/合计  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # 本地覆盖：改显示名 + 指一份真样本
+        sample = tmp / "my_sample.wav"
+        _write_wav(sample, 12.0)
+        vl.save_clone_preset(tmp, "my_clip_4x", label="我的范本（改名后）", sample_path=str(sample))
+        again = next(p for p in vl.all_clone_presets(tmp) if p.key == "my_clip_4x")
+        cond = again.label == "我的范本（改名后）" and "19.7" in again.spec
+        print(f"  本地覆盖显示名生效、范本正文仍在  {'OK' if cond else '✗'}")
+        ok &= cond
+        got = vl.find_preset_sample(tmp, again)
+        cond = got is not None and got.name == "my_sample.wav"
+        print(f"  按范本定位样本 → {got}  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # 找不到样本（自定义预设、没名字也没显式路径）→ None，不抛
+        bare = vl.ClonePreset(key="bare", label="光杆", spec="什么都没有")
+        cond = vl.find_preset_sample(tmp, bare) is None
+        print(f"  没样本时返回 None（不抛）  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # 导出：强制 .txt + 内容完整
+        out = vl.export_preset(tmp, again, tmp / "out_dir" / "template", title="我的范本（改名后）")
+        cond = (out.suffix == ".txt" and out.is_file()
+                and "19.7" in out.read_text(encoding="utf-8")
+                and "我的范本（改名后）" in out.read_text(encoding="utf-8"))
+        print(f"  导出 → {out.name}（内容含标题与正文）  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # 预设文本：标题 + 正文
+        cond = vl.preset_text(bare, title="T").startswith("T\n") and "什么都没有" in vl.preset_text(bare)
+        print(f"  范本文本 = 标题 + 正文  {'OK' if cond else '✗'}")
+        ok &= cond
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
 if __name__ == "__main__":
     print("test_voice_lab:")
     print(" 1) 音色名规范化")
@@ -526,5 +574,7 @@ if __name__ == "__main__":
     ok &= test_audio_probe_and_data_url()
     print(" 14) 克隆音色的显示名登记表")
     ok &= test_labels_registry()
+    print(" 15) 克隆预设（拼接范本：内置/本地覆盖/定位样本/导出）")
+    ok &= test_clone_presets()
     assert ok, "voice_lab 用例失败（见上）"
     print("ALL PASSED")

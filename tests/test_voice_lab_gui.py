@@ -149,6 +149,8 @@ class _Var:
 class _Text:
     def __init__(self) -> None:
         self._s = ""
+        self.state = "normal"
+        self.clip = ""
 
     def get(self, *_a) -> str:
         return self._s
@@ -158,6 +160,16 @@ class _Text:
 
     def insert(self, _index, text: str) -> None:
         self._s += text
+
+    def configure(self, **kw) -> None:
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+    def clipboard_clear(self) -> None:
+        self.clip = ""
+
+    def clipboard_append(self, text: str) -> None:
+        self.clip += text
 
     def winfo_exists(self) -> bool:
         return True
@@ -240,9 +252,13 @@ def _install_widgets(gui) -> None:
     gui._tts_voice_combo = _Btn()                                   # type: ignore[assignment]
     for name in ("_lab_gen_btn", "_lab_save_btn", "_lab_del_btn", "_lab_recipe_btn",
                  "_lab_recipe_preview_btn", "_lab_pick_btn", "_lab_clone_btn",
+                 "_lab_preset_use_btn", "_lab_preset_copy_btn", "_lab_preset_export_btn",
                  "_lab_preview_btn", "_lab_refresh_btn"):
         setattr(gui, name, _Btn())
     gui._lab_clone_name_var = _Var("my_clone")                      # type: ignore[assignment]
+    gui._lab_presets = vl.all_clone_presets(gui_mod.APP_DIR)        # type: ignore[assignment]
+    gui._lab_preset_combo = _Combo([])                              # type: ignore[assignment]
+    gui._lab_preset_text = _Text()                                  # type: ignore[assignment]
     gui._lab_voices = []
     gui._lab_cost_ok = True
     gui._lab_clone_ok = True          # 费用确认在专门用例里验，其余用例默认已确认
@@ -783,6 +799,76 @@ def test_list_rows_are_readable() -> bool:
     return ok
 
 
+def test_clone_preset_wiring() -> bool:
+    """克隆预设接线：范本正文上屏、用范本挂素材并预填名字、复制到剪贴板、导出 txt、缺样本时不瞎挂。"""
+    import tkinter.filedialog as _fd
+    import wave
+
+    ok = True
+    fake = FakeVoiceLab()
+    with _gui() as (gui, _cfg_path, tmp):
+        fake.install()
+        try:
+            sample = tmp / "preset_sample.wav"
+            with wave.open(str(sample), "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+                w.writeframes(bytes(24000 * 12 * 2))
+            vl.save_clone_preset(gui_mod.APP_DIR, "my_clip_4x", sample_path=str(sample))
+            gui._lab_presets = vl.all_clone_presets(gui_mod.APP_DIR)
+
+            # ① 换预设 → 范本正文上屏（条名 + 合计 + 样本状态）
+            gui._on_lab_preset_pick()
+            text = gui._lab_preset_text.get()
+            cond = ("standardloyaltycheck" in text and "19.7" in text
+                    and "样本音频已就位" in text)
+            print(f"  范本正文上屏（{len(text)} 字；含条名/合计/样本状态）  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ② 用此范本 → 素材挂上 + 名字预填 + 状态说明
+            gui._lab_audio = None
+            gui._on_lab_preset_use()
+            cond = (gui._lab_audio is not None and gui._lab_audio.seconds > 11.0
+                    and gui._lab_clone_name_var.get() == "my_clip_4x"
+                    and "已按范本备好" in gui._lab_status.cget("text"))
+            print(f"  用此范本 → 素材 {getattr(gui._lab_audio, 'seconds', 0):.1f}s、"
+                  f"名字「{gui._lab_clone_name_var.get()}」  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ③ 复制范本 → 剪贴板里就是那份正文
+            gui._on_lab_preset_copy()
+            cond = ("standardloyaltycheck" in (gui._lab_preset_text.clip or "")
+                    and "已复制" in gui._lab_status.cget("text"))
+            cond = cond and "19.7" in gui._lab_preset_text.clip
+            print(f"  复制范本 → 剪贴板 {len(gui._lab_preset_text.clip or '')} 字  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ④ 导出范本 → 真出 txt（对话框打桩）
+            target = tmp / "exported.txt"
+            real_save = _fd.asksaveasfilename
+            _fd.asksaveasfilename = lambda **_kw: str(target)
+            try:
+                gui._on_lab_preset_export()
+            finally:
+                _fd.asksaveasfilename = real_save
+            cond = (target.is_file() and "standardloyaltycheck" in target.read_text(encoding="utf-8")
+                    and "已导出" in gui._lab_status.cget("text"))
+            print(f"  导出范本 → {target.name}（{target.stat().st_size if target.is_file() else 0} 字节）  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ⑤ 范本样本找不到 → 不挂素材、提示去找（绝不拿旧素材硬上）
+            gui._lab_presets = [vl.ClonePreset(key="bare", label="光杆范本", spec="没有样本")]
+            gui._lab_audio = None
+            gui._on_lab_preset_use()
+            cond = (gui._lab_audio is None and "没找到" in gui._lab_status.cget("text"))
+            print(f"  范本没样本 → 不挂素材、提示去找  {'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            fake.restore()
+    return ok
+
+
 if __name__ == "__main__":
     print("test_voice_lab_gui:")
     print(" 1) 生成 → 列表 → 保存（model+voice 一起写）")
@@ -811,5 +897,7 @@ if __name__ == "__main__":
     ok &= test_clone_reuse_does_not_pay_again()
     print("13) 列表行可读（短名，不挤成长 id）")
     ok &= test_list_rows_are_readable()
+    print("14) 克隆预设（范本上屏 / 用范本 / 复制 / 导出 / 缺样本）")
+    ok &= test_clone_preset_wiring()
     assert ok, "音色页接线用例失败（见上）"
     print("ALL PASSED")
