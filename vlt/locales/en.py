@@ -511,13 +511,13 @@ STRINGS: dict[str, str] = {
         "Voice saved: {v} (applies to typed speech and to voice-leg mode B)",
     # ---- 试听已有音色（现场合成一句测试文本）----
     "试听配方": "Preview Preset",
-    "正在合成试听「{v}」（{n} 字，约 0.002 元）…":
-        "Synthesizing a preview of \"{v}\" ({n} chars, about 0.002 CNY)…",
+    "正在合成试听「{v}」（{n} 字，约 0.003 元）…":
+        "Synthesizing a preview of \"{v}\" ({n} chars, about 0.003 CNY)…",
     "账号里还没有「{v}」，先点「用配方一键生成」":
         "This account has no voice named \"{v}\" yet — use Generate from Preset first",
     "试听完成：{v}（已存本地，下次直接放）":
         "Preview done: {v} (cached locally, plays instantly next time)",
     "服务端没回音频": "the server returned no audio",
-    "试听：命中本地缓存不花钱；没有缓存时用测试文本合成一句（约 0.002 元）":
-        "Audition: free when cached locally; otherwise one sentence is synthesized with the test text (about 0.002 CNY)",
+    "试听：命中本地缓存不花钱；没有缓存时用测试文本合成一句（约 0.003 元）":
+        "Audition: free when cached locally; otherwise one sentence is synthesized with the test text (about 0.003 CNY)",
 }

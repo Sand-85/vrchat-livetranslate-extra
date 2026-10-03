@@ -2490,7 +2490,7 @@ class TranslationGUI:
         # 试听的花费提示：**常显**，不靠点击后的状态行 —— 用户点之前就该知道要不要花钱。
         # 只写「试听免费」是不诚实的（首次试听一条已有音色确实要合成一句）。
         self._lab_preview_hint = ttk.Label(
-            body, text=t("试听：命中本地缓存不花钱；没有缓存时用测试文本合成一句（约 0.002 元）"),
+            body, text=t("试听：命中本地缓存不花钱；没有缓存时用测试文本合成一句（约 0.003 元）"),
             style="Dim.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP)
         self._lab_preview_hint.pack(anchor=tk.W, pady=(4, 0))
 
@@ -2652,7 +2652,7 @@ class TranslationGUI:
         为什么要有「现场合成」这条路：官方只在**创建**时回一份 `preview_audio` ——
         账号里原有的音色（用户在控制台/旧脚本建的，正是「我预设的那几条」）根本没有缓存，
         只按「没缓存就拒绝」的话，那些音色永远听不了，列表也就成了摆设。
-        合成 17 字 ≈ 0.002 元，比「听不到没法比」便宜得多。
+        合成 26 字 ≈ 0.003 元，比「听不到没法比」便宜得多。
         """
         info = self._lab_selected()
         if info is None:
@@ -2692,7 +2692,7 @@ class TranslationGUI:
             self._lab_set_status(t("还没配置 API key，无法试听（见右上角「设置」）"))
             return
         self._lab_running("audition", True)
-        self._lab_set_status(t("正在合成试听「{v}」（{n} 字，约 0.002 元）…",
+        self._lab_set_status(t("正在合成试听「{v}」（{n} 字，约 0.003 元）…",
                                v=label, n=len(voice_lab.TEST_TEXT)))
         threading.Thread(target=self._lab_worker, args=("audition",), kwargs={
             "voice": info.voice, "model": info.target_model, "name": label,
@@ -2741,7 +2741,7 @@ class TranslationGUI:
                                              workspace_id=kw["workspace_id"])
                 self._q.put(("voice_lab", "list", True, "", rows))
             elif job == "audition":
-                # 试听已有音色：用测试文本现场合成一句（按字符计费，17 字 ≈ 0.002 元）。
+                # 试听已有音色：用测试文本现场合成一句（按字符计费，26 字 ≈ 0.003 元）。
                 # 端点按当前线路派生 —— 与「试听」同一条纪律，别回落到模块常量。
                 endpoint = endpoints.multimodal_url(kw["base_url"], kw["ws_id"])
                 pcm = voice_lab.sample_pcm(kw["voice"], kw["model"], api_key=kw["api_key"],

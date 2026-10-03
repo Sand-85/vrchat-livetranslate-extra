@@ -299,7 +299,7 @@ def test_sample_pcm() -> bool:
     想试听只能自己合成一句。要钉住的是「合成谁、用哪句、哪个模型、失败了说什么」。
     """
     ok = True
-    cond = vl.TEST_TEXT == "你好，我是SAND，现在是音色测试"
+    cond = vl.TEST_TEXT == "こんにちは、私はSANDです。今から声のテストです。"
     print(f"  测试文本 = {vl.TEST_TEXT!r}（{len(vl.TEST_TEXT)} 字）{'OK' if cond else '✗'}")
     ok &= cond
 
