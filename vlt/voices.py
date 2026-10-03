@@ -44,3 +44,57 @@ def voice_choices(current: str | None, catalog: tuple[str, ...]) -> list[str]:
     if cur and cur not in catalog:
         return [cur, *catalog]
     return list(catalog)
+
+
+# ---------------------------------------------------------------------------
+# 声音复刻的自定义音色：id → **中文显示名**（其余语言的显示名 = 英文名，写在 locales 词表里）
+#
+# 为什么要有这张表：服务端生成的 voice id 是一长串（`qwen-tts-vc-MetroPolice-voice-<时间戳>-<后缀>`），
+# 界面下拉里看着不像人话。这里只做**显示层**映射 —— 写进 config.yaml、发给 API 的永远是真正的 id。
+# 中文界面显示「国民护卫队」，其它语言显示英文名「MetroPolice」（与 preferred_name 一致）。
+# ---------------------------------------------------------------------------
+CLONED_VOICES: dict[str, str] = {
+    "qwen-tts-vc-MetroPolice-voice-20261003201838644-0a4b": "国民护卫队",
+}
+
+
+def _registry_label(voice: str) -> str | None:
+    """在登记表里找这个 id 对应的中文显示名；id 被重建（只有时间戳/后缀不同）时按 `-voice-` 前缀认亲。"""
+    v = (voice or "").strip()
+    if v in CLONED_VOICES:
+        return CLONED_VOICES[v]
+    base = v.split("-voice-")[0]
+    if base:
+        for vid, label in CLONED_VOICES.items():
+            if vid.split("-voice-")[0] == base:
+                return label
+    return None
+
+
+def display_name(voice: str, humanize=None) -> str:
+    """界面显示名：登记过的复刻音色显示本地化名字（中文「国民护卫队」/ 其它语言「MetroPolice」），
+    没登记的（内置音色、手填 id）原样返回 —— 保持上游行为不变。
+
+    `humanize` 传界面翻译函数 `t`（避免本模块反向依赖 i18n）。
+    """
+    label = _registry_label(voice)
+    if label is None:
+        return (voice or "").strip()
+    return humanize(label) if humanize else label
+
+
+def real_id(text: str, humanize=None) -> str:
+    """把界面里可能被本地化过的显示名还原成真正的 voice id（写配置 / 调 API 用）。
+
+    同时认：真 id、中文名、当前语言的译名（用户手打哪个都能对上）。
+    """
+    t = (text or "").strip()
+    for vid, label in CLONED_VOICES.items():
+        if t == vid or t == label or (humanize is not None and t == humanize(label)):
+            return vid
+    base = t.split("-voice-")[0]
+    if base:
+        for vid in CLONED_VOICES:
+            if vid.split("-voice-")[0] == base:
+                return vid
+    return t

@@ -587,6 +587,44 @@ def test_synthesize_omni_surfaces_server_error() -> None:
     print("  ✓ synthesize_omni：错误帧/空音频/缺 key 都抛 TtsError（不静默）")
 
 
+def test_cloned_voice_display_name() -> None:
+    """复刻音色的**显示名**：中文「国民护卫队」/ 其它语言「MetroPolice」；写配置必须还原成真 id。
+
+    这条防的是"界面好看但配置被写坏"：下拉里显示的是本地化名字，一旦原样写进
+    `text_input.tts.voice`，合成就会拿着「国民护卫队」去调 API → 必然失败。
+    """
+    import vlt.voices as voices
+    from vlt.locales import en as en_loc
+    from vlt.locales import ja as ja_loc
+
+    vid, zh = next(iter(voices.CLONED_VOICES.items()))
+
+    def humanize_en(s: str) -> str:
+        return en_loc.STRINGS.get(s, s)
+
+    def humanize_ja(s: str) -> str:
+        return ja_loc.STRINGS.get(s, s)
+
+    # ① 中文 = 中文名；英文/日文 = 英文名
+    assert voices.display_name(vid) == zh, voices.display_name(vid)
+    assert voices.display_name(vid, humanize_en) == "MetroPolice"
+    assert voices.display_name(vid, humanize_ja) == "MetroPolice"
+
+    # ② 写配置用的真 id：三种输入（真 id / 中文名 / 英文名）都要还原
+    for typed in (vid, zh, "MetroPolice"):
+        assert voices.real_id(typed, humanize_en) == vid, typed
+    assert voices.real_id(zh, humanize_ja) == vid
+    assert voices.real_id("  " + zh + " ", humanize_en) == vid
+
+    # ③ 音色被重建（只有时间戳/后缀不同）也认亲；未登记的（内置音色）原样通过
+    rebuilt = "qwen-tts-vc-MetroPolice-voice-20990101000000000-zzzz"
+    assert voices.display_name(rebuilt, humanize_en) == "MetroPolice"
+    assert voices.real_id(rebuilt, humanize_en) == vid
+    assert voices.display_name("Cherry", humanize_en) == "Cherry"
+    assert voices.real_id("Cherry", humanize_en) == "Cherry"
+    print("  ✓ 复刻音色显示名：中文「国民护卫队」/ 英文「MetroPolice」，写配置还原成真 id")
+
+
 # ---------------------------------------------------------------- 入口
 
 
@@ -599,6 +637,7 @@ def main() -> int:
         test_set_or_create_handles_voice_with_space,
         test_voice_catalogs_are_separate,
         test_voice_choices_keeps_custom_value,
+        test_cloned_voice_display_name,
         test_gui_voice_dropdowns_save,
         test_gui_speech_voice_respects_direction_override,
         test_is_unsupported_voice_err,

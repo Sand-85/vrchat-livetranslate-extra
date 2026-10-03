@@ -58,7 +58,7 @@ from .room.client import RoomClient
 from .room.model import ConnectionState, RoomConfig, RoomMessage
 from .room.protocol import new_room_code
 from .room.publisher import SourcePublisher, should_publish
-from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
+from .voices import REALTIME_VOICES, TTS_VOICES, display_name, real_id, voice_choices
 
 from .paths import APP_DIR, BUNDLE_DIR
 from . import platform
@@ -2144,8 +2144,8 @@ class TranslationGUI:
                  voice_choices(self._effective_speech_voice(), REALTIME_VOICES),
                  "speech", self._on_preview_speech_voice),
                 (t("打字译音:"), self._tts_voice_combo,
-                 voice_choices(str((self._cfg.text_input.get("tts") or {}).get("voice") or ""),
-                               TTS_VOICES),
+                 [display_name(v, t) for v in voice_choices(
+                     str((self._cfg.text_input.get("tts") or {}).get("voice") or ""), TTS_VOICES)],
                  "tts", self._on_preview_tts_voice))):
             ttk.Label(vgrid, text=label, style="Dim.TLabel").grid(
                 row=i, column=0, sticky="w", pady=3)
@@ -2160,8 +2160,8 @@ class TranslationGUI:
         # 从配置回显：读不到就显服务端默认（说话 Tina / 打字 Cherry），
         # 与 config.load 的回落口径一致 —— 宁可显示真正在生效的值，也不显示空白。
         self._speech_voice_var.set(self._effective_speech_voice())
-        self._tts_voice_var.set(
-            str((self._cfg.text_input.get("tts") or {}).get("voice") or "Cherry"))
+        self._tts_voice_var.set(display_name(
+            str((self._cfg.text_input.get("tts") or {}).get("voice") or "Cherry"), t))
         self._speech_voice_combo.bind("<<ComboboxSelected>>", self._on_speech_voice_change)
         self._speech_voice_combo.bind("<Return>", self._on_speech_voice_change)
         self._tts_voice_combo.bind("<<ComboboxSelected>>", self._on_tts_voice_change)
@@ -2489,8 +2489,9 @@ class TranslationGUI:
             tts_cfg["voice"] = info.voice
         # 下拉里跟上（`voice_choices` 会把不在表里的当前值排到最前）
         try:
-            self._tts_voice_var.set(info.voice)
-            self._tts_voice_combo.configure(values=voice_choices(info.voice, TTS_VOICES))
+            self._tts_voice_var.set(display_name(info.voice, t))
+            self._tts_voice_combo.configure(
+                values=[display_name(v, t) for v in voice_choices(info.voice, TTS_VOICES)])
         except Exception:  # noqa: BLE001
             pass
         self._lab_set_status(t("音色已保存：{v}（打字译音与语音腿 B 模式都生效）",
@@ -2642,7 +2643,9 @@ class TranslationGUI:
             self._lab_voices = list(payload or [])
             if self._lab_list is not None:
                 self._lab_list.delete(0, tk.END)
-                for row in voice_lab.describe(self._lab_voices):
+                for row in voice_lab.describe(
+                        self._lab_voices,
+                        label_of=lambda vid, fallback: display_name(vid, t) or fallback):
                     self._lab_list.insert(tk.END, row)
                 if self._lab_voices:
                     self._lab_list.selection_set(0)
@@ -4202,14 +4205,18 @@ class TranslationGUI:
 
         打字那条腿每次出声都实时读 `self._cfg.text_input['tts']['voice']`（见
         `engine._async_send_text`），所以不像说话那样要等重连，不用提示「下次生效」。
+
+        ⚠️ 下拉里显示的是**本地化名字**（如中文「国民护卫队」），写配置前必须 `real_id()` 还原成真 id。
         """
-        voice = self._tts_voice_var.get().strip()
+        voice = real_id(self._tts_voice_var.get(), t)
         if not voice:
             return
+        self._tts_voice_var.set(display_name(voice, t))     # 手打中文名/英文名也回显成规范显示名
         self._set_tts_voice_config(voice)
         if isinstance(self._cfg.text_input, dict):
             self._cfg.text_input.setdefault("tts", {})["voice"] = voice
-        self._set_status("info", t("打字译音音色已保存：{v}（下一条打字即生效）", v=voice))
+        self._set_status("info", t("打字译音音色已保存：{v}（下一条打字即生效）",
+                                   v=display_name(voice, t)))
         print(f"[gui] 打字译音音色 → {voice!r}（已写入 text_input.tts.voice）", flush=True)
 
     def _set_voice_config(self, voice: str) -> None:

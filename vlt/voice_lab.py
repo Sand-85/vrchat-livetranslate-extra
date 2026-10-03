@@ -150,13 +150,19 @@ def _name_of(voice: str) -> str:
     return ""
 
 
-def describe(voices: list[VoiceInfo]) -> list[str]:
-    """给界面用的展示行（名字 + 语音 id 后 6 位 + 创建日期），避免让用户看一串长 id。"""
+def describe(voices: list[VoiceInfo], label_of=None) -> list[str]:
+    """给界面用的展示行（名字 + 语音 id 后 6 位 + 创建日期），避免让用户看一串长 id。
+
+    `label_of(voice_id, fallback)` 可传界面侧的显示名映射（`vlt.voices.display_name`）：
+    复刻音色就能显示本地化名字（中文「国民护卫队」/ 其它语言「MetroPolice」）而不是一长串 id。
+    """
     rows: list[str] = []
     for v in voices:
         tail = v.voice[-6:] if len(v.voice) > 6 else v.voice
         when = (v.created or "")[:10]
         label = v.name or _name_of(v.voice) or "(未命名)"
+        if label_of is not None:
+            label = label_of(v.voice, label) or label
         rows.append(f"{label}  ·{tail}" + (f"  ·{when}" if when else ""))
     return rows
 
