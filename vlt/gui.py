@@ -2755,8 +2755,13 @@ class TranslationGUI:
             local = voice_lab.label_mapper(voice_lab.load_labels(APP_DIR))
 
             def _label(vid: str, fallback: str) -> str:
-                # 本地登记（克隆时自动写的那份）优先，其次源码里那份手写登记表
-                return local(vid, display_name(vid, t) or fallback)
+                # ⚠️ `display_name` 对**未登记**的音色会原样回一长串 id（它是给下拉框用的），
+                # 直接拿它会把这行挤成一串 id、名字全看不见（本会话真踩过：用户以为音色丢了）。
+                # 所以只在它**确实给出人话**（≠ 原 id）时才用，否则回落到本地登记 / id 反推的短名。
+                human = display_name(vid, t)
+                if human and human != vid:
+                    return human
+                return local(vid, fallback)
 
             if self._lab_list is not None:
                 self._lab_list.delete(0, tk.END)

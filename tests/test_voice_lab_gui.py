@@ -745,6 +745,44 @@ def test_clone_reuse_does_not_pay_again() -> bool:
     return ok
 
 
+def test_list_rows_are_readable() -> bool:
+    """列表行必须**可读**：未登记的音色用 id 反推的短名，登记过的用人话（别挤成一串 id）。
+
+    这条是用户报「clear_auto 不见了」的根因：`voices.display_name` 对**未登记**的音色会原样
+    回一整串 id（那是给下拉框用的），拼进列表行就把名字挤没了 → 看着像音色丢了。
+    """
+    ok = True
+    fake = FakeVoiceLab()
+    with _gui() as (gui, _cfg_path, tmp):
+        fake.install()
+        try:
+            vl.save_label(gui_mod.APP_DIR, "qwen-tts-vc-Mine-voice-20261004000000-aaaa", "我的音色")
+            rows = [
+                vl.VoiceInfo(voice="qwen-tts-vd-clear_auto-voice-20260926233229068-247d",
+                             created="2026-09-26 23:32:33", kind="design"),
+                vl.VoiceInfo(voice="qwen-tts-vc-MetroPolice-voice-20261003201838644-0a4b",
+                             created="2026-10-03 20:18:40",
+                             target_model=vl.CLONE_TARGET_MODEL, kind="clone"),
+                vl.VoiceInfo(voice="qwen-tts-vc-Mine-voice-20261004000000-aaaa",
+                             created="2026-10-04 00:00:00",
+                             target_model=vl.CLONE_TARGET_MODEL, kind="clone"),
+            ]
+            gui._on_lab_done("list", True, "", rows)
+            got = list(gui._lab_list.items)
+            cond = (got[0].startswith("clear_auto") and "qwen-tts-vd-clear_auto" not in got[0])
+            print(f"  未登记的设计音色 → 「{got[0]}」  {'OK' if cond else '✗'}")
+            ok &= cond
+            cond = "[复刻]" in got[1] and "国民护卫队" in got[1]
+            print(f"  源码登记表里的复刻音色 → 「{got[1]}」  {'OK' if cond else '✗'}")
+            ok &= cond
+            cond = "[复刻]" in got[2] and got[2].lstrip("[复刻] ").startswith("我的音色")
+            print(f"  本地登记的复刻音色 → 「{got[2]}」  {'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            fake.restore()
+    return ok
+
+
 if __name__ == "__main__":
     print("test_voice_lab_gui:")
     print(" 1) 生成 → 列表 → 保存（model+voice 一起写）")
@@ -771,5 +809,7 @@ if __name__ == "__main__":
     ok &= test_clone_then_autoplay_and_save()
     print("12) 同名复刻复用（没有再花钱）")
     ok &= test_clone_reuse_does_not_pay_again()
+    print("13) 列表行可读（短名，不挤成长 id）")
+    ok &= test_list_rows_are_readable()
     assert ok, "音色页接线用例失败（见上）"
     print("ALL PASSED")
