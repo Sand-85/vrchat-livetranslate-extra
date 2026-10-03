@@ -85,93 +85,64 @@ Sources are tried in the order below — **the first hit wins**:
 > Why: once a key lands in git history, deleting the file doesn't remove it — you'd have to rewrite history.
 > Better to stop it before commit.
 
-### For users outside mainland China: Alibaba Cloud Model Studio (International)
+### For users outside mainland China: Qwen Cloud (International)
 
-**Why two lines**: the default "Qwen Cloud" line only serves mainland China — from abroad you cannot
-even open an account, and a direct connection is unreliable. Outside mainland China use
-**Alibaba Cloud Model Studio (International)** instead: the same models, the same realtime API — only
-the entry address and the account system differ. The two lines are **mutually exclusive**: exactly one
-of them is working at any moment, whichever you select in the app.
+**Why two lines**: the default line ("Qwen Cloud", `qianwen`) serves mainland China only — from
+abroad you cannot even sign up, and a direct connection is unreliable. Outside mainland China use
+**Qwen Cloud (International)** at <https://www.qwencloud.com/> instead: the same models, the same
+realtime API (realtime translation, typed translation and typed TTS are all there) — only the entry
+address and the account system differ. The two lines are **mutually exclusive**: exactly one of them
+is working at any moment, whichever you select in the app.
 
-**Three steps to sign up** (all inside the [Model Studio console · Model Market](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)):
+**Three steps to sign up** (all on <https://www.qwencloud.com/>):
 
-![Model Studio · Model Market — switch Region and UI language at the top right](../assets/modelstudio-market.png)
+1. Sign up with **Google / GitHub / e-mail code** — **no phone number, no credit card**
+2. Create an API key in the console (it starts with `sk-ws-`)
+3. New accounts come with free quota (counted per model); you only top up after it runs out
 
-1. Create a workspace (or just use the default one) and open it
-2. On its "Workspace Details" page, copy the **API Host prefix** — that leading part *is* the
-   **workspace ID**, e.g. `llm-xxxx`
-   (the full host looks like `llm-xxxx.ap-southeast-1.maas.aliyuncs.com`; take only the leading `llm-xxxx`)
-3. Create an API key (`sk-...`) **inside that same workspace** — the entry is `API-KEY` at the **bottom-left** of the console:
+**Three steps in the app**:
 
-![The API-KEY entry at the bottom-left of the console (red box)](../assets/modelstudio-api-key-entry.png)
+1. `⚙ Settings → General → Service Line` → select "Qwen Cloud (International)"
+2. Click "Save Line Settings" (this rewrites `base_url` to
+   `wss://maas.qwencloudapi.com/api-ws/v1/realtime`)
+3. Paste your key into the "API key" box above and save, then **start translation again**
 
-![Clicking it opens API Key management: create/copy your key here (you'll be asked to log in first)](../assets/modelstudio-api-key.png)
-
-**Four steps in the app**:
-
-1. `⚙ Settings → General → Service Line` → select "Alibaba Cloud Model Studio (International)"
-2. Enter `llm-xxxx` in "Workspace ID" (on the Qwen Cloud line this box is greyed out — nothing to fill in)
-3. Leave "Region" at the default **Singapore (`ap-southeast-1`)** — it is the only choice since this version (see below)
-4. Click "Save Line Settings", then paste your key into the "API key" box above and save it
-
-> 🔑 **The two keys are stored separately**: each line keeps its own key file
-> (`api_key.txt` / `api_key_bailian_intl.txt`), so switching back and forth **never** asks you to
-> re-enter a key. The status line "Current (line): source sk-****6789" follows the active line.
+> 🔑 **The two lines do not share keys**: the international and mainland lines each keep their own
+> key file (`api_key.txt` / `api_key_qwencloud.txt`), so switching back and forth **never** asks you
+> to re-enter a key. The status line "Current (line): source sk-****6789" follows the active line.
+> One account **cannot** reuse the same key across the two lines — request a separate key.
 > You must **start translation again** for a line change to take effect (if it is already running,
 > the app asks you to stop it first).
 
-**Region: only Singapore works** (and it is the only choice in the UI since this version)
+> ⚠️ **Old configs migrate automatically**: if you previously selected "Alibaba Cloud Model Studio
+> (International)" (it needed a workspace ID plus a region, and overseas sign-up could be flagged for
+> a credit-card statement), this version switches you to Qwen Cloud (International) on startup and
+> says so in the log — remember to enter that line's key once more.
 
-| Region id | City | This app |
-|---|---|---|
-| `ap-southeast-1` | Singapore (default) | ✅ everything |
-| `ap-northeast-1` | Japan (Tokyo) | ❌ no speech models |
-| `us-east-1` | US (Virginia) | ❌ no speech models |
-| `eu-central-1` | Germany (Frankfurt) | ❌ no speech models |
-| `cn-hongkong` | China (Hong Kong) | ❌ no speech models |
-
-> ⚠️ **Why Singapore only**: on Model Studio (International) **each region has its own endpoint,
-> API key and model list, and they cannot be used across regions** (official wording: *"Each region
-> has its own endpoint, API Key, and model list. These cannot be used across regions."*). The speech
-> chain this app needs — live interpretation `qwen3.8-livetranslate-flash-realtime`, voice preview /
-> typed speech `qwen3-tts-flash`, Omni voices `qwen3.5-omni-flash` — is deployed on the international
-> site **only in Singapore**. Tokyo, Virginia, Frankfurt and Hong Kong have no speech models at all
-> (Tokyo does not even have `qwen-mt-flash`, which typed translation uses). So the UI offers
-> **Singapore only**; if your config still holds an old region, pressing "Start translation" will
-> **stop you and tell you to change it** (it is never silently rewritten — the region goes into the
-> Host, so rewriting it would send your requests to the wrong domain).
-
-> ⚠️ **The key must belong to Singapore too**: a key only works in the region of the workspace it was
-> created in. A key from another region (say a workspace in Japan) fails to connect or returns
-> `Model not exist` — check in the console that both the workspace and the key are in Singapore.
-
-**The four corresponding `config.yaml` keys** (written in place when you click "Save Line Settings";
-no manual editing needed):
+**The two `config.yaml` keys** (written in place when you click "Save Line Settings" — no manual
+editing needed):
 
 ```yaml
 session:
-  provider: qianwen          # line id: qianwen (Qwen Cloud) / bailian_intl (Model Studio International)
-  region: ap-southeast-1     # only meaningful for Model Studio (International)
-  workspace_id: ""           # workspace ID (llm-xxxx); leave empty on Qwen Cloud
+  provider: qianwen          # line id: qianwen (mainland) / qwencloud (international)
   base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime
 ```
 
-After switching to Model Studio (International), `base_url` becomes the following (`{workspace_id}` is a
-**literal placeholder**, replaced only at connect time — so changing the workspace ID later does *not*
-mean editing this line):
+After switching to the international line, `base_url` becomes:
 
 ```yaml
-  base_url: wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime
+  base_url: wss://maas.qwencloudapi.com/api-ws/v1/realtime
 ```
 
-**`base_url` is the only source of truth for where it actually connects**; `provider` only decides the
-UI defaults, which key file is used, and the validation rules (Model Studio (International) **must**
-have a workspace ID — without one, saving is refused in red and "Start translation" is blocked and
-takes you to the settings page).
+**`base_url` is the single source of truth for where traffic actually goes**; `provider` only
+decides the UI default and which key file is used. Both lines expose the exact same three paths
+(`/api-ws/v1/realtime`, `/compatible-mode/v1/chat/completions`,
+`/api/v1/services/aigc/multimodal-generation/generation`), so switching lines only changes
+`base_url`.
 
-> 🔍 **Troubleshooting**: in the log, `[net] 线路=… host=…` is the address actually in use (the workspace ID is masked),
-> and `[gui] 服务线路已保存：…` is what the UI wrote to disk. If the two disagree, you changed the line
-> but have not restarted translation yet.
+> 🔍 **Troubleshooting**: the `[net] 线路=… host=…` line in the log is the address actually in use,
+> and `[gui] 服务线路已保存：…` records what the UI wrote to disk. If the two disagree, you changed
+> the line but did not start translation again.
 
 ## 4. Self-check
 
@@ -483,7 +454,7 @@ wrist overlay / desktop subtitles.
 |---|---|
 | Nothing in the bubble | VRChat not running / OSC off / chat bubble visibility is Off. If `--dry-run` shows send logs, the program side is fine |
 | `[loopback] ❌ no loopback device found` | VRChat isn't playing any sound; or you're **running inside a Remote Desktop session** (WASAPI endpoints are per-session isolated — you must be on the physical machine's current session) |
-| Microphone captures nothing | Same as above; first check which device is selected in the dropdown under "⚙ Settings" (when enumeration is empty the status bar notes that empty enumeration is normal in a remote session) |
+| Microphone captures nothing | Same as above; first check which device is selected in the dropdown under "⚙ Settings" (when enumeration is empty the status bar notes that empty enumeration is normal in a remote session). Search the log for `[mic]`: "已回落到同名设备" means this sound card's WASAPI endpoint could not be opened and the program switched to another audio interface by itself (normal, nothing to do); only "所有候选设备都打不开" is a real failure |
 | `Voice 'Chelsie' is not supported` | `session.voice` is unset. Keep it at `Tina` |
 | `Invalid translation parameter` | `session.update` is missing the `translation` field (guaranteed in code; watch out if you modify it) |
 | `1007 Requests rate limit exceeded` | Hit RPM 10. Wait 1 minute; don't restart frequently (**every WS connection counts as one request**) |
@@ -527,7 +498,7 @@ vlt/
 
 server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
 scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    58 files, 467 test functions (all run offline; CI runs them file by
+tests/                    59 files, 469 test functions (all run offline; CI runs them file by
                           file, and does not include tests/test_engine.py, which needs a real API key)
 docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
 testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
@@ -578,7 +549,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.8.0 "qwencloud,千问云·海外版,小夜"
   ```
 
 ---

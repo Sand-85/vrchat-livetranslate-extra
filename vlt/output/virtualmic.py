@@ -85,8 +85,14 @@ class VirtualMic:
         buffer_ms: int = 300,
         max_buffer_ms: int = 2000,
         on_status: Callable[[str, str], None] = lambda *_a: None,
+        device_fallbacks: "list[int] | tuple[int, ...]" = (),
     ) -> None:
         self._device_index = device_index
+        self._open_device_index = device_index      # 实际打开成功的那条（回落时与上面不同）
+        #: 首选设备打不开时按序再试的候选（Windows：同名输出设备在其它 host API 下的条目）。
+        #  真机事故（2026-10-02）：Voicemeeter 的 WASAPI 端点会 `-9999 Unanticipated host error`
+        #  （`WdmSyncIoctl … GLE = 0x490`），而它的 MME 条目能正常打开 —— 有候选就不至于直接判死。
+        self._device_fallbacks = [int(i) for i in device_fallbacks if int(i) != device_index]
         self._device_name = device_name
         self._sample_rate = sample_rate
         self._buffer_ms = buffer_ms
@@ -107,24 +113,41 @@ class VirtualMic:
         return self._device_name
 
     def open(self) -> bool:
-        """打开音频流。失败返回 False 并通过 on_status 报错。"""
-        try:
-            import sounddevice as sd
+        """打开音频流。失败返回 False 并通过 on_status 报错。
 
-            self._stream = sd.RawOutputStream(
-                samplerate=self._sample_rate,
-                channels=2,
-                dtype="int16",
-                device=self._device_index,
-                callback=self._audio_callback,
-                blocksize=int(self._sample_rate * 0.02),
-            )
-            self._stream.start()
-            self._on_status("info", f"虚拟声卡已打开：#{self._device_index} {self._device_name}")
-            return True
-        except Exception as exc:
-            self._on_status("error", f"打开虚拟声卡失败（#{self._device_index} {self._device_name}）：{exc}")
-            return False
+        首选设备（界面/配置选中的那条，通常是 WASAPI 端点）打不开时，按 `device_fallbacks`
+        逐个再试（同名设备在别的 host API 下的条目），**每次尝试都留痕**。
+        """
+        import sounddevice as sd
+
+        last_exc: Exception | None = None
+        for i, dev in enumerate([self._device_index, *self._device_fallbacks]):
+            try:
+                self._stream = sd.RawOutputStream(
+                    samplerate=self._sample_rate,
+                    channels=2,
+                    dtype="int16",
+                    device=dev,
+                    callback=self._audio_callback,
+                    blocksize=int(self._sample_rate * 0.02),
+                )
+                self._stream.start()
+                if i == 0:
+                    self._on_status("info",
+                                    f"虚拟声卡已打开：#{dev} {self._device_name}")
+                else:
+                    self._on_status("warn",
+                                    f"虚拟声卡 #{self._device_index} 打不开，"
+                                    f"已回落到同名设备 #{dev}（{self._device_name}）")
+                self._open_device_index = dev
+                return True
+            except Exception as exc:  # noqa: BLE001 — 换候选再试
+                last_exc = exc
+                self._stream = None
+                self._on_status("warn", f"虚拟声卡 #{dev} 打不开：{exc}")
+        self._on_status("error",
+                        f"打开虚拟声卡失败（#{self._device_index} {self._device_name}）：{last_exc}")
+        return False
 
     def close(self) -> None:
         """关闭音频流（幂等）。"""

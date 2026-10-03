@@ -197,6 +197,65 @@ def test_no_duplicate_popup() -> None:
         _destroy(gui)
 
 
+def test_about_sponsors_listed() -> None:
+    """⑥ 「设置 → 关于」页里有赞助者名牌；空名单时整区不出现（不留空标题）。
+
+    为什么单钉：名单是**数据**（`gui.SPONSORS`），界面只负责渲染。改名单时最容易犯的错是
+    「改了常量、界面那行还写着旧名字」，或者空名单时留下一个光秃秃的「赞助者」标题。
+    断言直接拿常量比，不抄死名字。
+
+    名字渲染成**每人一个亮字标签**（`gui._sponsor_names_widgets`，顺序 = SPONSORS 顺序）：
+    加粗亮色（COLOR_SRC_MINE）+ **不垫底色、不加描边**（底色 = 页面底色 PANEL）——
+    实心底块会和真按钮撞脸、描边框则是"幽灵按钮"，两者都被视觉评审判成"像按钮"，
+    见 `gui._build_sponsor_list` 的 docstring。名字是**专有名词**：不进词表，
+    任何界面语言下原样显示
+    （`test_i18n` 的语言守卫按这些控件路径排除它们，绝不按文本内容排除）。
+    """
+    import tkinter.ttk as ttk
+
+    import vlt.gui as gui_mod
+
+    gui = _make_gui()
+    try:
+        names = gui_mod.SPONSORS
+        assert names, "SPONSORS 为空 —— 这个用例的前提就是名单非空"
+        chips = gui._sponsor_names_widgets
+        assert chips, "关于页没有渲染赞助者名字"
+        assert len(chips) == len(names), \
+            f"名字数量（{len(chips)}）与 SPONSORS（{len(names)}）不一致"
+        for chip, name in zip(chips, names):
+            text = str(chip.cget("text"))
+            assert name in text, f"名字标签里少了 {name!r}：{text!r}"
+            # 视觉焦点：加粗 + 亮色（COLOR_SRC_MINE），不许退回 Muted 灰字
+            assert "bold" in str(chip.cget("font")), f"名字没加粗：{chip.cget('font')!r}"
+            assert str(chip.cget("fg")) == gui_mod.COLOR_SRC_MINE, \
+                f"名字字色不对：{chip.cget('fg')!r}"
+            # 不是按钮：不垫底色（= 页面底色）、不加描边
+            assert str(chip.cget("bg")) == gui_mod.PANEL, \
+                f"名字垫了非页面底色（像按钮的实心块）：{chip.cget('bg')!r}"
+            assert int(str(chip.cget("highlightthickness"))) == 0, \
+                f"名字加了描边（幽灵按钮观感）：{chip.cget('highlightthickness')!r}"
+        print(f"  ✓ 关于页赞助者名单：{[str(c.cget('text')) for c in chips]}"
+              f"（加粗亮字，无底块无描边）")
+
+        # 空名单 → 整区不出现（不留一个没有内容的标题）
+        orig = gui_mod.SPONSORS
+        frame = ttk.Frame(gui._root)
+        try:
+            gui_mod.SPONSORS = ()
+            gui._build_settings_about(frame)
+            assert not gui._sponsor_names_widgets, "空名单时不该渲染名牌"
+            texts = [str(w.cget("text")) for w in frame.winfo_children()
+                     if "text" in w.keys()]
+            assert not any("赞助者" in x for x in texts), f"空名单却留了标题：{texts}"
+            print("  ✓ 空名单时不显示这一区（无空标题）")
+        finally:
+            gui_mod.SPONSORS = orig
+            frame.destroy()
+    finally:
+        _destroy(gui)
+
+
 def main() -> int:
     tests = [
         test_sponsor_button_exists,
@@ -204,6 +263,7 @@ def main() -> int:
         test_kofi_button_calls_webbrowser,
         test_missing_qr_images_degrade,
         test_no_duplicate_popup,
+        test_about_sponsors_listed,
     ]
     print("赞助弹窗验收：")
     failed = 0

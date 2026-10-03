@@ -232,6 +232,7 @@ STRINGS: dict[str, str] = {
     "所有文件": "All Files",
     "开发者": "Developer",
     "由可爱的赛博巫师和他的朋友们 开发": "Made by the lovely Cyber Wizard and friends",
+    "赞助者": "Sponsors",
     "软件更新": "Software Update",
     "检查更新": "Check for Updates",
     "当前版本 v{ver} · 启动时会自动检查一次":
@@ -259,49 +260,23 @@ STRINGS: dict[str, str] = {
     "打不开浏览器，请手动复制访问：{url}":
         "Can't open the browser — please copy and visit: {url}",
 
-    # ---- 服务线路（千问云 / 阿里云百炼·国际版，互斥）----
+    # ---- 服务线路（千问云 / 千问云·海外版，互斥）----
     "服务线路": "Service Line",
     "千问云": "Qwen Cloud",
-    "阿里云百炼·国际版": "Alibaba Cloud Model Studio (International)",
-    "业务空间 ID": "Workspace ID",
-    "地域": "Region",
+    "千问云·海外版": "Qwen Cloud (International)",
+    "国内用「千问云」；海外用「千问云·海外版」（qwencloud.com）。两版的 API key 不互通，各存各的，来回切线路不用重填":
+        "Use \"Qwen Cloud\" in mainland China and \"Qwen Cloud (International)\" "
+        "(qwencloud.com) overseas. The two lines use separate API keys: each is "
+        "stored on its own, so switching back and forth needs no re-entering",
+    "⚠ 未配置 API key · 点此开通海外版 ▸": "⚠ No API Key · Set Up International ▸",
     "保存线路设置": "Save Line Settings",
-    "百炼控制台「业务空间详情」里的 API Host 前缀（形如 llm-xxxx）":
-        "The API Host prefix shown under \"Workspace Details\" in the Model Studio "
-        "console (looks like llm-xxxx)",
-    "❌ 没保存：百炼国际版必须填业务空间 ID（控制台「业务空间详情 → API Host」的前缀）":
-        "❌ Not saved: Model Studio (International) requires a workspace ID "
-        "(the prefix of \"Workspace Details → API Host\" in the console)",
     "已切换到 {line}（重启翻译后生效）":
         "Switched to {line} — takes effect when you start translation again",
     "当前线路需要先停止翻译，改完再重新开始":
         "Stop translation first; the new line applies once you start it again",
     "当前（{line}）：{src} {masked}": "Current ({line}): {src} {masked}",
-    "未配置业务空间 ID —— 请在「设置 → 常规」里选线路并填写":
-        "No workspace ID configured — pick a line and enter it under Settings → General",
-    "⚠ 未配置 API key · 点此开通百炼 ▸": "⚠ No API Key · Set Up Model Studio ▸",
 
-    "业务空间 ID 填的是 API key —— 那里要填 API Host 的第一段（形如 llm-xxxx），key 请填在上面的「API key」框里":
-        "The Workspace ID field holds an API key — it wants the first segment of the "
-        "API Host (looks like llm-xxxx); put the key in the \"API key\" box above",
-    "业务空间 ID 太长 —— 它只是 API Host 的第一段（形如 llm-xxxx），不要把别的长串整段粘进来":
-        "Workspace ID is too long — it is only the first segment of the API Host "
-        "(looks like llm-xxxx); don't paste a long string here",
-    "业务空间 ID 只能含字母、数字和短横线（形如 llm-xxxx）":
-        "Workspace ID may contain only letters, digits and hyphens (like llm-xxxx)",
-    "业务空间 ID 不能以短横线开头或结尾（形如 llm-xxxx）":
-        "Workspace ID must not start or end with a hyphen (like llm-xxxx)",
-    "❌ 无法开始：{msg}": "❌ Can't start: {msg}",
-    "百炼国际版必须填业务空间 ID（控制台「业务空间详情 → API Host」的前缀）":
-        "Model Studio (International) requires a workspace ID "
-        "(the prefix of \"Workspace Details → API Host\" in the console)",
 
-    "地域「{region}」用不了 —— 本程序要用的语音模型（实时同传 / 试听音色 / 打字译音）国际站只有新加坡有部署。请在百炼国际版控制台把业务空间建在 Singapore (ap-southeast-1)，并在该业务空间下创建 API key（key 不能跨地域使用）":
-        "The region \"{region}\" won't work — the speech models this app needs (live "
-        "interpretation / voice preview / speaking typed text) are deployed on the "
-        "international site only in Singapore. Create your workspace in Singapore "
-        "(ap-southeast-1) in the Model Studio international console, and create the API "
-        "key inside that workspace (keys cannot be used across regions)",
     # ---- 日志导出 ----
     "打不开保存对话框：{msg}": "Can't open the save dialog: {msg}",
     "导出日志失败：{msg}": "Failed to export logs: {msg}",

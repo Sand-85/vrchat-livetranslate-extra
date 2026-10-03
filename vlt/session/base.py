@@ -87,11 +87,9 @@ class SessionConfig:
     turn_detection: str | None = None   # None = 用服务端默认（3.8 为 speaker_detection）
     # base_url 是**唯一的地址真相源**（默认值也走 endpoints 派生，不再写第二份域名字面量）。
     base_url: str = endpoints.default_base_url(endpoints.PROVIDER_QIANWEN)
-    workspace_id: str = ""              # 百炼线路的 base_url 占位符 {workspace_id} 用它替换
-    # provider / region **仅供日志与诊断**：实际连到哪永远以 base_url 为准（见 endpoints
+    # provider **仅供日志与诊断**：实际连到哪永远以 base_url 为准（见 endpoints
     # 模块的「宿主派生」口径）。切线路由界面同步改写 base_url，这里只是把选择带出来留痕。
     provider: str = endpoints.DEFAULT_PROVIDER
-    region: str = endpoints.DEFAULT_REGION
     api_key: str = ""
     # 连接预算（RPM 10：每次 WS 连接算一次请求）
     reconnect_backoff: tuple[int, ...] = (2, 5, 10, 30)
@@ -108,10 +106,9 @@ class SessionConfig:
 
     @property
     def url(self) -> str:
-        # 占位符替换 / 缺 workspace_id 的报错口径统一交给 endpoints.resolve_base_url
-        # （全仓库只留一份），这里只负责拼上 ?model=。
-        base = endpoints.resolve_base_url(self.base_url, self.workspace_id)
-        return f"{base}?model={self.model}"
+        # 两条线路的 base_url 都是可直接连接的公共地址（无占位符、无账号成分），
+        # 这里只负责拼上 ?model=。
+        return f"{self.base_url}?model={self.model}"
 
 
 # ---------------------------------------------------------------- 会话接口

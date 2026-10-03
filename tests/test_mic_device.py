@@ -76,7 +76,7 @@ def test_windows_open_mic_resolves_name_to_index() -> None:
     import vlt.devices as devices
     import vlt.platform.win as W
 
-    _install_fake_sounddevice()
+    _install_fake_sounddevice(native_rate=44100.0)
     seen: dict = {}
     orig = devices.resolve_device_name
 
@@ -94,8 +94,14 @@ def test_windows_open_mic_resolves_name_to_index() -> None:
     assert seen == {"name": "My USB Mic", "kind": "input"}, f"解析口径不对：{seen}"
     assert _OPENED["device"] == 7, (
         f"应把解析出的索引交给 sounddevice，实际 {_OPENED['device']!r}")
-    assert _OPENED["samplerate"] == 16000, "Windows 仍按 16k 打开（WASAPI 会重采样）"
-    print("  Windows open_mic：按名解析成索引后再打开 OK")
+    # 采样率：**按设备原生采样率**开，不再一律 16kHz。
+    # 真机事故（2026-10-02）：WASAPI 共享模式只认端点自己的采样率，按 16kHz 开会直接
+    # `Invalid sample rate [PaErrorCode -9997]`；老路径能跑是因为命中 MME，它帮着重采样。
+    # 转 16kHz 现在由 engine._pump_capture 里的 to_16k_mono 负责（与系统声音那条腿同一口径）。
+    # 这里故意把原生采样率设成 44100：若代码写死 16000/48000，这条就挂。
+    assert _OPENED["samplerate"] == 44100, (
+        f"应按设备原生采样率打开，实际 {_OPENED['samplerate']!r}")
+    print("  Windows open_mic：按名解析成索引后再打开，且按设备原生采样率 OK")
 
 
 def test_windows_open_mic_unresolved_falls_back_to_default() -> None:

@@ -127,9 +127,13 @@ def test_url_derivation() -> bool:
     cond = q == "https://maas.qianwenaiapi.com/api/v1/services/audio/tts/customization"
     print(f"  千问云：{q}  {'OK' if cond else '✗'}")
     ok &= cond
-    b = vl.customization_url("wss://llm-abc.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime")
-    cond = b == "https://llm-abc.ap-southeast-1.maas.aliyuncs.com/api/v1/services/audio/tts/customization"
-    print(f"  国际版：{b}  {'OK' if cond else '✗'}")
+    b = vl.customization_url("wss://maas.qwencloudapi.com/api-ws/v1/realtime")
+    cond = b == "https://maas.qwencloudapi.com/api/v1/services/audio/tts/customization"
+    print(f"  海外版（qwencloud）：{b}  {'OK' if cond else '✗'}")
+    ok &= cond
+    c = vl.customization_url("wss://llm-abc.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime")
+    cond = c == "https://llm-abc.ap-southeast-1.maas.aliyuncs.com/api/v1/services/audio/tts/customization"
+    print(f"  旧国际版地址（上游已下线，仍能派生）：{c}  {'OK' if cond else '✗'}")
     ok &= cond
     bad = vl.customization_url("没有 scheme 的地址")
     cond = bad.startswith("https://maas.qianwenaiapi.com/")

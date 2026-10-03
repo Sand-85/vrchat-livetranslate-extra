@@ -13,20 +13,13 @@
 session:
   # 默认 3.8；可换 qwen3.5-livetranslate-flash-realtime（字段/事件自动切换）
   model: qwen3.8-livetranslate-flash-realtime
-  # 服务线路（互斥）：qianwen = 千问云（国内，默认）；bailian_intl = 阿里云百炼·国际版（海外）
+  # 服务线路（互斥）：qianwen = 千问云（国内，默认）；qwencloud = 千问云·海外版（qwencloud.com）
   # ⚠️ 实际连接地址一律以 base_url 为准；切线路请在界面「⚙ 设置 → 常规」里切（会同步改写 base_url）
+  # ⚠️ 两条线路的 API key **不互通**：界面按线路分槽各存一份
+  #   （api_key.txt / api_key_qwencloud.txt），来回切线路不用重填。
   provider: qianwen
-  # 百炼国际版专用：业务空间 ID（控制台「业务空间详情」里的 API Host 前缀，形如 llm-xxxx）
-  # 千问云不需要；填了它 base_url 里的 {workspace_id} 会被替换
-  workspace_id: ""
-  # 百炼国际版专用地域：**只有 ap-southeast-1(新加坡) 可用**（本版起界面里也只给这一个）。
-  #   ⚠️ 原因：本程序要用的语音链路（实时同传 / 试听音色 / 打字译音 / Omni 音色）在国际站
-  #   只在**新加坡**部署；东京/弗吉尼亚/法兰克福/香港都没有语音类模型（东京连打字翻译用的
-  #   qwen-mt-flash 都没有）。填了别的地域**不会静默回落**，而是「开始翻译」时被拦下并提示。
-  #   地域会进 host（{workspace_id}.{region}.maas.aliyuncs.com），且 API key 不能跨地域使用。
-  region: ap-southeast-1
-  # 千问云（默认）：免业务空间 ID；百炼国际版会被界面写成
-  #   wss://{workspace_id}.{region}.maas.aliyuncs.com/api-ws/v1/realtime
+  # 千问云（默认）：国内线路，免业务空间 ID、无地域段；
+  # 千问云·海外版会被界面写成 wss://maas.qwencloudapi.com/api-ws/v1/realtime
   base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime
   # ⚠️ 必须显式指定：不填会抛 Voice 'Chelsie' is not supported（纯文本模式也校验）
   # 这是「说话译音」的音色（实时模型直出）；也可在界面「⚙ 设置 → 音色」里选。

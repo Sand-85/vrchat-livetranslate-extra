@@ -1,19 +1,22 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.6.1 "RoomClient"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.8.1 "needle1,needle2"
 
 ⚠️ **本仓库只发 Windows 版**：没有 AppImage / Linux 附件，所以本脚本就是全部验收面
-（上游那份里的 `verify_appimage.py` 流程不适用于本仓库）。本版新增「多人房间文本中继」，
-needle 取新模块的类名 `RoomClient`（`vlt/room/client.py`，解包后在 `vlt/room/client.pyc` 里命中）。
+（上游那份里的 `verify_appimage.py` 流程不适用于本仓库）。修复型发布没有新文案可挑时，
+用**修复引入的符号名**最可靠。
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.7.4 "needle1,needle2"
+⚠️ **本版（自上游 v0.8.0 同步）可挑的串**，每个改动各取一个：
+  ① 海外线路换成「千问云·海外版」：`qwencloud`（`vlt/endpoints.py` 的线路表 + `config.py`
+     的迁移分支 + `gui.py`）、中文名 `千问云·海外版`（`endpoints.describe()`）；
+  ② 「关于」页赞助者名单：`小夜`（`vlt/gui.py` 的 `SPONSORS`）；
+  ③ 本仓库增强「音色」页：`音色自定义`（新分页标题）或模块名 `voice_lab`。
 
-⚠️ **本仓库只发 Windows 版**：没有 AppImage / Linux 附件，所以本脚本就是全部验收面
-（上游那份里的 `verify_appimage.py` 流程不适用于本仓库）。
-修复型发布没有新文案可挑时，用**修复引入的符号名**最可靠。
+⚠️ **旧线路的名字照样能在包里搜到**（`config.py` 里留着迁移提示文案），所以别拿「旧名字不在包里」
+当验证；要证明新代码进包，只认上面这些**新增**串。
 
 复核项：
   1. 附件下载（只认 exe）

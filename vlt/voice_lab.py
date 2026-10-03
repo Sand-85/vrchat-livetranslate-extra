@@ -162,15 +162,17 @@ def describe(voices: list[VoiceInfo]) -> list[str]:
 
 
 def customization_url(base_url: str, workspace_id: str = "") -> str:
-    """自定义音色接口地址：**从 `session.base_url` 的 host 派生**（不写第二份域名常量）。
+    """自定义音色（声音设计）端点：**与另外两条 HTTP 端点同一个 host 派生口径**。
 
-    与 upstream 的 `endpoints.chat_url/multimodal_url` 同一条纪律：换线路时只改 base_url，
-    语音链路三个端点一起跟着走。解析不出 host 时回落千问云常量。
+    ⚠️ 上游 v0.8.0 起 `endpoints.host_of()` **只收 base_url**（「地域 / 业务空间」两个输入框
+    已被上游删掉，workspace 不再是地址的一部分）—— 这里也跟着只传 base_url。
+    保留 `workspace_id` 形参只为不动调用方（它现在被忽略）。
     """
     try:
-        host = endpoints.host_of(base_url, workspace_id)
-    except ValueError:
-        return f"https://{endpoints.QIANWEN_HOST}{CUSTOMIZATION_PATH}"
+        host = endpoints.host_of(base_url)
+    except Exception:  # noqa: BLE001 — 解析不出 host（空串/没 scheme）→ 回落国内千问云默认 host，
+        # 绝不拼出 `https:///api/v1/...` 这种残废地址（与 endpoints.host_of 的取舍一致）
+        host = endpoints.host_of(endpoints.default_base_url(endpoints.PROVIDER_QIANWEN))
     return f"https://{host}{CUSTOMIZATION_PATH}"
 
 

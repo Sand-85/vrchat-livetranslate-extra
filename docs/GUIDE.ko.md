@@ -83,87 +83,62 @@ python -m venv .venv
 > 수동 전체 검사: `python scripts/check_no_secrets.py --once`
 > 이유: key가 한 번 git 히스토리에 들어가면 파일을 지워도 남습니다. 히스토리를 다시 쓰기 전에 막아야 합니다.
 
-### 해외 사용자: 알리바바 클라우드 바이롄(국제판)
+### 해외 사용자: 치엔원 클라우드(해외판 / Qwen Cloud)
 
-**왜 회선이 두 개인가**: 기본값인 「치엔원 클라우드」는 중국 본토용이라 해외에서는 계정을 만들 수 없고
-직접 연결도 불안정합니다. 해외에서는 **알리바바 클라우드 바이롄(국제판 / Model Studio)**을 쓰세요 ——
-모델도 실시간 API도 같고, 진입 주소와 계정 체계만 다릅니다. 두 회선은 **상호 배타**라서
-동시에 동작하는 것은 화면에서 고른 하나뿐입니다.
+**왜 회선이 두 개인가**: 기본값인 「치엔원 클라우드」는 중국 본토용이라 해외에서는 가입할 수 없고
+직접 연결도 불안정합니다. 해외에서는 **치엔원 클라우드(해외판 / Qwen Cloud,
+<https://www.qwencloud.com/>)** 을 쓰세요 —— 모델도 실시간 API도 같고(실시간 동시통역·입력한 글
+번역·읽어주기 모두 있습니다), 진입 주소와 계정 체계만 다릅니다. 두 회선은 **상호 배타**라서 동시에
+동작하는 것은 화면에서 고른 하나뿐입니다.
 
-**개통 3단계**(모두 [바이롄 국제판 콘솔 · 모델 마켓](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)에서)：
+**개통 3단계**(모두 <https://www.qwencloud.com/> 에서):
 
-![국제판 모델 마켓: 오른쪽 위에서 리전과 언어(English)를 바꿀 수 있습니다](../assets/modelstudio-market.png)
+1. **Google / GitHub / 이메일 인증 코드** 중 하나로 가입 —— **휴대폰 번호도, 신용카드도 필요 없습니다**
+2. 로그인한 뒤 콘솔에서 API key(`sk-ws-` 로 시작)를 만듭니다
+3. 새 계정에는 무료 한도가 딸려 옵니다(모델별로 계산). 다 쓰면 그때 충전하면 됩니다
 
-1. 워크스페이스를 만들고(기본 워크스페이스를 그대로 써도 됩니다) 들어갑니다
-2. 「워크스페이스 상세 정보」 페이지에서 **API Host 접두사**를 복사합니다 —— 이 앞부분이 곧
-   **워크스페이스 ID**입니다(예: `llm-xxxx`)
-   (전체 Host는 `llm-xxxx.ap-southeast-1.maas.aliyuncs.com` 형태이며, 앞의 `llm-xxxx`만 필요합니다)
-3. **같은 워크스페이스**에서 API key(`sk-...`)를 만듭니다 —— 입구는 콘솔 **왼쪽 아래**의 `API-KEY`입니다:
+**화면에서 3단계**:
 
-![콘솔 왼쪽 아래의 API-KEY 입구(빨간 박스)](../assets/modelstudio-api-key-entry.png)
+1. `⚙ 설정 → 일반 → 서비스 회선` 에서 「치엔원 클라우드(해외판)」 선택
+2. 「회선 설정 저장」을 누릅니다(`base_url` 이
+   `wss://maas.qwencloudapi.com/api-ws/v1/realtime` 로 바뀝니다)
+3. 이 페이지 위쪽 「API key」 칸에 key를 붙여넣고 저장한 뒤 **번역을 다시 시작**
 
-![클릭하면 API Key 관리 페이지가 열립니다. 여기서 만들고 복사하세요(로그인하지 않았다면 먼저 로그인)](../assets/modelstudio-api-key.png)
+> 🔑 **두 회선의 key는 서로 호환되지 않습니다**: 해외판과 본토판은 각각 다른 파일
+> (`api_key.txt` / `api_key_qwencloud.txt`)에 저장되므로, 회선을 오가도 key를 다시 입력할 필요가
+> 없습니다. 「현재(회선): …」 줄도 회선을 따라갑니다.
+> 같은 계정이라도 **key를 함께 쓸 수 없습니다** —— 해외판용 key를 따로 발급받으세요.
+> 회선을 바꾼 뒤에는 **번역을 다시 시작**해야 적용됩니다(실행 중이면 먼저 중지하라는 안내가 뜹니다).
 
-**화면에서 4단계**：
+> ⚠️ **옛 설정은 자동으로 옮겨집니다**: 예전에 「알리바바 클라우드 바이롄(국제판)」(워크스페이스 ID와
+> 리전이 필요했고, 해외 가입 시 카드 이용 내역을 요구받을 수 있었습니다)을 골라 두었다면,
+> 이 버전부터는 시작할 때 자동으로 치엔원 클라우드(해외판)로 전환하고 로그에도 알립니다 ——
+> 해외판 key를 한 번 다시 입력해 주세요.
 
-1. `⚙ 설정 → 일반 → 서비스 회선`에서 「알리바바 클라우드 바이롄(국제판)」을 선택
-2. 「워크스페이스 ID」에 `llm-xxxx` 입력 (치엔원 클라우드 회선에서는 이 칸이 회색이라 입력할 것이 없습니다)
-3. 「리전」은 기본값 **Singapore (`ap-southeast-1`)** 그대로 둡니다 —— 이 버전부터 선택지는 이것뿐입니다(이유는 아래)
-4. 「회선 설정 저장」을 누른 뒤, 이 페이지 위쪽의 「API key」 칸에 key를 붙여넣고 저장
-
-> 🔑 **key는 따로 저장됩니다**: 회선마다 별도 파일(`api_key.txt` / `api_key_bailian_intl.txt`)에 저장되므로
-> 회선을 오가도 key를 다시 입력할 필요가 없습니다. 「현재(회선): …」 줄도 회선을 따라갑니다.
-> 회선을 바꾼 뒤에는 **번역을 다시 시작**해야 적용됩니다(이미 실행 중이면 먼저 중지하라는 안내가 뜹니다).
-
-**리전: 싱가포르만 사용할 수 있습니다**（이 버전부터 화면의 선택지도 이것뿐）
-
-| 리전 id | 도시 | 이 앱 |
-|---|---|---|
-| `ap-southeast-1` | Singapore(기본값) | ✅ 모든 기능 |
-| `ap-northeast-1` | Japan (Tokyo) | ❌ 음성 계열 모델 없음 |
-| `us-east-1` | US (Virginia) | ❌ 음성 계열 모델 없음 |
-| `eu-central-1` | Germany (Frankfurt) | ❌ 음성 계열 모델 없음 |
-| `cn-hongkong` | China (Hong Kong) | ❌ 음성 계열 모델 없음 |
-
-> ⚠️ **왜 싱가포르뿐인가**: 바이롄 국제판은 **리전마다 endpoint·API key·모델 목록이 따로이고,
-> 리전을 넘어 사용할 수 없습니다**(공식 원문: *“Each region has its own endpoint, API Key, and
-> model list. These cannot be used across regions.”*). 이 앱이 필요로 하는 **음성 계열 모델**
-> (실시간 동시통역 `qwen3.8-livetranslate-flash-realtime`, 음색 미리듣기/입력한 글 읽기
-> `qwen3-tts-flash`, Omni 음색 `qwen3.5-omni-flash`)은 국제판에서 **싱가포르에만 배포**되어 있습니다.
-> 도쿄·버지니아·프랑크푸르트·홍콩에는 음성 계열 모델이 아예 없습니다(도쿄에는 텍스트 번역에 쓰는
-> `qwen-mt-flash`조차 없습니다). 그래서 화면의 선택지는 **Singapore 하나**입니다. 설정 파일에 옛
-> 리전이 남아 있으면 「번역 시작」 시점에 **막고 변경을 안내합니다**(조용히 바꾸지 않습니다 —— 리전은
-> Host에 들어가므로 바꾸면 다른 리전의 도메인으로 요청이 나갑니다).
-
-> ⚠️ **key도 Singapore 것이어야 합니다**: key는 만든 워크스페이스의 리전에서만 동작합니다.
-> 다른 리전(예: 일본에서 만든 워크스페이스)의 key로는 연결되지 않거나 `Model not exist`가
-> 반환됩니다 —— 콘솔에서 워크스페이스와 key가 모두 Singapore에 있는지 확인하세요.
-
-**대응하는 `config.yaml`의 네 개 키**(「회선 설정 저장」을 누르면 자동으로 기록됩니다. 직접 편집할 필요는 없습니다)：
+**대응하는 `config.yaml` 의 두 개 키**(「회선 설정 저장」을 누르면 자동으로 기록됩니다. 직접 편집할
+필요는 없습니다):
 
 ```yaml
 session:
-  provider: qianwen          # 회선 id: qianwen(치엔원 클라우드) / bailian_intl(바이롄 국제판)
-  region: ap-southeast-1     # 바이롄 국제판에서만 의미가 있습니다
-  workspace_id: ""           # 워크스페이스 ID(llm-xxxx). 치엔원 클라우드에서는 비워 둡니다
+  provider: qianwen          # 회선 id: qianwen(본토) / qwencloud(해외판)
   base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime
 ```
 
-바이롄 국제판으로 전환하면 `base_url`은 다음 형태가 됩니다(**`{workspace_id}`는 문자 그대로의
-자리표시자**이며 연결할 때만 실제 값으로 치환됩니다 —— 나중에 워크스페이스 ID를 바꿔도 이 줄을
-고칠 필요가 없습니다)：
+해외판으로 바꾸면 `base_url` 은 이렇게 됩니다:
 
 ```yaml
-  base_url: wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime
+  base_url: wss://maas.qwencloudapi.com/api-ws/v1/realtime
 ```
 
-**실제로 어디에 접속하는지를 정하는 것은 `base_url` 하나뿐**입니다. `provider`가 정하는 것은 화면
-기본값, key 저장 위치, 그리고 검증 규칙뿐입니다(바이롄 국제판은 **워크스페이스 ID가 필수** —— 비어 있으면
-저장이 빨간 글씨로 거부되고, 「번역 시작」도 막히면서 설정 페이지로 안내됩니다).
+**실제로 어디에 연결할지를 정하는 것은 `base_url` 하나뿐입니다**. `provider` 는 화면 기본값과 key
+저장 위치를 정할 뿐입니다. 두 회선의 세 경로는 완전히 같으므로(`/api-ws/v1/realtime`,
+`/compatible-mode/v1/chat/completions`,
+`/api/v1/services/aigc/multimodal-generation/generation`), 회선 전환은 `base_url` 한 곳만 바꾸면
+됩니다.
 
-> 🔍 **문제 해결**: 로그의 `[net] 线路=… host=…`가 현재 실제로 쓰는 주소(워크스페이스 ID는 마스킹됨),
-> `[gui] 服务线路已保存：…`가 화면에서 기록한 결과입니다. 둘이 어긋난다면 회선을 바꾼 뒤 번역을 다시
-> 시작하지 않은 것입니다.
+> 🔍 **문제 해결**: 로그의 `[net] 线路=… host=…` 가 실제로 연결하는 주소이고,
+> `[gui] 服务线路已保存：…` 는 화면이 디스크에 쓴 결과입니다. 두 줄이 다르면 회선을 바꾸고
+> 번역을 다시 시작하지 않은 것입니다.
 
 ## 4. 자가 점검
 
@@ -455,7 +430,7 @@ output:
 |---|---|
 | 말풍선에 아무것도 안 나옴 | VRChat 미실행 / OSC 꺼짐 / 말풍선 표시가 Off. `--dry-run` 에서 전송 로그가 보이면 프로그램 쪽은 정상입니다 |
 | `[loopback] ❌ no loopback device found` | VRChat이 소리를 재생하지 않거나, **원격 데스크톱 세션에서 실행 중**입니다(WASAPI 엔드포인트는 세션마다 분리되므로 물리 머신의 현재 세션에서 실행해야 합니다) |
-| 마이크가 아무것도 못 잡음 | 위와 같습니다. 먼저 "⚙ 설정" 드롭다운에서 선택된 장치를 확인하세요(원격 세션에서 열거가 비는 것은 정상이라고 상태 표시줄에 안내됩니다) |
+| 마이크가 아무것도 못 잡음 | 위와 같습니다. 먼저 "⚙ 설정" 드롭다운에서 선택된 장치를 확인하세요(원격 세션에서 열거가 비는 것은 정상이라고 상태 표시줄에 안내됩니다). 로그에서 `[mic]` 검색: 「已回落到同名设备」가 보이면 이 사운드카드의 WASAPI 엔드포인트를 열 수 없어 프로그램이 같은 이름의 다른 인터페이스로 자동 전환한 정상 동작입니다. 「所有候选设备都打不开」면 실제 고장입니다 |
 | `Voice 'Chelsie' is not supported` | `session.voice` 가 비어 있습니다. `Tina` 로 두세요 |
 | `Invalid translation parameter` | `session.update` 에 `translation` 필드가 없습니다(코드에서 보장됨. 수정할 때 주의) |
 | `1007 Requests rate limit exceeded` | RPM 10에 도달했습니다. 1분 기다리세요. 자주 재시작하지 마세요(**WS 연결 1회마다 요청 1회**로 계산됩니다) |
@@ -499,7 +474,7 @@ vlt/
 
 server/                   여러 명 룸의 서버(Cloudflare Worker + Durable Object, 독립 배포)
 scripts/                  탐침·디버그 도구(probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    58개 파일, 467개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
+tests/                    59개 파일, 469개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
                           실행하며, 실제 API 키가 필요한 tests/test_engine.py 는 제외합니다)
 docs/                     P0.5 / P1 / P2 실측 결과(프로토콜, 지연, 손목 오버레이)
 testdata/                 내장 테스트 오디오(중국어 8.56초, 영어 7.92초, 16kHz 모노 PCM)
@@ -551,7 +526,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
   (SHA256, `--self-test` 실제 실행, 버전 줄, 신규 기능 문자열을 바이트코드에서 검색, 아이콘 픽셀 비교):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.8.0 "qwencloud,千问云·海外版,小夜"
   ```
 
 ---

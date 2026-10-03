@@ -293,6 +293,71 @@ class PyaudioLoopbackSource(QueueAudioSource):
             self._pa.terminate()
 
 
+def query_devices_all() -> list[dict]:
+    """**完整**设备表（含 MME / DirectSound / WDM-KS 的重复项与未启用端点）。
+
+    只给「按名字打开失败后的回落」用 —— 界面与按名字解析一律走 `query_devices()`
+    （WASAPI 已启用那一套）。每条同样带 `pa_index`（真实 PortAudio 索引）。
+
+    ⚠️ 失败一律**当「没有回落候选」处理**（返回空表 + 留痕），绝不抛：
+    它只是一条锦上添花的兜底路径；而且打桩环境里的 `sounddevice` 常常不是真的
+    （实测 `tests/test_mic_device.py` 的假 `query_devices()` 返回的是单个 dict，
+    直接迭代会炸）—— 那种环境本来也不需要回落候选。
+    """
+    try:
+        import sounddevice as sd
+        with PA_LOCK:
+            devices = [dict(d) for d in sd.query_devices()]
+    except Exception as exc:                # noqa: BLE001 — 见 docstring
+        print(f"[devices] ⚠️ 取完整设备表失败（{type(exc).__name__}: {exc}）"
+              "→ 本次没有同名回落候选", flush=True)
+        return []
+    for i, d in enumerate(devices):
+        d["pa_index"] = i
+    return devices
+
+
+def same_name_fallbacks(name: str, kind: str, *, exclude: int | None = None) -> list[int]:
+    """同一设备名在**其它 host API** 下的索引（按 host API 顺序）—— 打开失败后的回落候选。
+
+    为什么需要（2026-10-02 测试者真机，两起）：
+
+      · **WASAPI 共享模式只接受端点自己的采样率**：麦克风按 16kHz 打开会被拒
+        （`PortAudioError: … Invalid sample rate [PaErrorCode -9997]`）；而 MME/DirectSound
+        会自己重采样，所以老路径（那时解析命中的是 MME）一直能用。
+      · 个别虚拟声卡端点（Voicemeeter）在 WASAPI 下 KS 属性查询失败：
+        `-9999 Unanticipated host error … WdmSyncIoctl … DeviceIoControl GLE = 0x490`
+        （同一台机器上它的 MME 条目能正常打开）。
+
+    按同名回落到别的 host API（通常是 MME）能就地打开，比直接判死强；每次尝试都留痕。
+    """
+    want = str(name or "").strip().lower()
+    if not want:
+        return []
+    key = "max_input_channels" if kind == "input" else "max_output_channels"
+    out: list[int] = []
+    for d in query_devices_all():
+        if int(d.get(key, 0) or 0) <= 0:
+            continue
+        if str(d.get("name", "")).strip().lower() != want:
+            continue
+        idx = int(d.get("pa_index", 0))
+        if idx == exclude or idx in out:
+            continue
+        out.append(idx)
+    return out
+
+
+def device_native_rate(index: int) -> int:
+    """该 PortAudio 索引对应设备的**原生**采样率；取不到返回 0。"""
+    try:
+        import sounddevice as sd
+        info = sd.query_devices(index)      # 传索引 → 直接得到该设备的 dict
+        return int(info.get("default_samplerate", 0) or 0)
+    except Exception:                       # noqa: BLE001 — 拿不到就不改采样率
+        return 0
+
+
 def open_mic(device_name: str | None, *, rate: int = 16000, channels: int = 1,
              blocksize: int) -> AudioSource:
     """麦克风采集（与 Linux 共用同一个实现）。
@@ -305,20 +370,43 @@ def open_mic(device_name: str | None, *, rate: int = 16000, channels: int = 1,
 
     索引由 `resolve_device_name(..., "input")` 从 **sounddevice 自己的设备表**解析，
     正是 PortAudio 要的那个；解析不到则回落默认输入设备（IndexError 交给我们）。
+
+    ## 采样率：按**设备原生采样率**打开（2026-10-02 测试者真机事故）
+
+    原来一律按 16kHz 打开，靠 PortAudio 自己重采样。设备表收敛到 WASAPI 之后这条路断了：
+    **WASAPI 共享模式只接受端点自己的采样率**，要 16kHz 直接
+    `PortAudioError: Error opening RawInputStream: Invalid sample rate [PaErrorCode -9997]`
+    —— 表现是「麦克风采集线程一启动就退出」，等于自己说话那条腿全哑。
+
+    现在拿设备的原生采样率开（拿不到才用入参），下游 `engine._pump_capture` 里那句
+    `to_16k_mono(chunk, source.rate, source.channels)` 本来就负责转 16kHz —— 与 loopback 腿同一口径。
+    `blocksize` 跟着采样率走，保持约 100ms 一块。
+    另外带上**同名回落候选**（见 `same_name_fallbacks`），首选打不开时按序再试并留痕。
     """
     import asyncio
     import logging
 
     index: int | None = None
+    rate_use = int(rate or 16000)
+    fallbacks: list[int] = []
     if device_name:
         from ..devices import resolve_device_name   # 局部导入，避免与 devices 循环导入
         index = resolve_device_name(device_name, "input")
         if index is None:
             logging.getLogger(__name__).warning(
                 "[mic] 未找到设备 %r，回退系统默认输入设备", device_name)
+        else:
+            native = device_native_rate(index)
+            if native and native != rate_use:
+                rate_use = native
+            fallbacks = same_name_fallbacks(device_name, "input", exclude=index)
+
+    if rate_use != rate:
+        blocksize = int(rate_use * 0.1)        # 保持 ~100ms 一块（块大小跟着采样率走）
 
     src = SoundDeviceMicSource(asyncio.get_running_loop(), index,
-                               rate=rate, channels=channels, blocksize=blocksize)
+                               rate=rate_use, channels=channels, blocksize=blocksize,
+                               fallbacks=fallbacks)
     src.start()
     return src
 

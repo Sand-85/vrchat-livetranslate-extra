@@ -101,6 +101,11 @@ uv pip install --python .venv/bin/python -r requirements-linux.txt
 
 > 🔑 还没有百炼账号？**[点此开通「阿里云百炼大模型」▸](https://www.aliyun.com/minisite/goods?userCode=q8nma978)**
 
+> 🌏 **海外用户**：默认线路「千问云」面向国内，海外注册不了、直连也不稳。请改用
+> **千问云·海外版（Qwen Cloud，<https://www.qwencloud.com/>）**：在界面「⚙ 设置 → 常规 →
+> 服务线路」里切换即可（注册不要手机号、不要信用卡，两版 key 不互通）。详见 GUIDE.md 的
+> 「海外用户：千问云·海外版」一节。
+
 优先级和 Windows 完全一样（界面里保存的 → 环境变量 → 百炼 CLI）：
 
 | 优先级 | 来源 | 怎么设（Linux） |

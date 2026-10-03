@@ -136,12 +136,15 @@ class SoundDeviceMicSource(QueueAudioSource):
     label = "mic"
 
     def __init__(self, loop, device: str | int | None, *, rate: int = 16000,
-                 channels: int = 1, blocksize: int = 1600) -> None:
+                 channels: int = 1, blocksize: int = 1600,
+                 fallbacks: "list[int] | tuple[int, ...]" = ()) -> None:
         super().__init__(loop, rate=rate, channels=channels)
         # ⚠️ 不能用 `device or None`：PortAudio 的索引 0 是合法设备，
         #    被 `or` 判成假值就悄悄回落默认设备了。
         self._device = None if device in (None, "") else device
         self._blocksize = blocksize
+        #: 首选设备打不开时按序再试的候选（Windows：同名设备的其它 host API 条目）
+        self._fallbacks = tuple(int(f) for f in fallbacks if f != self._device)
 
     def _pump(self, stop: threading.Event) -> None:
         import sounddevice as sd
@@ -151,12 +154,29 @@ class SoundDeviceMicSource(QueueAudioSource):
                 log.debug("[mic] callback status: %s", status)
             self._emit(bytes(indata))
 
-        # `with` 退出即关流；而 close() 是「先置 stop → 再 join」，
-        # 所以关流时采集线程已经不再产生新数据 —— 顺序与 loopback 侧一致。
-        with sd.RawInputStream(samplerate=self.rate, channels=self.channels,
-                               dtype="int16", blocksize=self._blocksize,
-                               device=self._device, callback=callback):
-            stop.wait()
+        # 候选顺序：首选 → 同名回落（见 `platform/win.py: same_name_fallbacks`）。
+        # 每一次失败都留痕 —— 「麦克风没声音」最难查的就是「到底开的是哪个设备、为什么没开成」。
+        candidates = [(self._device, False)] + [(f, True) for f in self._fallbacks]
+        last_exc: Exception | None = None
+        for dev, is_fallback in candidates:
+            try:
+                # `with` 退出即关流；而 close() 是「先置 stop → 再 join」，
+                # 所以关流时采集线程已经不再产生新数据 —— 顺序与 loopback 侧一致。
+                with sd.RawInputStream(samplerate=self.rate, channels=self.channels,
+                                       dtype="int16", blocksize=self._blocksize,
+                                       device=dev, callback=callback):
+                    if is_fallback:
+                        print(f"[mic] 首选设备 #{self._device} 打不开，"
+                              f"已回落到同名设备 #{dev}（{self.rate}Hz）", flush=True)
+                    stop.wait()
+                return
+            except Exception as exc:  # noqa: BLE001 — 换候选再试
+                last_exc = exc
+                print(f"[mic] 设备 #{dev} 打不开（{self.rate}Hz）：{exc}", flush=True)
+                continue
+        log.warning("[mic] 所有候选设备都打不开（共 %d 个）：%s", len(candidates), last_exc)
+        if last_exc is not None:
+            raise last_exc
 
 
 def _mix_pcm16(chunks: list[bytes]) -> bytes:

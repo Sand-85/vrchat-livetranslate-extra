@@ -71,6 +71,26 @@ def capture_backend() -> Any:
     return backend()
 
 
+def output_device_fallbacks(name: str, exclude: int | None = None) -> list[int]:
+    """同名**输出**设备在其它 host API 下的索引 —— 首选打不开时按序回落。
+
+    为什么需要（2026-10-02 测试者真机）：设备表收敛到 WASAPI 之后，个别虚拟声卡的 WASAPI
+    端点打不开（Voicemeeter：`-9999 Unanticipated host error … WdmSyncIoctl … GLE = 0x490`），
+    而它的 MME 条目能正常打开 —— 有候选就不至于把「译音输出」这条腿直接判死。
+
+    平台差异：只有 Windows 实现了 `same_name_fallbacks`（同名设备在 MME/DirectSound/WASAPI/
+    WDM-KS 下各有一条，索引可互换）；其它平台返回空列表（PipeWire 的索引不是这样互换的），
+    调用方看到的语义是「没有候选」，行为与改动前一致。
+    """
+    fn = getattr(device_backend(), "same_name_fallbacks", None)
+    if fn is None:
+        return []
+    try:
+        return list(fn(name, "output", exclude=exclude))
+    except Exception:                       # noqa: BLE001 — 回落候选拿不到不该影响主流程
+        return []
+
+
 class _NullWristOverlay:
     """`overlay.backend: null` 时用的空实现（接口与真后端一致，永远不可用）。"""
 

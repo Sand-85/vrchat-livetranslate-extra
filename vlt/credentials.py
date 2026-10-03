@@ -7,7 +7,7 @@
 **为什么分槽**：千问云与阿里云百炼·国际版是两条互斥线路，两边的 key **不通用**
 （账号体系不同）。若共用一个文件，切线路就得重填 key、还会互相覆盖。故按「线路 id」
 分槽各存一份：`qianwen` → 老文件名 `api_key.txt`（**保持不动，老用户零迁移**），
-其它槽 → `api_key_<slot>.txt`（如 `api_key_bailian_intl.txt`）。切线路时按 slot 各取各的。
+其它槽 → `api_key_<slot>.txt`（如 `api_key_qwencloud.txt`）。切线路时按 slot 各取各的。
 """
 from __future__ import annotations
 

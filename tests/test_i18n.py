@@ -84,16 +84,33 @@ def _destroy(gui) -> None:
         pass
 
 
-def _walk_texts(win, out: list[str]) -> None:
-    """递归收集一棵控件树里所有 text 属性（Label/Button/Radiobutton/Checkbutton 等）。"""
+def _walk_texts(win, out: list[str], skip: set[str] | None = None) -> None:
+    """递归收集一棵控件树里所有 text 属性（Label/Button/Radiobutton/Checkbutton 等）。
+
+    `skip` = 不参与文案判定的控件路径（`str(widget)`，如 `. !frame.!label`）。
+
+    ⚠️ **按控件排除，绝不按文本内容排除**：目前唯一被排除的是「关于 → 赞助者」的名字名单项
+    （`gui._sponsor_names_widgets`，每个名字一个名单项控件）—— 赞助者名字是**专有名词**，
+    换成英/日/韩/俄界面也照原样显示（「小夜」不会译成英文）。按内容排除等于给真正的漏翻开后门
+    （谁把某条文案抄进排除列表，守卫就再也抓不到它）。
+    """
+    skip = skip or set()
     for w in win.winfo_children():
+        if str(w) in skip:
+            continue
         try:
             keys = w.keys()
         except Exception:  # noqa: BLE001 — 已销毁的控件直接跳过
             continue
         if "text" in keys:
             out.append(str(w.cget("text")))
-        _walk_texts(w, out)
+        _walk_texts(w, out, skip)
+
+
+def _text_skip_paths(gui) -> set[str]:
+    """界面守卫要跳过的控件路径集合（目前只有赞助者名字名单项，空名单时不存在）。"""
+    widgets = getattr(gui, "_sponsor_names_widgets", None) or []
+    return {str(w) for w in widgets}
 
 
 # ---------------------------------------------------------------- ① 词表完整性（机械守卫）
@@ -295,8 +312,9 @@ def test_english_ui_has_no_cjk() -> int:
             f"前提：界面语言应是 en，实际 {i18n.current_language()!r}"
 
         texts = [gui._root.title(), gui._settings_win.title()]
-        _walk_texts(gui._root, texts)
-        _walk_texts(gui._settings_win, texts)
+        skip = _text_skip_paths(gui)
+        _walk_texts(gui._root, texts, skip)
+        _walk_texts(gui._settings_win, texts, skip)
         assert len(texts) > 50, f"扫到的文案太少（{len(texts)} 条），守卫形同虚设"
         bad = [x for x in texts if CJK_RE.search(x)]
         assert not bad, (f"英文界面下仍有 {len(bad)} 条文案含汉字（漏翻）：\n"
@@ -344,8 +362,9 @@ def test_all_ui_languages_window_guard() -> None:
             assert i18n.current_language() == lang, \
                 f"前提：界面语言应是 {lang}，实际 {i18n.current_language()!r}"
             texts = [gui._root.title(), gui._settings_win.title()]
-            _walk_texts(gui._root, texts)
-            _walk_texts(gui._settings_win, texts)
+            skip = _text_skip_paths(gui)
+            _walk_texts(gui._root, texts, skip)
+            _walk_texts(gui._settings_win, texts, skip)
             assert len(texts) > 50, f"{lang}：扫到的文案太少（{len(texts)} 条），守卫形同虚设"
 
             bad: list[str] = []

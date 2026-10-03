@@ -21,7 +21,8 @@ CANDIDATES = [
     ("legacy  /api-ws/v1/realtime  + 无 model 参数",          "wss://dashscope.aliyuncs.com/api-ws/v1/realtime", None),
     ("legacy  /api-ws/v1/inference + qwen3.8-livetranslate", "wss://dashscope.aliyuncs.com/api-ws/v1/inference", "qwen3.8-livetranslate-flash-realtime"),
     ("legacy  /api-ws/v1/inference + qwen3.8-omni-realtime", "wss://dashscope.aliyuncs.com/api-ws/v1/inference", "qwen3.8-omni-flash-realtime"),
-    ("intl    dashscope-intl /v1/realtime + qwen3.8",        "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime", "qwen3.8-livetranslate-flash-realtime"),
+    ("qianwen  国内 /v1/realtime + qwen3.8",              "wss://maas.qianwenaiapi.com/api-ws/v1/realtime", "qwen3.8-livetranslate-flash-realtime"),
+    ("qwencloud 海外 /v1/realtime + qwen3.8",             "wss://maas.qwencloudapi.com/api-ws/v1/realtime", "qwen3.8-livetranslate-flash-realtime"),
 ]
 
 
