@@ -26,7 +26,7 @@ from tkinter import messagebox, ttk
 
 import yaml
 
-from . import __version__, crashlog, endpoints, i18n, tts, update_check
+from . import __version__, crashlog, endpoints, i18n, tts, update_check, voice_lab
 from .config import Direction, _as_str_map, DEFAULT_CONFIG, load_api_key, load_config
 from .config_io import (
     _fmt_scalar,
@@ -1760,6 +1760,7 @@ class TranslationGUI:
         #   关于 = 版本与日志（出问题时给维护者的东西）
         self._build_settings_general(self._settings_page(nb, t("常规")))
         self._build_settings_audio(self._settings_page(nb, t("音频")))
+        self._build_settings_voice(self._settings_page(nb, t("音色")))
         self._build_settings_glossary(self._settings_page(nb, t("词库")))
         self._build_settings_room(self._settings_page(nb, t("房间")))
         self._build_settings_about(self._settings_page(nb, t("关于")))
@@ -2384,6 +2385,367 @@ class TranslationGUI:
         # 控件建齐后再按当前 scope 填一次（读盘口径与 `_refresh_glossary_box` 完全一致，
         # 这样「打开设置 → 已经是磁盘上的最新内容」这条保证在首屏也成立）
         self._refresh_glossary_box()
+
+    # ---------------------------------------------------------------- 设置弹窗 · 音色页
+
+    def _build_settings_voice(self, body: ttk.Frame) -> None:
+        """「音色」页：用一句话炼一个自己的音色 + 配方一键生成 + 过往生成（可回放）。
+
+        为什么值得有这一页：官方「声音设计」只要一句**描述**就能出一个新音色，但入口在
+        控制台里 —— 用户得去网页炼、再把 40 多位的一串 id 抄进配置（抄错就是
+        `InvalidParameter`，界面只显示「暂不支持试听」，排查方向全错）。这一页把
+        「描述 → 生成 → 试听 → 保存为当前音色」收成四步，并把**花钱**这件事摆在明面上。
+
+        三条硬约束（都能在新手第一次点击时把人劝退，所以写在控件附近）：
+        ① 费用记在**用户自己**的账号上（音色绑定创建它的账号，平台没有共享/转移）；
+        ② 描述里写「像某声优/某角色」服务端不支持，也可能涉版权 → 只写声学特征；
+        ③ 同一句描述每次生成**不保证同一条**音色（官方 FAQ），所以这里按名字幂等复用：
+           同名音色已存在就直接拿来用，不会因为反复点击而反复计费。
+        """
+        ttk.Label(body, text=t("音色自定义"), style="Section.TLabel").pack(anchor=tk.W)
+        ttk.Label(body, text=t("用一句话描述你想要的声音：生成后可直接试听，满意就保存为当前音色。"),
+                  style="Muted.TLabel", justify=tk.LEFT,
+                  wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(4, 0))
+
+        form = ttk.Frame(body)
+        form.pack(fill=tk.X, pady=(8, 0))
+        form.columnconfigure(1, weight=1)
+        ttk.Label(form, text=t("名称:"), style="Dim.TLabel").grid(row=0, column=0, sticky="w")
+        self._lab_name_var = tk.StringVar(value="my_voice")
+        self._lab_name_entry = ttk.Entry(form, textvariable=self._lab_name_var, width=16,
+                                         style="Key.TEntry", font=FONT_UI)
+        self._lab_name_entry.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self._attach_edit_menu(self._lab_name_entry)
+        ttk.Label(form, text=t("（字母/数字/下划线，≤16）"), style="Dim.TLabel").grid(
+            row=0, column=2, sticky="w", padx=(8, 0))
+
+        ttk.Label(form, text=t("描述:"), style="Dim.TLabel").grid(row=1, column=0,
+                                                                  sticky="nw", pady=(6, 0))
+        # 描述通常一二十字到几十字，单行 Entry 会让人看不到全貌 → 与词库页同一套 tk.Text 样式
+        self._lab_prompt_text = tk.Text(
+            form, height=3, width=44, wrap=tk.WORD, undo=True,
+            bg=SURFACE, fg=TEXT, insertbackground=TEXT, selectbackground=ACCENT,
+            selectforeground="#ffffff", relief=tk.FLAT, highlightthickness=1,
+            highlightbackground=BORDER, highlightcolor=ACCENT, font=FONT_UI)
+        self._lab_prompt_text.grid(row=1, column=1, columnspan=2, sticky="ew",
+                                   padx=(8, 0), pady=(6, 0))
+        self._attach_edit_menu(self._lab_prompt_text)
+        ttk.Label(body, text=t("提示：只描述声学特征（年龄感、音高、语速、情绪），"
+                               "不要写「像某声优/某角色」——服务端不支持模仿，也可能涉及版权。"),
+                  style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP).pack(
+            anchor=tk.W, pady=(4, 0))
+
+        btns = ttk.Frame(body)
+        btns.pack(fill=tk.X, pady=(8, 0))
+        self._lab_gen_btn = ttk.Button(btns, text=t("生成并试听"),
+                                       command=self._on_lab_generate)
+        self._lab_gen_btn.pack(side=tk.LEFT)
+        self._lab_save_btn = ttk.Button(btns, text=t("保存为当前音色"),
+                                        command=self._on_lab_save, state=tk.DISABLED)
+        self._lab_save_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self._lab_del_btn = ttk.Button(btns, text=t("删除所选"),
+                                       command=self._on_lab_delete, state=tk.DISABLED)
+        self._lab_del_btn.pack(side=tk.LEFT, padx=(6, 0))
+        # 价格直接印在按钮旁：点下去花的是**用户自己的钱**，别藏在文档里
+        ttk.Label(body, text=t("0.2 元/个（北京地域开通后 90 天内前 10 次免费，创建失败不计费）"),
+                  style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP).pack(
+            anchor=tk.W, pady=(4, 0))
+
+        ttk.Label(body, text=t("配方（预先做好的描述，一键生成）:"),
+                  style="Dim.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        rrow = ttk.Frame(body)
+        rrow.pack(fill=tk.X, pady=(4, 0))
+        self._lab_recipe_combo = ttk.Combobox(rrow, values=voice_lab.recipe_labels(),
+                                              state="readonly", width=26)
+        self._lab_recipe_combo.pack(side=tk.LEFT)
+        if voice_lab.RECIPES:
+            self._lab_recipe_combo.current(0)
+        self._lab_recipe_btn = ttk.Button(rrow, text=t("用配方一键生成"),
+                                          command=self._on_lab_recipe_generate)
+        self._lab_recipe_btn.pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(body, text=t("过往生成（本账号的自定义音色）:"),
+                  style="Dim.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        lrow = ttk.Frame(body)
+        lrow.pack(fill=tk.X, pady=(4, 0))
+        self._lab_list = tk.Listbox(
+            lrow, height=5, bg=SURFACE, fg=TEXT, selectbackground=ACCENT,
+            selectforeground="#ffffff", relief=tk.FLAT, highlightthickness=1,
+            highlightbackground=BORDER, highlightcolor=ACCENT, font=FONT_UI,
+            activestyle="none", exportselection=False)
+        self._lab_list.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._lab_list.bind("<<ListboxSelect>>", self._on_lab_select)
+        lcol = ttk.Frame(lrow)
+        lcol.pack(side=tk.LEFT, padx=(6, 0))
+        self._lab_preview_btn = ttk.Button(lcol, text=t("试听所选"),
+                                           command=self._on_lab_preview)
+        self._lab_preview_btn.pack(fill=tk.X)
+        self._lab_refresh_btn = ttk.Button(lcol, text=t("刷新列表"),
+                                           command=self._on_lab_refresh)
+        self._lab_refresh_btn.pack(fill=tk.X, pady=(4, 0))
+
+        self._lab_status = ttk.Label(body, text="", style="Muted.TLabel", justify=tk.LEFT,
+                                     wraplength=SETTINGS_WRAP)
+        self._lab_status.pack(anchor=tk.W, pady=(8, 0))
+
+        # 状态：列表行 → 数据；本次会话是否已确认过花费；正在跑的活儿（防重入）
+        self._lab_voices: list[voice_lab.VoiceInfo] = []
+        self._lab_cost_ok = False
+        self._lab_busy = False
+        self._lab_last: dict[str, str] = {}          # voice → 生成时的描述（保存时一并写日志）
+        # 生成/删除的结论（尤其「复用：没有再花钱」）要活过紧随其后的那次自动刷新 —— 否则
+        # 用户只看到「正在读取…/已刷新」，最关键的花钱信息一闪就没了。
+        self._lab_banner = ""
+
+    # ---- 音色页：动作
+
+    def _lab_set_status(self, msg: str) -> None:
+        try:
+            if self._lab_status.winfo_exists():
+                self._lab_status.configure(text=msg)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _lab_running(self, job: str, on: bool) -> None:
+        """置忙/闲：按钮禁用 + 状态行提示（网络活儿全在守护线程里，界面绝不卡）。"""
+        self._lab_busy = on
+        for btn in (self._lab_gen_btn, self._lab_recipe_btn, self._lab_refresh_btn,
+                    self._lab_del_btn):
+            try:
+                if btn is not None and btn.winfo_exists():
+                    btn.configure(state=tk.DISABLED if on else tk.NORMAL)
+            except Exception:  # noqa: BLE001
+                pass
+        if not on:
+            self._on_lab_select()          # 恢复「保存/删除」按选中状态决定可用性
+
+    def _lab_ctx(self) -> tuple[str, str, str]:
+        """(api_key, base_url, workspace_id)：与试听同口径，缺失时由调用方报错。"""
+        return (self._resolve_api_key_safe(),
+                str(self._cfg.session_base.get("base_url") or ""),
+                str(self._cfg.session_base.get("workspace_id") or ""))
+
+    def _lab_confirm_cost(self) -> bool:
+        """首次生成前确认一次（钱记在用户自己账号上）；本次运行内不再重复问。"""
+        if self._lab_cost_ok:
+            return True
+        ok = messagebox.askokcancel(
+            t("生成音色会调用「声音设计」接口，费用记在你自己账号上："
+              "0.2 元/个（北京地域开通后 90 天内前 10 次免费，创建失败不计费）。确定继续吗？"))
+        if ok:
+            self._lab_cost_ok = True
+        return bool(ok)
+
+    def _on_lab_generate(self) -> None:
+        """按当前「名称 + 描述」生成（同名已存在则复用，不重复花钱）。"""
+        if self._lab_busy:
+            return
+        name = self._lab_name_var.get().strip()
+        prompt = self._lab_prompt_text.get("1.0", tk.END).strip()
+        try:
+            prompt = voice_lab.normalize_prompt(prompt)
+        except voice_lab.VoiceLabError as exc:
+            self._lab_set_status(t("生成失败：{msg}", msg=exc))
+            return
+        if voice_lab.prompt_looks_like_imitation(prompt):
+            # 不拦，只提醒（「像播报员」这类职业比喻是允许的，硬拦会误伤）
+            print(f"[gui] ⚠️ 音色描述疑似要求模仿特定人物：{prompt[:40]}…", flush=True)
+        if not self._lab_confirm_cost():
+            return
+        api_key, base_url, ws_id = self._lab_ctx()
+        if not api_key:
+            self._lab_set_status(t("还没配置 API key，无法试听（见右上角「设置」）"))
+            return
+        nm = voice_lab.normalize_name(name)
+        self._lab_name_var.set(nm)         # 回显规范后的名字，避免用户以为「我写的中文去哪了」
+        self._lab_running("create", True)
+        self._lab_set_status(t("正在生成音色「{v}」…", v=nm))
+        print(f"[gui] 声音设计：创建/复用音色 name={nm!r} 描述={prompt[:40]!r}", flush=True)
+        threading.Thread(target=self._lab_worker, args=("create",),
+                         kwargs={"name": nm, "prompt": prompt, "api_key": api_key,
+                                 "base_url": base_url, "workspace_id": ws_id},
+                         daemon=True, name="vlt-voice-lab").start()
+
+    def _on_lab_recipe_generate(self) -> None:
+        """配方一键生成：把配方的名字与描述填进控件，再走同一条生成路径。"""
+        recipe = voice_lab.recipe_from_label(self._lab_recipe_combo.get())
+        if recipe is None:
+            self._lab_set_status(t("请先选一个配方"))
+            return
+        self._lab_name_var.set(recipe.key)
+        self._lab_prompt_text.delete("1.0", tk.END)
+        self._lab_prompt_text.insert("1.0", recipe.prompt)
+        self._on_lab_generate()
+
+    def _on_lab_refresh(self) -> None:
+        """拉本账号的自定义音色列表（列表接口不花钱）。"""
+        if self._lab_busy:
+            return
+        api_key, base_url, ws_id = self._lab_ctx()
+        if not api_key:
+            self._lab_set_status(t("还没配置 API key，无法试听（见右上角「设置」）"))
+            return
+        self._lab_running("list", True)
+        if not self._lab_banner:
+            self._lab_set_status(t("正在读取本账号的音色…"))
+        threading.Thread(target=self._lab_worker, args=("list",),
+                         kwargs={"api_key": api_key, "base_url": base_url,
+                                 "workspace_id": ws_id},
+                         daemon=True, name="vlt-voice-lab").start()
+
+    def _lab_selected(self) -> voice_lab.VoiceInfo | None:
+        sel = list(self._lab_list.curselection()) if self._lab_list is not None else []
+        if not sel:
+            return None
+        idx = int(sel[0])
+        return self._lab_voices[idx] if 0 <= idx < len(self._lab_voices) else None
+
+    def _on_lab_select(self, _event=None) -> None:
+        """选中变化 → 决定「保存/删除」能不能点（没选中就是灰的，别让用户点了没反应）。"""
+        has = self._lab_selected() is not None
+        for btn in (self._lab_save_btn, self._lab_del_btn):
+            try:
+                if btn is not None and btn.winfo_exists():
+                    btn.configure(state=tk.NORMAL if (has and not self._lab_busy)
+                                   else tk.DISABLED)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_lab_save(self) -> None:
+        """把选中的音色保存为**当前打字译音音色**（模型必须一起换，否则合成 InvalidParameter）。"""
+        info = self._lab_selected()
+        if info is None:
+            self._lab_set_status(t("还没选音色"))
+            return
+        # ⚠️ 自定义音色是**声音设计模型**出来的：合成必须用同一个 model，只改 voice 会失败
+        self._write_leaf(["text_input", "tts", "model"], voice_lab.DEFAULT_TARGET_MODEL,
+                         "保存音色模型", create=True)
+        self._write_leaf(["text_input", "tts", "voice"], info.voice, "保存音色", create=True)
+        if isinstance(self._cfg.text_input, dict):
+            tts_cfg = self._cfg.text_input.setdefault("tts", {})
+            tts_cfg["model"] = voice_lab.DEFAULT_TARGET_MODEL
+            tts_cfg["voice"] = info.voice
+        # 下拉里跟上（`voice_choices` 会把不在表里的当前值排到最前）
+        try:
+            self._tts_voice_var.set(info.voice)
+            self._tts_voice_combo.configure(values=voice_choices(info.voice, TTS_VOICES))
+        except Exception:  # noqa: BLE001
+            pass
+        self._lab_set_status(t("音色已保存：{v}（打字译音与语音腿 B 模式都生效）",
+                               v=info.name or info.voice[-12:]))
+        print(f"[gui] 音色已保存 → text_input.tts.model={voice_lab.DEFAULT_TARGET_MODEL} "
+              f"voice={info.voice!r}", flush=True)
+
+    def _on_lab_preview(self) -> None:
+        """回放本地缓存的试听音频（创建那一刻存下来的，回放不花钱）。"""
+        info = self._lab_selected()
+        if info is None:
+            self._lab_set_status(t("还没选音色"))
+            return
+        wav = voice_lab.load_preview(APP_DIR, info.voice)
+        if not wav:
+            self._lab_set_status(t("这条音色没有本地试听缓存：请先「生成并试听」一次"))
+            return
+        try:
+            _play_pcm_local(tts._decode_to_24k_mono(wav))
+            self._lab_set_status(t("试听完成：{v}", v=info.name or info.voice[-12:]))
+        except Exception as exc:  # noqa: BLE001
+            self._lab_set_status(t("试听失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
+
+    def _on_lab_delete(self) -> None:
+        """删除所选音色（不可恢复，先确认）。"""
+        if self._lab_busy:
+            return
+        info = self._lab_selected()
+        if info is None:
+            self._lab_set_status(t("还没选音色"))
+            return
+        label = info.name or info.voice[-12:]
+        if not messagebox.askokcancel(t("确定删除音色「{v}」？删除后无法恢复。", v=label)):
+            return
+        api_key, base_url, ws_id = self._lab_ctx()
+        if not api_key:
+            self._lab_set_status(t("还没配置 API key，无法试听（见右上角「设置」）"))
+            return
+        self._lab_running("delete", True)
+        self._lab_set_status(t("正在删除音色「{v}」…", v=label))
+        threading.Thread(target=self._lab_worker, args=("delete",),
+                         kwargs={"voice": info.voice, "api_key": api_key,
+                                 "base_url": base_url, "workspace_id": ws_id},
+                         daemon=True, name="vlt-voice-lab").start()
+
+    # ---- 音色页：网络活儿（守护线程）与回主线程
+
+    def _lab_worker(self, job: str, **kw) -> None:
+        """守护线程体：全部网络调用在这里；结果（含失败原因）经 `_q` 回主线程。
+
+        与「试听」同一纪律：任何失败都要把**原因**带回界面并留痕，绝不静默。
+        """
+        try:
+            if job == "create":
+                res = voice_lab.create_or_reuse(
+                    kw["name"], kw["prompt"], api_key=kw["api_key"],
+                    base_url=kw["base_url"], workspace_id=kw["workspace_id"])
+                if res.preview_wav:
+                    voice_lab.save_preview(APP_DIR, res.voice, res.preview_wav)
+                self._q.put(("voice_lab", "create", True, "", res))
+            elif job == "list":
+                rows = voice_lab.list_voices(api_key=kw["api_key"], base_url=kw["base_url"],
+                                             workspace_id=kw["workspace_id"])
+                self._q.put(("voice_lab", "list", True, "", rows))
+            else:
+                voice_lab.delete_voice(kw["voice"], api_key=kw["api_key"],
+                                       base_url=kw["base_url"],
+                                       workspace_id=kw["workspace_id"])
+                self._q.put(("voice_lab", "delete", True, "", kw["voice"]))
+        except voice_lab.VoiceLabError as exc:
+            self._q.put(("voice_lab", job, False, str(exc), None))
+        except Exception as exc:  # noqa: BLE001
+            self._q.put(("voice_lab", job, False, f"{type(exc).__name__}: {exc}", None))
+
+    def _on_lab_done(self, job: str, ok: bool, msg: str, payload) -> None:  # noqa: ANN001
+        """主线程收尾：报结果、更新列表、回放新生成的试听音频。"""
+        self._lab_running(job, False)
+        if not ok:
+            verb = {"create": t("生成失败：{msg}", msg=msg),
+                    "list": t("读取失败：{msg}", msg=msg),
+                    "delete": t("删除失败：{msg}", msg=msg)}.get(job, msg)
+            self._lab_set_status(verb)
+            print(f"[gui] 音色页 {job} 失败：{msg}", flush=True)
+            return
+        if job == "create":
+            res = payload
+            self._lab_last[res.voice] = ""
+            if res.preview_wav:
+                try:
+                    _play_pcm_local(tts._decode_to_24k_mono(res.preview_wav))
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[gui] ⚠️ 预览音频回放失败（已存盘，可点「试听所选」重放）：{exc}",
+                          flush=True)
+            self._lab_banner = (t("账号里已有同名音色，直接复用：{v}（没有再花钱）", v=res.name)
+                                if res.reused else t("音色已生成：{v}", v=res.name))
+            self._lab_set_status(self._lab_banner)
+            print(f"[gui] 声音设计{'复用' if res.reused else '创建'}成功 → {res.voice!r}"
+                  f"（预览 {len(res.preview_wav)}B）", flush=True)
+            self._on_lab_refresh()          # 立刻刷新列表，新音色就在里面（选中它即可保存）
+            return
+        if job == "list":
+            self._lab_voices = list(payload or [])
+            if self._lab_list is not None:
+                self._lab_list.delete(0, tk.END)
+                for row in voice_lab.describe(self._lab_voices):
+                    self._lab_list.insert(tk.END, row)
+                if self._lab_voices:
+                    self._lab_list.selection_set(0)
+            self._on_lab_select()
+            text = self._lab_banner or t("已刷新：{n} 条自定义音色", n=len(self._lab_voices))
+            self._lab_banner = ""
+            self._lab_set_status(text)
+            return
+        if job == "delete":
+            self._lab_banner = t("已删除音色：{v}", v=str(payload)[-12:])
+            self._lab_set_status(self._lab_banner)
+            self._on_lab_refresh()
 
     # ---------------------------------------------------------------- 设置弹窗 · 房间页
     def _build_settings_room(self, body: ttk.Frame) -> None:
@@ -5142,6 +5504,9 @@ class TranslationGUI:
                     self._set_status(level, txt)
                 elif kind == "voice_preview":
                     self._on_voice_preview_done(item[1], item[2], item[3])
+                elif kind == "voice_lab":
+                    # 音色页的网络结果（创建/列表/删除）都回这里收尾，界面线程不动网络
+                    self._on_lab_done(item[1], item[2], item[3], item[4])
                 elif kind == "stop_done":
                     # 引擎收尾完成（后台线程入队）→ 恢复「开始翻译」。
                     # item = ("stop_done", 收尾用时, 引擎数, 是否有引擎超时未退出)

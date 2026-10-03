@@ -464,4 +464,49 @@ STRINGS: dict[str, str] = {
     "桌面字幕位置已记住": "Desktop subtitle position saved",
     "（字幕窗默认可穿透，先解锁再拖）":
         "(the window ignores clicks by default — unlock first, then drag)",
+    # ---- 设置弹窗 · 音色页（声音设计：一句话炼一个自己的音色）----
+    "音色自定义": "Custom Voice",
+    "用一句话描述你想要的声音：生成后可直接试听，满意就保存为当前音色。":
+        "Describe the voice you want in one sentence — preview it right away, "
+        "and save it as the current voice when you like it.",
+    "名称:": "Name:",
+    "（字母/数字/下划线，≤16）": "(letters, digits or underscore; max 16)",
+    "描述:": "Description:",
+    "生成并试听": "Generate & Preview",
+    "保存为当前音色": "Save as Current Voice",
+    "删除所选": "Delete Selected",
+    "0.2 元/个（北京地域开通后 90 天内前 10 次免费，创建失败不计费）":
+        "0.2 CNY each (first 10 free within 90 days of signup in the Beijing region; "
+        "failed creations are not billed)",
+    "提示：只描述声学特征（年龄感、音高、语速、情绪），不要写「像某声优/某角色」——服务端不支持模仿，也可能涉及版权。":
+        "Tip: describe acoustic traits only (age, pitch, pace, mood). "
+        "Do not ask for a specific voice actor or character - the service does not "
+        "support imitation and it may raise copyright issues.",
+    "配方（预先做好的描述，一键生成）:": "Presets (ready-made descriptions, one click):",
+    "用配方一键生成": "Generate from Preset",
+    "过往生成（本账号的自定义音色）:": "Previously Generated (custom voices in this account):",
+    "试听所选": "Preview Selected",
+    "刷新列表": "Refresh List",
+    "生成音色会调用「声音设计」接口，费用记在你自己账号上：0.2 元/个（北京地域开通后 90 天内前 10 次免费，创建失败不计费）。确定继续吗？":
+        "Generating a voice calls the Voice Design API and is billed to your own "
+        "account: 0.2 CNY each (first 10 free within 90 days of signup in the "
+        "Beijing region; failed creations are not billed). Continue?",
+    "正在生成音色「{v}」…": "Generating voice {v}...",
+    "正在读取本账号的音色…": "Loading custom voices in this account...",
+    "正在删除音色「{v}」…": "Deleting voice {v}...",
+    "请先选一个配方": "Pick a preset first",
+    "还没选音色": "No voice selected yet",
+    "这条音色没有本地试听缓存：请先「生成并试听」一次":
+        "No local preview cached for this voice - run Generate & Preview once",
+    "确定删除音色「{v}」？删除后无法恢复。": "Delete voice {v}? This cannot be undone.",
+    "生成失败：{msg}": "Generation failed: {msg}",
+    "读取失败：{msg}": "Failed to load: {msg}",
+    "删除失败：{msg}": "Failed to delete: {msg}",
+    "账号里已有同名音色，直接复用：{v}（没有再花钱）":
+        "A voice with this name already exists - reused {v} (nothing was charged)",
+    "音色已生成：{v}": "Voice created: {v}",
+    "已刷新：{n} 条自定义音色": "Refreshed: {n} custom voice(s)",
+    "已删除音色：{v}": "Voice deleted: {v}",
+    "音色已保存：{v}（打字译音与语音腿 B 模式都生效）":
+        "Voice saved: {v} (applies to typed speech and to voice-leg mode B)",
 }
