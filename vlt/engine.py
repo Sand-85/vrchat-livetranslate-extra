@@ -28,6 +28,8 @@ from .output.chatbox import Chatbox, TokenBucket
 from .output.merger import Merger
 from .output.overlay import OverlayConfig
 from .output.virtualmic import VirtualMic, pick_output_device, resample_24k_mono_to_48k_stereo
+from .paths import APP_DIR, BUNDLE_DIR
+from .sfx import load_pair as load_sfx_pair
 from .session.base import SessionConfig, TextDelta, create_session
 from .textin import DEFAULT_MODEL as DEFAULT_TEXT_MODEL
 from .textin import DEFAULT_TIMEOUT_S as DEFAULT_TEXT_TIMEOUT_S
@@ -568,6 +570,8 @@ class Engine:
         self._merger: Merger | None = None
         self._overlay: Any | None = None
         self._virtualmic: VirtualMic | None = None
+        # 通联开关音（每句开头 on / 结尾 off）：懒加载后缓存，改配置要重启才生效
+        self._sfx_cache: tuple[bytes, bytes] | None = None
         # 流式合成**串行**锁：同一时刻只让一路往虚拟声卡写分片（并发写会让分片交错，
         # 听感是「整段反复重念」—— 连打两条也会）。懒建：首次用时在事件循环线程里创建。
         self._speak_lock_obj: asyncio.Lock | None = None
@@ -1318,6 +1322,30 @@ class Engine:
         if s is not None and (self._reconnect_task is None or self._reconnect_task.done()):
             self._reconnect_task = asyncio.create_task(self._reconnect_loop(reason))
 
+    def _sfx_pcm(self) -> tuple[bytes, bytes]:
+        """通联开关音：`text_input.tts.open_sfx` / `close_sfx` → `(开头音, 结尾音)` 的 48k 立体声 PCM。
+
+        只在 **TTS 出声**（打字腿 / 语音腿 B）才推 —— A 模式用的是实时模型自带音频，不经过这里。
+        相对路径先按 `BUNDLE_DIR`（随程序分发）找，再按 `APP_DIR`（用户可覆盖）找；
+        没配就是空字节（不播），配了却读不出来会在 `vlt.sfx` 里留痕（禁静默降级）。
+        """
+        if self._sfx_cache is None:
+            bases = tuple(p for p in (BUNDLE_DIR, APP_DIR) if p)
+            self._sfx_cache = load_sfx_pair((self._cfg.text_input or {}).get("tts"), bases)
+        return self._sfx_cache
+
+    def _push_sfx_open(self) -> None:
+        """句首「开台」音（没配 / 读不出来就是空字节，什么都不做）。"""
+        pcm, _ = self._sfx_pcm()
+        if pcm and self._virtualmic is not None:
+            self._virtualmic.push(pcm)
+
+    def _push_sfx_close(self) -> None:
+        """句尾「收台」音。必须在 `end_sentence()` **之前**推，否则会被当成下一句的开头。"""
+        _, pcm = self._sfx_pcm()
+        if pcm and self._virtualmic is not None:
+            self._virtualmic.push(pcm)
+
     def _maybe_speak_final(self, text: str) -> None:
         """B 模式：语音腿的译音改由**本地 TTS**合成（音色与打字腿完全一致）。
 
@@ -1442,6 +1470,7 @@ class Engine:
     def _drain_slot_to_mic(self, slot: _VoiceSlot) -> None:
         """把 slot 的分片**按到达顺序**推进虚拟声卡（在写入线程里跑，调用方持有出声锁）。"""
         sent = 0
+        self._push_sfx_open()
         while True:
             chunk, finished = slot.take(sent)
             if chunk is not None:
@@ -1450,6 +1479,7 @@ class Engine:
             if finished and chunk is None:
                 break
             time.sleep(VOICE_SLOT_POLL_S)
+        self._push_sfx_close()
         self._virtualmic.end_sentence()
 
     async def _voice_speak_worker(self) -> None:
@@ -1615,7 +1645,9 @@ class Engine:
                             self._speak_stream, translated, kw)
                 else:
                     pcm24 = await asyncio.to_thread(synthesize, translated, **kw)
+                    self._push_sfx_open()
                     self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
+                    self._push_sfx_close()
                     self._virtualmic.end_sentence()
                     spoke_s = len(pcm24) / 2 / 24000
             except TtsError as exc:
@@ -1661,12 +1693,14 @@ class Engine:
         total = 0
         truncated = False
         try:
+            self._push_sfx_open()
             for pcm24 in synthesize_stream(text, **kw):
                 self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
                 total += len(pcm24)
         except TtsStreamTruncated:
             truncated = True
         finally:
+            self._push_sfx_close()
             self._virtualmic.end_sentence()
         return total / 2 / 24000, truncated
 

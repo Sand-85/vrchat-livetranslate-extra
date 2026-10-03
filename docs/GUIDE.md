@@ -329,6 +329,12 @@ text_input:                   # 打字输入（底栏输入框，回车发送）
     seed: null                # 仅 cosyvoice 生效：固定后同句两次合成逐字节一致；null = 随机
     instruction: ""           # 仅 cosyvoice 生效：可选语气/方言提示，如「请用四川话说」
     timeout_s: 30
+    # 通联开关音：每句话开头播 open_sfx、结尾播 close_sfx。只作用于 **TTS 出声**
+    # （打字腿与语音腿 B 模式）；A 模式用实时模型自带音频，不播。留空 = 不播。
+    # 相对路径先按程序目录找、再按可写目录找（可放自己的音效覆盖）。
+    # ⚠️ 开台音会拖慢「开口」——它有多长，说话就晚多久开始（示例的 on2 是 0.23s）。
+    open_sfx: assets/sfx/on2.wav
+    close_sfx: assets/sfx/off2.wav
 
 merger:
   interval_s: 2.0             # 首 delta 立即发，之后每 2 秒一次快照，句末必刷最终版
@@ -585,6 +591,7 @@ vlt/
 ├── config.py             配置加载；凭据解析顺序；写坏自愈
 ├── textin.py             打字输入：文本翻译（实时模型不接受文本入口，故走 compatible-mode）
 ├── tts.py                打字出声：译文经 qwen3-tts 合成成音频，喂给虚拟声卡那条腿
+├── sfx.py                通联开关音：每句开头/结尾的小音效（读 WAV + 重采样，仅 TTS 出声）
 ├── credentials.py        API key 的保存 / 清除 / 打码
 ├── devices.py            音频设备枚举与「按名字解析回索引」
 ├── paths.py              可写目录决策（源码 / exe / 绿色版）+ 旧文件迁移

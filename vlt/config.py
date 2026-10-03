@@ -399,6 +399,10 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 "stream": bool((raw_textin.get("tts") or {}).get("stream", True)),
                 # 语速（仅 qwen3-tts 生效）：1 = 默认；0.8 约慢 20%，1.2 约快 20%（实测单调）
                 "speech_rate": _opt_float((raw_textin.get("tts") or {}).get("speech_rate")),
+                # 通联开关音：每句话开头 / 结尾各播一小段音效（只作用于 TTS 出声：
+                # 打字腿 + 语音腿 B 模式；A 模式是实时模型自带音频，不播）。留空 = 不播。
+                "open_sfx": str((raw_textin.get("tts") or {}).get("open_sfx") or ""),
+                "close_sfx": str((raw_textin.get("tts") or {}).get("close_sfx") or ""),
                 "timeout_s": float((raw_textin.get("tts") or {}).get("timeout_s", 30.0)),
             },
         },
