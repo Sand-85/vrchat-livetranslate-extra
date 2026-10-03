@@ -460,6 +460,18 @@ def _dir_writable(d: Path) -> bool:
     return True
 
 
+def _lab_model_of(info) -> str:                                      # noqa: ANN001
+    """这条音色该配哪个合成模型：**它自己的** target_model 优先，缺失时才按族回落。
+
+    设计(vd)/复刻(vc)两族的模型不通用 —— 这是本仓库实测过的硬约束（写错必 InvalidParameter）。
+    """
+    got = str(getattr(info, "target_model", "") or "").strip()
+    if got:
+        return got
+    kind = str(getattr(info, "kind", "design") or "design")
+    return voice_lab.CLONE_TARGET_MODEL if kind == "clone" else voice_lab.DEFAULT_TARGET_MODEL
+
+
 def _play_pcm_local(pcm_24k_mono: bytes) -> None:
     """在**本地默认输出设备**播放 24kHz 单声道 s16le PCM（阻塞到播完）。
 
@@ -2319,6 +2331,33 @@ class TranslationGUI:
                                                   command=self._on_lab_recipe_preview)
         self._lab_recipe_preview_btn.pack(side=tk.LEFT, padx=(6, 0))
 
+        # ---- 音色克隆（上传音频 → 复刻 → 试听）---------------------------------
+        ttk.Label(body, text=t("音色克隆"), style="Section.TLabel").pack(anchor=tk.W,
+                                                                       pady=(12, 0))
+        ttk.Label(body, text=t("上传一段 10~20 秒的单人朗读（≥24kHz、无背景音、无音乐）。"
+                               "只克隆你有权利的声音：自己的录音，或已获授权的素材。"),
+                  style="Dim.TLabel", justify=tk.LEFT,
+                  wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(4, 0))
+        crow = ttk.Frame(body)
+        crow.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(crow, text=t("名称:"), style="Dim.TLabel").pack(side=tk.LEFT)
+        self._lab_clone_name_var = tk.StringVar(value="my_clone")
+        clone_name = ttk.Entry(crow, textvariable=self._lab_clone_name_var, width=14,
+                               style="Key.TEntry", font=FONT_UI)
+        clone_name.pack(side=tk.LEFT, padx=(6, 0))
+        self._attach_edit_menu(clone_name)
+        self._lab_pick_btn = ttk.Button(crow, text=t("选择音频文件…"),
+                                        command=self._on_lab_pick_audio)
+        self._lab_pick_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._lab_clone_btn = ttk.Button(crow, text=t("克隆并试听"), command=self._on_lab_clone)
+        self._lab_clone_btn.pack(side=tk.LEFT, padx=(6, 0))
+        # 素材要求 + 花费都要在点之前看得见（与上面「生成」那条同一样式）
+        self._lab_clone_hint = ttk.Label(
+            body, text=t("复刻素材：10~20 秒、单声道朗读、≥24kHz、无背景音／音乐；"
+                         "克隆 0.01 元/次，素材需服务端审核。"),
+            style="Dim.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP)
+        self._lab_clone_hint.pack(anchor=tk.W, pady=(4, 0))
+
         ttk.Label(body, text=t("过往生成（本账号的自定义音色）:"),
                   style="Dim.TLabel").pack(anchor=tk.W, pady=(10, 0))
         lrow = ttk.Frame(body)
@@ -2353,6 +2392,10 @@ class TranslationGUI:
         # 状态：列表行 → 数据；本次会话是否已确认过花费；正在跑的活儿（防重入）
         self._lab_voices: list[voice_lab.VoiceInfo] = []
         self._lab_cost_ok = False
+        self._lab_clone_ok = False                    # 复刻的费用确认（与设计分开）
+        self._lab_audio = None                        # 已选素材的本地探测结果
+        self._lab_autoplay_voice = ""                 # 克隆完自动试听哪条（列表刷新后触发）
+        self._lab_audition_suffix = ""                # 异步试听完成后要拼在状态后面的话
         self._lab_busy = False
         self._lab_last: dict[str, str] = {}          # voice → 生成时的描述（保存时一并写日志）
         # 生成/删除的结论（尤其「复用：没有再花钱」）要活过紧随其后的那次自动刷新 —— 否则
@@ -2372,6 +2415,7 @@ class TranslationGUI:
         """置忙/闲：按钮禁用 + 状态行提示（网络活儿全在守护线程里，界面绝不卡）。"""
         self._lab_busy = on
         for btn in (self._lab_gen_btn, self._lab_recipe_btn, self._lab_recipe_preview_btn,
+                    self._lab_pick_btn, self._lab_clone_btn,
                     self._lab_refresh_btn, self._lab_del_btn):
             try:
                 if btn is not None and btn.winfo_exists():
@@ -2480,12 +2524,14 @@ class TranslationGUI:
             self._lab_set_status(t("还没选音色"))
             return
         # ⚠️ 自定义音色是**声音设计模型**出来的：合成必须用同一个 model，只改 voice 会失败
-        self._write_leaf(["text_input", "tts", "model"], voice_lab.DEFAULT_TARGET_MODEL,
+        # ⚠️ 必须写**这条音色自己的** target_model：设计族(vd)与复刻族(vc)不通用，
+        #    写错就是真机上必现的 InvalidParameter（本仓库踩过：保存复刻音色却写了 vd 的模型）
+        self._write_leaf(["text_input", "tts", "model"], _lab_model_of(info),
                          "保存音色模型", create=True)
         self._write_leaf(["text_input", "tts", "voice"], info.voice, "保存音色", create=True)
         if isinstance(self._cfg.text_input, dict):
             tts_cfg = self._cfg.text_input.setdefault("tts", {})
-            tts_cfg["model"] = voice_lab.DEFAULT_TARGET_MODEL
+            tts_cfg["model"] = _lab_model_of(info)
             tts_cfg["voice"] = info.voice
         # 下拉里跟上（`voice_choices` 会把不在表里的当前值排到最前）
         try:
@@ -2498,6 +2544,58 @@ class TranslationGUI:
                                v=info.name or info.voice[-12:]))
         print(f"[gui] 音色已保存 → text_input.tts.model={voice_lab.DEFAULT_TARGET_MODEL} "
               f"voice={info.voice!r}", flush=True)
+
+    def _on_lab_pick_audio(self) -> None:
+        """选一段复刻素材：本地先探时长/采样率/声道，能把不合格的当场拦下。"""
+        from tkinter import filedialog          # 仅此处用到，按仓库习惯局部导入
+
+        path = filedialog.askopenfilename(title=t("选择音频文件…"),
+                                          filetypes=voice_lab.CLONE_FILETYPES)
+        if not path:
+            return
+        probe = voice_lab.probe_audio(path)
+        self._lab_audio = probe
+        name = Path(str(path)).name
+        bad = voice_lab.audio_problems(probe)
+        if bad:
+            self._lab_set_status(t("素材不合格：{msg}", msg="；".join(bad)))
+            print(f"[gui] 复刻素材不合格：{name} → {bad}", flush=True)
+            return
+        summary = f"{name} · {probe.seconds:.1f}s · {probe.sample_rate}Hz · " + (
+            "单声道" if probe.channels <= 1 else f"{probe.channels} 声道")
+        warn = voice_lab.audio_warnings(probe)
+        self._lab_set_status(t("素材合格：{msg}", msg=summary)
+                             + (t("（提示：{msg}）", msg="；".join(warn)) if warn else ""))
+        print(f"[gui] 复刻素材已选：{summary}（提示 {warn}）", flush=True)
+
+    def _on_lab_clone(self) -> None:
+        """克隆并试听：本地校验 → 费用确认 → 后台复刻 → 刷新列表 → 自动试听。"""
+        if self._lab_busy:
+            return
+        if self._lab_audio is None:
+            self._lab_set_status(t("还没选素材音频"))
+            return
+        bad = voice_lab.audio_problems(self._lab_audio)
+        if bad:
+            self._lab_set_status(t("素材不合格：{msg}", msg="；".join(bad)))
+            return
+        name = voice_lab.normalize_name(self._lab_clone_name_var.get())
+        if not self._lab_clone_ok:
+            if not messagebox.askokcancel(
+                    t("克隆会调用「声音复刻」接口：0.01 元/次，素材需服务端审核。"
+                      "费用记在你自己账号上。确定继续吗？")):
+                return
+            self._lab_clone_ok = True
+        api_key, base_url, ws_id = self._lab_ctx()
+        if not api_key:
+            self._lab_set_status(t("还没配置 API key，无法试听（见右上角「设置」）"))
+            return
+        self._lab_running("clone", True)
+        self._lab_set_status(t("正在克隆音色「{v}」（上传素材并送审）…", v=name))
+        threading.Thread(target=self._lab_worker, args=("clone",), kwargs={
+            "name": name, "audio_path": self._lab_audio.path,
+            "api_key": api_key, "base_url": base_url, "ws_id": ws_id,
+        }, daemon=True).start()
 
     def _on_lab_preview(self) -> None:
         """试听所选音色：**有本地缓存就直接放**（不花钱）；没有就现场合成一句测试文本。
@@ -2527,14 +2625,18 @@ class TranslationGUI:
             return
         self._lab_audition(info)
 
-    def _lab_audition(self, info: voice_lab.VoiceInfo) -> None:
-        """试听的唯一实现：缓存命中 → 直接放；未命中 → 后台合成一句并落盘。"""
+    def _lab_audition(self, info: voice_lab.VoiceInfo, *, suffix: str = "") -> None:
+        """试听的唯一实现：缓存命中 → 直接放；未命中 → 后台合成一句并落盘。
+
+        `suffix` 用来把别的结论（例如「音色已克隆（0.01 元，审核中）」）拼在试听结果后面 ——
+        否则那句会被试听状态覆盖掉，用户就看不到「刚花了钱、还在审核」这个关键信息。
+        """
         label = info.name or info.voice[-12:]
         wav = voice_lab.load_preview(APP_DIR, info.voice)
         if wav:
             try:
                 _play_pcm_local(tts._decode_to_24k_mono(wav))
-                self._lab_set_status(t("试听完成：{v}", v=label))
+                self._lab_set_status(t("试听完成：{v}", v=label) + suffix)
             except Exception as exc:  # noqa: BLE001
                 self._lab_set_status(t("试听失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
             return
@@ -2544,6 +2646,7 @@ class TranslationGUI:
         if not api_key:
             self._lab_set_status(t("还没配置 API key，无法试听（见右上角「设置」）"))
             return
+        self._lab_audition_suffix = suffix
         self._lab_running("audition", True)
         self._lab_set_status(t("正在合成试听「{v}」（{n} 字，约 0.003 元）…",
                                v=label, n=len(voice_lab.TEST_TEXT)))
@@ -2570,7 +2673,7 @@ class TranslationGUI:
         self._lab_running("delete", True)
         self._lab_set_status(t("正在删除音色「{v}」…", v=label))
         threading.Thread(target=self._lab_worker, args=("delete",),
-                         kwargs={"voice": info.voice, "api_key": api_key,
+                         kwargs={"voice": info.voice, "family": info.kind, "api_key": api_key,
                                  "base_url": base_url, "workspace_id": ws_id},
                          daemon=True, name="vlt-voice-lab").start()
 
@@ -2603,10 +2706,18 @@ class TranslationGUI:
                     voice_lab.save_preview(APP_DIR, kw["voice"], pcm)
                 self._q.put(("voice_lab", "audition", True, "", {
                     "voice": kw["voice"], "name": kw["name"], "pcm": pcm}))
+            elif job == "clone":
+                # 素材可能十几兆：读盘 + base64 一律放在守护线程里（别卡界面）
+                data_url = voice_lab.audio_data_url(kw["audio_path"])
+                res = voice_lab.enroll_or_reuse(
+                    kw["name"], data_url, api_key=kw["api_key"],
+                    base_url=kw["base_url"], workspace_id=kw["ws_id"])
+                self._q.put(("voice_lab", "clone", True, "", res))
             else:
                 voice_lab.delete_voice(kw["voice"], api_key=kw["api_key"],
                                        base_url=kw["base_url"],
-                                       workspace_id=kw["workspace_id"])
+                                       workspace_id=kw["workspace_id"],
+                                       family=kw.get("family", "design"))
                 self._q.put(("voice_lab", "delete", True, "", kw["voice"]))
         except voice_lab.VoiceLabError as exc:
             self._q.put(("voice_lab", job, False, str(exc), None))
@@ -2641,18 +2752,55 @@ class TranslationGUI:
             return
         if job == "list":
             self._lab_voices = list(payload or [])
+            local = voice_lab.label_mapper(voice_lab.load_labels(APP_DIR))
+
+            def _label(vid: str, fallback: str) -> str:
+                # 本地登记（克隆时自动写的那份）优先，其次源码里那份手写登记表
+                return local(vid, display_name(vid, t) or fallback)
+
             if self._lab_list is not None:
                 self._lab_list.delete(0, tk.END)
                 for row in voice_lab.describe(
-                        self._lab_voices,
-                        label_of=lambda vid, fallback: display_name(vid, t) or fallback):
+                        self._lab_voices, label_of=_label,
+                        tag_of=lambda kind: t("[复刻] ") if kind == "clone" else ""):
                     self._lab_list.insert(tk.END, row)
                 if self._lab_voices:
                     self._lab_list.selection_set(0)
             self._on_lab_select()
-            text = self._lab_banner or t("已刷新：{n} 条自定义音色", n=len(self._lab_voices))
-            self._lab_banner = ""
-            self._lab_set_status(text)
+            # 刚克隆完 → 选中它并**直接试听**（用户要的「克隆并试听」是一条动作）
+            want = self._lab_autoplay_voice
+            self._lab_autoplay_voice = ""
+            played = False
+            if want:
+                for i, v in enumerate(self._lab_voices):
+                    if v.voice == want:
+                        self._lab_list.selection_clear(0, tk.END)
+                        self._lab_list.selection_set(i)
+                        self._on_lab_select()
+                        self._lab_audition(v, suffix="　｜" + (self._lab_banner or ""))
+                        self._lab_banner = ""      # 已经拼进试听状态里了，别再覆盖它
+                        played = True
+                        break
+                else:
+                    print(f"[gui] 克隆结果没出现在刷新后的列表里：{want!r}", flush=True)
+            if not played:
+                text = self._lab_banner or t("已刷新：{n} 条自定义音色", n=len(self._lab_voices))
+                self._lab_banner = ""
+                self._lab_set_status(text)
+            return
+        if job == "clone":
+            res = payload
+            # 把名字记到本地登记表 → 列表里显示人话而不是一长串 id（下次刷新也认）
+            voice_lab.save_label(APP_DIR, res.voice, res.name)
+            self._lab_last[res.voice] = ""
+            self._lab_banner = (t("账号里已有同名音色，直接复用：{v}（没有再花钱）", v=res.name)
+                                if res.reused else
+                                t("音色已克隆：{v}（0.01 元，服务端审核中）", v=res.name))
+            self._lab_set_status(self._lab_banner)
+            print(f"[gui] 声音复刻{'复用' if res.reused else '创建'}成功 → {res.voice!r}"
+                  f"（名字 {res.name!r}）", flush=True)
+            self._lab_autoplay_voice = res.voice           # 列表刷新后自动试听
+            self._on_lab_refresh()
             return
         if job == "delete":
             self._lab_banner = t("已删除音色：{v}", v=str(payload)[-12:])
@@ -2665,9 +2813,11 @@ class TranslationGUI:
             if not pcm:
                 self._lab_set_status(t("试听失败：{msg}", msg=t("服务端没回音频")))
                 return
+            suffix = self._lab_audition_suffix
+            self._lab_audition_suffix = ""
             try:
                 _play_pcm_local(tts._decode_to_24k_mono(pcm))
-                self._lab_set_status(t("试听完成：{v}（已存本地，下次直接放）", v=label))
+                self._lab_set_status(t("试听完成：{v}（已存本地，下次直接放）", v=label) + suffix)
             except Exception as exc:  # noqa: BLE001
                 self._lab_set_status(t("试听失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
             print(f"[gui] 试听合成完成 → {label!r}（{len(pcm)}B）", flush=True)

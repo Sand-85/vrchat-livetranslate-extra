@@ -172,19 +172,41 @@ def test_create_request_shape() -> bool:
 
 def test_list_and_error() -> bool:
     ok = True
-    op = FakeOpener([{"output": {"voice_list": [
+    design_rows = {"output": {"voice_list": [
         {"voice": "qwen-tts-vd-a-voice-20260901010101-1111", "preferred_name": "a",
          "voice_prompt": "描述A", "target_model": vl.DEFAULT_TARGET_MODEL,
          "gmt_create": "2026-09-01 01:01:01"},
         {"voice": ""},                       # 脏数据：跳过
         "不是字典",                           # 脏数据：跳过
-    ]}}])
+    ]}}
+    clone_rows = {"output": {"voice_list": [
+        {"voice": "qwen-tts-vc-MetroPolice-voice-20261003201838-0a4b",
+         "target_model": vl.CLONE_TARGET_MODEL, "gmt_create": "2026-10-03 20:18:40",
+         "status": "OK"},
+    ]}}
+    op = FakeOpener([design_rows, clone_rows])
     rows = vl.list_voices(api_key="sk-test", base_url="wss://maas.qianwenaiapi.com/x", opener=op)
-    cond = len(rows) == 1 and rows[0].name == "a" and rows[0].prompt == "描述A"
-    print(f"  列表解析（脏数据跳过）：{len(rows)} 条  {'OK' if cond else '✗'}")
+    cond = (len(rows) == 2 and rows[0].name == "a" and rows[0].prompt == "描述A"
+            and rows[0].kind == "design"
+            and rows[1].kind == "clone" and rows[1].status == "OK"
+            and rows[1].target_model == vl.CLONE_TARGET_MODEL)
+    print(f"  两族都列（脏数据跳过）：设计 {rows[0].kind} / 复刻 {rows[1].kind}"
+          f"（{vl._name_of(rows[1].voice)}）  {'OK' if cond else '✗'}")
     ok &= cond
-    cond = op.actions() == ["list"]
-    print(f"  请求 action={op.actions()}  {'OK' if cond else '✗'}")
+    cond = op.actions() == ["list", "list"]
+    print(f"  两族各发一次 list：action={op.actions()}  {'OK' if cond else '✗'}")
+    ok &= cond
+    cond = "qwen-voice-enrollment" in json.dumps(op.sent[1][1]) and \
+           "qwen-voice-design" in json.dumps(op.sent[0][1])
+    print(f"  第二发的 model 是 enrollment 那族  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # 只查一族时不该多发请求（省钱：试听前只需确认复刻族里有没有同名的）
+    op_f = FakeOpener([clone_rows])
+    only = vl.list_voices(api_key="sk-test", base_url="wss://maas.qianwenaiapi.com/x",
+                          family="clone", opener=op_f)
+    cond = len(only) == 1 and op_f.actions() == ["list"]
+    print(f"  family='clone' 只发一次且只回复刻族：{len(only)} 条  {'OK' if cond else '✗'}")
     ok &= cond
 
     op2 = FakeOpener([{"code": "InvalidApiKey", "message": "密钥无效 sk-abcdef"}])
@@ -357,6 +379,123 @@ def test_sample_pcm() -> bool:
     return ok
 
 
+def _write_wav(path, seconds: float, rate: int = 24000, channels: int = 1):
+    import wave
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels); w.setsampwidth(2); w.setframerate(rate)
+        w.writeframes(b"\x00\x00" * int(rate * seconds) * channels)
+    return path
+
+
+def test_clone_payload_and_guard() -> bool:
+    """复刻创建：字段名/形态与**真机实测**一致；裸 base64 本地就拦（省一次往返）。"""
+    ok = True
+    op = FakeOpener([{"output": {"voice": "qwen-tts-vc-my_clone-voice-20261004000000-abcd"}}])
+    res = vl.enroll_voice("my copy!", "data:audio/wav;base64,QUJD",
+                          api_key="sk-test", base_url="wss://maas.qianwenaiapi.com/x", opener=op)
+    payload = op.sent[0][1]
+    inp = payload["input"]
+    cond = (payload["model"] == vl.CLONE_MODEL                      # qwen-voice-enrollment
+            and inp["action"] == "create"
+            and inp["audio"]["data"].startswith("data:audio/wav;base64,")   # 真机要 data URL
+            and inp["preferred_name"] == "my_copy"                  # 名字被规范化
+            and inp["target_model"] == vl.CLONE_TARGET_MODEL
+            and res.voice.endswith("abcd") and res.reused is False)
+    print(f"  请求体：model={payload['model']} audio.data 前缀={inp['audio']['data'][:22]}… "
+          f"name={inp['preferred_name']}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    for bad in ("QUJD", "", "ftp://x/y.wav"):
+        try:
+            vl.enroll_voice("x", bad, api_key="sk-test", opener=FakeOpener([]))
+            print(f"  非法素材形态没被拦下：{bad!r} ✗")
+            ok = False
+        except vl.VoiceLabError:
+            pass
+    print("  裸 base64 / 空 / ftp 一律本地拦下 OK")
+
+    # 同族复用：账号里已有同名复刻音色 → 只 list、不 create（别为同一份素材反复付 0.01 元）
+    existing = {"output": {"voice_list": [
+        {"voice": "qwen-tts-vc-vc_dup-voice-20261004000000-1111", "target_model": vl.CLONE_TARGET_MODEL}]}}
+    op2 = FakeOpener([existing])
+    dup = vl.enroll_or_reuse("vc_dup", "data:audio/wav;base64,QUJD",
+                             api_key="sk-test", base_url="wss://maas.qianwenaiapi.com/x", opener=op2)
+    cond = dup.reused and op2.actions() == ["list"]
+    print(f"  同名复用：请求 {op2.actions()}（只查不建）、reused={dup.reused}  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+    return ok
+
+
+def test_audio_probe_and_data_url() -> bool:
+    """素材本地校验：时长/采样率/体积能拦的拦；data URL 必须带 `data:` 前缀。"""
+    import tempfile
+    ok = True
+    tmp = Path(tempfile.mkdtemp(prefix="vlt-clone-"))
+    cases = [
+        ("短 5s", _write_wav(tmp / "s.wav", 5), True),
+        ("合格 12s", _write_wav(tmp / "ok.wav", 12), False),
+        ("过长 25s", _write_wav(tmp / "l.wav", 25), True),
+        ("低采样率 8k", _write_wav(tmp / "r.wav", 12, rate=8000), True),
+    ]
+    for label, path, should_fail in cases:
+        probe = vl.probe_audio(path)
+        bad = vl.audio_problems(probe)
+        cond = bool(bad) == should_fail
+        print(f"  {label}：{probe.seconds:.1f}s / {probe.sample_rate}Hz → "
+              f"{'拦下：' + '；'.join(bad) if bad else '放行'}  {'OK' if cond else '✗'}")
+        ok &= cond
+
+    stereo = vl.probe_audio(_write_wav(tmp / "st.wav", 12, channels=2))
+    warn = vl.audio_warnings(stereo)
+    cond = bool(warn) and not vl.audio_problems(stereo)      # 双声道只提示、不拦
+    print(f"  双声道：提示 {warn}、不拦  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    miss = vl.probe_audio(tmp / "nope.wav")
+    cond = "不存在" in "；".join(vl.audio_problems(miss))
+    print(f"  文件不存在：{miss.error}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    url = vl.audio_data_url(tmp / "ok.wav")
+    import base64 as _b64
+    payload = _b64.b64decode(url.split(",", 1)[1])
+    cond = (url.startswith("data:audio/wav;base64,") and payload == (tmp / "ok.wav").read_bytes()
+            and vl.mime_of("a.MP3") == "audio/mpeg" and vl.mime_of("a.xyz") == "audio/wav")
+    print(f"  data URL：前缀正确、base64 往返逐字节一致（{len(payload)}B）；MIME 大写扩展名也认  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+    return ok
+
+
+def test_labels_registry() -> bool:
+    """克隆后自动记名字：本地登记表 + 按 `-voice-` 前缀认亲 + 坏文件不炸。"""
+    import tempfile
+    ok = True
+    app = Path(tempfile.mkdtemp(prefix="vlt-labels-"))
+    vid = "qwen-tts-vc-MetroPolice-voice-20261003201838644-0a4b"
+    cond = vl.load_labels(app) == {} and vl.save_label(app, vid, "国民护卫队") is not None
+    labels = vl.load_labels(app)
+    cond = cond and labels.get(vid) == "国民护卫队"
+    print(f"  存/读：{labels}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    lookup = vl.label_mapper(labels)
+    cond = (lookup(vid, "fallback") == "国民护卫队"
+            and lookup("qwen-tts-vc-MetroPolice-voice-20270101000000000-ffff", "fb") == "国民护卫队"
+            and lookup("qwen-tts-vd-clear_auto-voice-x", "fb") == "fb"
+            and lookup("", "fb") == "fb")
+    print("  前缀认亲（时间戳/后缀变了仍认得）+ 未登记回落  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+
+    (vl.labels_path(app)).write_text("{ 这不是 json", encoding="utf-8")
+    cond = vl.load_labels(app) == {}
+    print(f"  登记表损坏 → 当空表（不炸）  {'OK' if cond else '✗'}")
+    ok &= cond
+    return ok
+
+
 if __name__ == "__main__":
     print("test_voice_lab:")
     print(" 1) 音色名规范化")
@@ -381,5 +520,11 @@ if __name__ == "__main__":
     ok &= test_describe_rows()
     print(" 11) 试听测试文本与合成入口")
     ok &= test_sample_pcm()
+    print(" 12) 复刻请求体与本地拦截")
+    ok &= test_clone_payload_and_guard()
+    print(" 13) 复刻素材的本地校验与 data URL")
+    ok &= test_audio_probe_and_data_url()
+    print(" 14) 克隆音色的显示名登记表")
+    ok &= test_labels_registry()
     assert ok, "voice_lab 用例失败（见上）"
     print("ALL PASSED")

@@ -498,4 +498,19 @@ STRINGS: dict[str, str] = {
     # ---- 声音复刻的自定义音色（显示名）----
     # 中文界面显示「国民护卫队」；其它语言一律用英文名 MetroPolice（与音色 id 里的 preferred_name 一致）。
     "国民护卫队": "MetroPolice",
+
+    # ---- 设置 · 音色页：音色克隆（上传素材 → 复刻 → 试听）----
+    '音色克隆': 'Voice Cloning',
+    '上传一段 10~20 秒的单人朗读（≥24kHz、无背景音、无音乐）。只克隆你有权利的声音：自己的录音，或已获授权的素材。': 'Upload a 10-20 s single-speaker recording (>=24 kHz, no background noise or music). Only clone voices you have the rights to: your own recording, or a sample you may use.',
+    '选择音频文件…': 'Choose audio file...',
+    '克隆并试听': 'Clone & Preview',
+    '复刻素材：10~20 秒、单声道朗读、≥24kHz、无背景音／音乐；克隆 0.01 元/次，素材需服务端审核。': 'Clone sample: 10-20 s mono speech, >=24 kHz, no background noise/music; cloning costs 0.01 CNY each and the sample goes through server review.',
+    '还没选素材音频': 'No sample audio selected yet',
+    '素材合格：{msg}': 'Sample looks fine: {msg}',
+    '素材不合格：{msg}': 'Sample rejected: {msg}',
+    '（提示：{msg}）': ' (note: {msg})',
+    '克隆会调用「声音复刻」接口：0.01 元/次，素材需服务端审核。费用记在你自己账号上。确定继续吗？': 'Cloning calls the voice-cloning API: 0.01 CNY each and the sample must pass server review. The cost is billed to your own account. Continue?',
+    '正在克隆音色「{v}」（上传素材并送审）…': 'Cloning voice "{v}" (uploading sample for review)...',
+    '音色已克隆：{v}（0.01 元，服务端审核中）': 'Voice cloned: {v} (0.01 CNY, under server review)',
+    '[复刻] ': '[clone] ',
 }

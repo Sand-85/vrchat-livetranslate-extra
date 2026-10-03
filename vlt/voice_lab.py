@@ -38,10 +38,29 @@ from . import tts                       # 试听要复用它的合成口径（�
 from .tts import _get_opener          # 与 tts.py 共用「直连、绕开系统代理」的同一份策略
 
 # 创建与合成必须用同一个模型；换模型就得重新炼（官方硬约束）。
-DEFAULT_TARGET_MODEL = "qwen3-tts-vd-2026-01-26"
-DESIGN_MODEL = "qwen-voice-design"
+DEFAULT_TARGET_MODEL = "qwen3-tts-vd-2026-01-26"        # 声音设计（文字描述）
+CLONE_TARGET_MODEL = "qwen3-tts-vc-2026-01-22"          # 声音复刻（音频素材）
+DESIGN_MODEL = "qwen-voice-design"                      # 创建/列表/删除用哪个 model 字段
+CLONE_MODEL = "qwen-voice-enrollment"
+# 两族是**分开的**：列表按 `model` 隔离（用 design 查是看不到复刻音色的，实测过）。
+FAMILIES: dict[str, str] = {"design": DESIGN_MODEL, "clone": CLONE_MODEL}
 # 自定义音色的接口路径（与 tts 的多模态路径同一个网关，只是路径不同）
 CUSTOMIZATION_PATH = "/api/v1/services/audio/tts/customization"
+
+# 复刻素材的硬要求（官方）：10~20s、≥24kHz、单人纯朗读、无背景音/音乐/他人声。
+# 我们**本地先查能查的**（时长/采样率/体积），查不出的（有没有背景音、是不是单人）只能提示用户。
+MIN_CLONE_SECONDS = 10.0
+MAX_CLONE_SECONDS = 20.0
+MIN_CLONE_RATE = 24000
+MAX_CLONE_BYTES = 10 * 1024 * 1024
+# 扩展名 → MIME（data URL 要用；服务端按 MIME 选解码器）
+CLONE_MIMES: dict[str, str] = {".wav": "audio/wav", ".mp3": "audio/mpeg",
+                               ".m4a": "audio/mp4", ".aac": "audio/aac",
+                               ".ogg": "audio/ogg", ".flac": "audio/flac",
+                               ".opus": "audio/opus", ".wma": "audio/x-ms-wma"}
+CLONE_FILETYPES = (("音频文件", "*.wav *.mp3 *.m4a *.aac *.ogg *.flac *.opus *.wma"),
+                   ("全部文件", "*.*"))
+CLONE_MODEL_PREFIX = "qwen-tts-vc-"
 
 DEFAULT_TIMEOUT_S = 30.0
 NAME_MAX_LEN = 16          # 官方：preferred_name 只允许字母数字下划线，长度 ≤16
@@ -62,13 +81,20 @@ class VoiceLabError(RuntimeError):
 
 @dataclass(frozen=True)
 class VoiceInfo:
-    """本账号里的一条自定义音色（`action=list` 的条目）。"""
+    """本账号里的一条自定义音色（`action=list` 的条目）。
+
+    `kind` = 音色族：`"design"`（文字描述炼的）/ `"clone"`（音频素材复刻的）——
+    两族**合成时必须用各自的 target_model**，所以这个字段不只是显示用。
+    `status` = 服务端状态（复刻有审核，可能是 `UNDEPLOYED`）。
+    """
 
     voice: str
     name: str = ""
     prompt: str = ""
     target_model: str = ""
     created: str = ""
+    kind: str = "design"
+    status: str = ""
 
 
 @dataclass
@@ -150,11 +176,14 @@ def _name_of(voice: str) -> str:
     return ""
 
 
-def describe(voices: list[VoiceInfo], label_of=None) -> list[str]:
-    """给界面用的展示行（名字 + 语音 id 后 6 位 + 创建日期），避免让用户看一串长 id。
+def describe(voices: list[VoiceInfo], label_of=None, tag_of=None) -> list[str]:
+    """给界面用的展示行（名字 + id 后 6 位 + 创建日期 + 可选族标签）。
 
-    `label_of(voice_id, fallback)` 可传界面侧的显示名映射（`vlt.voices.display_name`）：
-    复刻音色就能显示本地化名字（中文「国民护卫队」/ 其它语言「MetroPolice」）而不是一长串 id。
+    `label_of(voice_id, fallback)` 可传界面侧的显示名映射（`vlt.voices.display_name`
+    或本地登记表）：复刻音色就能显示本地化名字（中文「国民护卫队」/ 其它语言「MetroPolice」）
+    而不是一长串 id。
+    `tag_of(kind)` 传**界面侧本地化**的族标签（例如复刻显示「复刻」）—— 这里不写死中文，
+    否则非中文界面的列表里会冒出汉字（i18n 用例盯着这个）。
     """
     rows: list[str] = []
     for v in voices:
@@ -163,8 +192,91 @@ def describe(voices: list[VoiceInfo], label_of=None) -> list[str]:
         label = v.name or _name_of(v.voice) or "(未命名)"
         if label_of is not None:
             label = label_of(v.voice, label) or label
-        rows.append(f"{label}  ·{tail}" + (f"  ·{when}" if when else ""))
+        tag = (tag_of(v.kind) if tag_of is not None else "") or ""
+        rows.append(f"{tag}{label}  ·{tail}" + (f"  ·{when}" if when else ""))
     return rows
+
+
+# ---------------------------------------------------------------- 复刻素材（音频）
+
+
+@dataclass(frozen=True)
+class AudioProbe:
+    """用户挑的那份复刻素材**本地能查出来的**信息（查不出的一律不猜）。"""
+
+    path: str
+    seconds: float = 0.0
+    sample_rate: int = 0
+    channels: int = 0
+    fmt: str = ""
+    size: int = 0
+    error: str = ""
+
+
+def probe_audio(path) -> AudioProbe:                            # noqa: ANN001
+    """读素材的时长/采样率/声道（只读元信息，不解码整段）。失败把原因写进 `error`。"""
+    import miniaudio                     # 与 tts.py 同一个解码库；只读元信息很轻
+
+    p = Path(str(path or ""))
+    if not str(path or "").strip():
+        return AudioProbe(path="", error="还没选文件")
+    if not p.is_file():
+        return AudioProbe(path=str(p), error="文件不存在")
+    size = p.stat().st_size
+    if size <= 0:
+        return AudioProbe(path=str(p), error="文件是空的")
+    try:
+        info = miniaudio.get_file_info(str(p))
+    except Exception as exc:                                    # noqa: BLE001
+        return AudioProbe(path=str(p), size=size,
+                          error=f"读不出音频信息（{type(exc).__name__}: {exc}）")
+    return AudioProbe(path=str(p), seconds=float(info.duration),
+                      sample_rate=int(info.sample_rate), channels=int(info.nchannels),
+                      fmt=str(getattr(info, "file_format", "")), size=size)
+
+
+def audio_problems(probe: AudioProbe) -> list[str]:
+    """素材的**硬性**问题 —— 能本地拦就别让用户白花 0.01 元再等审核拒。"""
+    if probe.error:
+        return [probe.error]
+    out: list[str] = []
+    lo, hi = int(MIN_CLONE_SECONDS), int(MAX_CLONE_SECONDS)
+    if probe.seconds < MIN_CLONE_SECONDS:
+        out.append(f"太短（{probe.seconds:.1f}s）—— 官方要 {lo}~{hi} 秒")
+    elif probe.seconds > MAX_CLONE_SECONDS:
+        out.append(f"太长（{probe.seconds:.1f}s）—— 官方要 {lo}~{hi} 秒")
+    if probe.sample_rate and probe.sample_rate < MIN_CLONE_RATE:
+        out.append(f"采样率偏低（{probe.sample_rate}Hz < {MIN_CLONE_RATE}Hz）")
+    if probe.size > MAX_CLONE_BYTES:
+        out.append(f"文件太大（{probe.size / 1048576:.1f}MB > {MAX_CLONE_BYTES // 1048576}MB）")
+    return out
+
+
+def audio_warnings(probe: AudioProbe) -> list[str]:
+    """能过、但可能影响听感或过审率的（**只提示，不拦** —— 拦了会误伤正常素材）。"""
+    out: list[str] = []
+    if probe.channels > 1:
+        out.append("双声道（官方建议单声道，服务端一般会自行下混）")
+    return out
+
+
+def mime_of(path) -> str:                                       # noqa: ANN001
+    """扩展名 → MIME（服务端按 MIME 选解码器）。未知扩展名一律按 wav 报。"""
+    return CLONE_MIMES.get(Path(str(path)).suffix.lower(), "audio/wav")
+
+
+def audio_data_url(path) -> str:                                # noqa: ANN001
+    """把素材读成 `data:audio/...;base64,`。
+
+    ⚠️ **必须带 `data:` 前缀**：真机实测，裸 base64 会被服务端当成 URL 直接回 `InvalidURL`。
+    """
+    p = Path(str(path or ""))
+    raw = p.read_bytes()
+    if not raw:
+        raise VoiceLabError("素材文件是空的")
+    if len(raw) > MAX_CLONE_BYTES:
+        raise VoiceLabError(f"素材文件太大（{len(raw) / 1048576:.1f}MB）")
+    return f"data:{mime_of(p)};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 def customization_url(base_url: str, workspace_id: str = "") -> str:
@@ -227,30 +339,46 @@ def _check_error(obj: dict) -> None:
         raise VoiceLabError(str(obj["message"])[:300])
 
 
+def _voice_info(row: dict, family: str) -> VoiceInfo | None:
+    """把列表里的一行翻成 `VoiceInfo`（脏数据返回 None，绝不 KeyError）。"""
+    if not isinstance(row, dict) or not row.get("voice"):
+        return None
+    return VoiceInfo(
+        voice=str(row.get("voice")),
+        name=str(row.get("preferred_name") or row.get("name") or ""),
+        prompt=str(row.get("voice_prompt") or row.get("prompt") or ""),
+        target_model=str(row.get("target_model") or ""),
+        created=str(row.get("gmt_create") or row.get("create_time") or ""),
+        kind=family,
+        status=str(row.get("status") or ""))
+
+
 def list_voices(*, api_key: str, base_url: str = "", workspace_id: str = "",
-                target_model: str = DEFAULT_TARGET_MODEL, url: str = "",
+                family: str = "all", url: str = "",
                 timeout: float = DEFAULT_TIMEOUT_S, opener=None) -> list[VoiceInfo]:  # noqa: ANN001
-    """列出**本账号**的自定义音色（列表按 target_model 隔离，故要带上模型名）。"""
+    """列出**本账号**的自定义音色。
+
+    ⚠️ 两族**必须分开查**：`action=list` 按 `model` 隔离（用 `qwen-voice-design` 查不到
+    复刻音色，反之亦然 —— 真机实测过）。默认 `family="all"` 两族都列，界面上才看得全。
+    """
     if not (api_key or "").strip():
         raise VoiceLabError("还没配置 API key（见界面右上角「设置」）")
-    obj = _post({"model": DESIGN_MODEL,
-                 "input": {"action": "list", "target_model": target_model,
-                           "page_size": 50}},
-                api_key=api_key, url=url or customization_url(base_url, workspace_id),
-                timeout=timeout, opener=opener)
-    _check_error(obj)
-    out = (obj.get("output") or {})
-    rows = out.get("voice_list") or out.get("voices") or []
+    fams = tuple(FAMILIES) if family == "all" else (family,)
+    endpoint = url or customization_url(base_url, workspace_id)
     voices: list[VoiceInfo] = []
-    for r in rows:
-        if not isinstance(r, dict) or not r.get("voice"):
-            continue
-        voices.append(VoiceInfo(
-            voice=str(r.get("voice")),
-            name=str(r.get("preferred_name") or r.get("name") or ""),
-            prompt=str(r.get("voice_prompt") or r.get("prompt") or ""),
-            target_model=str(r.get("target_model") or ""),
-            created=str(r.get("gmt_create") or r.get("create_time") or "")))
+    for fam in fams:
+        model = FAMILIES.get(fam)
+        if model is None:
+            raise VoiceLabError(f"未知音色族：{fam!r}")
+        obj = _post({"model": model, "input": {"action": "list", "page_size": 50}},
+                    api_key=api_key, url=endpoint, timeout=timeout, opener=opener)
+        _check_error(obj)
+        out = (obj.get("output") or {})
+        rows = out.get("voice_list") or out.get("voices") or []
+        for r in rows:
+            info = _voice_info(r, fam)
+            if info is not None:
+                voices.append(info)
     return voices
 
 
@@ -302,7 +430,7 @@ def create_or_reuse(name: str, prompt: str, *, api_key: str, base_url: str = "",
     try:
         existing = find_by_name(
             list_voices(api_key=api_key, base_url=base_url, workspace_id=workspace_id,
-                        target_model=target_model, url=url, timeout=timeout, opener=opener),
+                        family="design", url=url, timeout=timeout, opener=opener),
             nm)
     except VoiceLabError:
         existing = None
@@ -313,15 +441,74 @@ def create_or_reuse(name: str, prompt: str, *, api_key: str, base_url: str = "",
                         url=url, timeout=timeout, opener=opener)
 
 
+def enroll_voice(name: str, audio_data_url: str, *, api_key: str, base_url: str = "",
+                 workspace_id: str = "", target_model: str = CLONE_TARGET_MODEL,
+                 url: str = "", timeout: float = DEFAULT_TIMEOUT_S,
+                 opener=None) -> VoiceCreation:                          # noqa: ANN001
+    """**声音复刻**：拿一段素材音频炼一条音色（`qwen-voice-enrollment`，**0.01 元/次**）。
+
+    `audio_data_url` 必须是 **URL 或 `data:audio/...;base64,`** —— 真机实测：裸 base64 会被
+    服务端当 URL 处理，直接回 `InvalidURL`。所以只接受这两种形态，别的一律当场拦下（省一次往返）。
+
+    ⚠️ 复刻**有审核**（列表里的 `status` 可能是 `UNDEPLOYED` = 审核未通过），所以「创建成功」
+    不等于「马上能用」；调用方要把 status 如实显示出来，别报成万事大吉。
+    """
+    if not (api_key or "").strip():
+        raise VoiceLabError("还没配置 API key（见界面右上角「设置」）")
+    nm = normalize_name(name)
+    data = str(audio_data_url or "").strip()
+    if not (data.startswith("data:") or data.startswith("http://") or data.startswith("https://")):
+        raise VoiceLabError("复刻素材必须是 URL 或 data:audio/...;base64,（裸 base64 会被服务端当 URL 拒绝）")
+    payload = {"model": CLONE_MODEL,
+               "input": {"action": "create", "target_model": target_model,
+                         "preferred_name": nm, "audio": {"data": data}}}
+    obj = _post(payload, api_key=api_key, url=url or customization_url(base_url, workspace_id),
+                timeout=timeout, opener=opener)
+    _check_error(obj)
+    out = (obj.get("output") or {})
+    voice = str(out.get("voice") or "")
+    if not voice:
+        raise VoiceLabError("服务端没返回音色 id（复刻可能未生效）")
+    return VoiceCreation(voice=voice, name=nm,
+                         preview_wav=b"", raw=obj)
+
+
+def enroll_or_reuse(name: str, audio_data_url: str, *, api_key: str, base_url: str = "",
+                    workspace_id: str = "", target_model: str = CLONE_TARGET_MODEL,
+                    url: str = "", timeout: float = DEFAULT_TIMEOUT_S,
+                    opener=None) -> VoiceCreation:                           # noqa: ANN001
+    """**先查后建**（复刻版）：账号里已有同名复刻音色就复用 —— 别为同一份素材反复付 0.01 元。"""
+    nm = normalize_name(name)
+    try:
+        existing = find_by_name(
+            list_voices(api_key=api_key, base_url=base_url, workspace_id=workspace_id,
+                        family="clone", url=url, timeout=timeout, opener=opener),
+            nm)
+    except VoiceLabError:
+        existing = None
+    if existing is not None:
+        return VoiceCreation(voice=existing.voice, name=nm, reused=True)
+    return enroll_voice(nm, audio_data_url, api_key=api_key, base_url=base_url,
+                        workspace_id=workspace_id, target_model=target_model,
+                        url=url, timeout=timeout, opener=opener)
+
+
 def delete_voice(voice: str, *, api_key: str, base_url: str = "", workspace_id: str = "",
-                 target_model: str = DEFAULT_TARGET_MODEL, url: str = "",
+                 family: str = "design", target_model: str = DEFAULT_TARGET_MODEL, url: str = "",
                  timeout: float = DEFAULT_TIMEOUT_S, opener=None) -> None:      # noqa: ANN001
-    """删除一条自定义音色（清理废弃候选，保持列表干净）。"""
+    """删除一条自定义音色（清理废弃候选，保持列表干净）。
+
+    ⚠️ 删除也要带上**正确的族**：`action=delete` 的 `model` 与列表/创建同源，
+    拿 design 去删复刻音色是删不掉的（而且不报错——只是没删掉）。
+    """
     if not (api_key or "").strip():
         raise VoiceLabError("还没配置 API key（见界面右上角「设置」）")
     if not (voice or "").strip():
         raise VoiceLabError("没有指定要删除的音色")
-    obj = _post({"model": DESIGN_MODEL,
+    model = FAMILIES.get(family)
+    if model is None:
+        raise VoiceLabError(f"未知音色族：{family!r}")
+    obj = _post({"model": model,
                  "input": {"action": "delete", "voice": voice,
                            "target_model": target_model}},
                 api_key=api_key, url=url or customization_url(base_url, workspace_id),
@@ -388,6 +575,62 @@ def _safe_stem(voice: str) -> str:
     """把 voice_id 变成安全文件名（id 里本来只有字母数字和短横线，再兜一层）。"""
     keep = [c for c in str(voice) if c.isascii() and (c.isalnum() or c in "-_")]
     return "".join(keep)[:80] or "voice"
+
+
+# ---------------------------------------------------------------- 克隆音色的显示名（本地登记）
+
+# 为什么要这张本地登记表：复刻音色的 id 是一长串（`qwen-tts-vc-<名>-voice-<时间戳>-<后缀>`），
+# 列表里看着不像人话。源码里那份 `vlt/voices.CLONED_VOICES` 是**手写**的（每加一条音色都要改代码 ✗），
+# 这里改成**克隆完自动记下来**（写用户目录的 labels.json，与试听缓存同一个文件夹）。
+# 两者一起用：本地登记优先，其次交给 `voices.display_name`（手写登记表仍然有效）。
+
+
+def labels_path(app_dir: Path) -> Path:
+    """显示名登记表的位置（与试听缓存同目录）。"""
+    return preview_dir(app_dir) / "labels.json"
+
+
+def load_labels(app_dir: Path) -> dict[str, str]:
+    """读回「voice id → 显示名」；文件缺失/损坏一律当空表（绝不因此起不来）。"""
+    try:
+        obj = json.loads(labels_path(app_dir).read_text(encoding="utf-8"))
+    except Exception:                                                # noqa: BLE001
+        return {}
+    if not isinstance(obj, dict):
+        return {}
+    return {str(k): str(v) for k, v in obj.items() if str(k).strip() and str(v).strip()}
+
+
+def save_label(app_dir: Path, voice: str, label: str) -> Path | None:
+    """记住「这条 id ↔ 这个名字」（下次列表里显示人话，而不是一串 id）。"""
+    if not (voice or "").strip() or not (label or "").strip():
+        return None
+    data = load_labels(app_dir)
+    data[str(voice)] = str(label).strip()
+    p = labels_path(app_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
+
+
+def label_mapper(labels: dict[str, str]):                            # noqa: ANN201
+    """给 `describe(label_of=...)` 用的查表函数：本地登记优先，其次回落到给定的 fallback。
+
+    与 `vlt/voices._registry_label` 同一套「按 `-voice-` 前缀认亲」的口径：
+    服务端重建 id 时只有时间戳/后缀变，前缀不变。
+    """
+    def lookup(voice: str, fallback: str) -> str:
+        v = str(voice or "").strip()
+        if v in labels:
+            return labels[v]
+        base = v.split("-voice-")[0]
+        if base:
+            for vid, label in labels.items():
+                if vid.split("-voice-")[0] == base:
+                    return label
+        return fallback
+
+    return lookup
 
 
 # ---------------------------------------------------------------- 配方库

@@ -55,8 +55,11 @@ class _Root:
 class FakeVoiceLab:
     """替身：把 voice_lab 的网络调用换掉，并记下调用参数。"""
 
-    def __init__(self, *, voices: list | None = None, reused: bool = False) -> None:
+    def __init__(self, *, voices: list | None = None, reused: bool = False,
+                 clone_existing: bool = False) -> None:
         self.created: list[tuple[str, str]] = []
+        self.enrolled: list[tuple[str, str]] = []     # (name, audio_data_url 前缀)
+        self._clone_existing = clone_existing
         self.deleted: list[str] = []
         self.listed = 0
         self._voices = voices if voices is not None else [
@@ -87,6 +90,18 @@ class FakeVoiceLab:
             return _tiny_wav()
 
         vl.sample_pcm = sample_pcm                                  # type: ignore[assignment]
+
+        def enroll_or_reuse(name, data_url, **kw):                   # noqa: ANN001
+            self.enrolled.append((name, str(data_url)[:24]))
+            new_voice = f"qwen-tts-vc-{name}-voice-20261004000000-abcd"
+            if self._clone_existing:
+                return vl.VoiceCreation(voice=new_voice, name=name, reused=True)
+            self._voices = list(self._voices) + [
+                vl.VoiceInfo(voice=new_voice, name=name, created="2026-10-04 00:00:00",
+                             target_model=vl.CLONE_TARGET_MODEL, kind="clone")]
+            return vl.VoiceCreation(voice=new_voice, name=name)
+
+        vl.enroll_or_reuse = enroll_or_reuse                         # type: ignore[assignment]
         vl.create_or_reuse = create_or_reuse                        # type: ignore[assignment]
         vl.list_voices = list_voices                                # type: ignore[assignment]
         vl.delete_voice = delete_voice                              # type: ignore[assignment]
@@ -224,11 +239,16 @@ def _install_widgets(gui) -> None:
     gui._tts_voice_var = _Var("")                                   # type: ignore[assignment]
     gui._tts_voice_combo = _Btn()                                   # type: ignore[assignment]
     for name in ("_lab_gen_btn", "_lab_save_btn", "_lab_del_btn", "_lab_recipe_btn",
-                 "_lab_recipe_preview_btn",
+                 "_lab_recipe_preview_btn", "_lab_pick_btn", "_lab_clone_btn",
                  "_lab_preview_btn", "_lab_refresh_btn"):
         setattr(gui, name, _Btn())
+    gui._lab_clone_name_var = _Var("my_clone")                      # type: ignore[assignment]
     gui._lab_voices = []
     gui._lab_cost_ok = True
+    gui._lab_clone_ok = True          # 费用确认在专门用例里验，其余用例默认已确认
+    gui._lab_audio = None
+    gui._lab_autoplay_voice = ""
+    gui._lab_audition_suffix = ""
     gui._lab_busy = False
     gui._lab_last = {}
     gui._lab_banner = ""
@@ -273,7 +293,7 @@ def _gui():
                 os.environ[k] = v
 
 
-def _drain(gui, timeout: float = 5.0) -> list[tuple]:
+def _drain(gui, timeout: float = 5.0) -> list[tuple]:   # timeout 可调：等待那个守护线程
     """等守护线程把结果塞进队列（无头下不跑 Tk 循环，所以自己收）。"""
     out: list[tuple] = []
     deadline = time.time() + timeout
@@ -589,6 +609,142 @@ def test_poll_dispatch_wired() -> bool:
     return ok
 
 
+def test_clone_requires_valid_sample() -> bool:
+    """克隆的本地闸门：没选素材 / 素材不合格（太短）→ **一个请求都不发**（别白花 0.01 元）。"""
+    import wave
+    ok = True
+    fake = FakeVoiceLab()
+    with _gui() as (gui, _cfg_path, tmp):
+        fake.install()
+        try:
+            gui._on_lab_clone()
+            cond = not fake.enrolled and "还没选素材音频" in _status(gui)
+            print(f"  没选素材 → 提示「{_status(gui)[:24]}…」、请求 {len(fake.enrolled)} 个  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+
+            short = tmp / "short.wav"
+            with wave.open(str(short), "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+                w.writeframes(b"\x00\x00" * 24000 * 5)          # 5 秒 < 10 秒
+            tkinter_fd = __import__("tkinter.filedialog", fromlist=["filedialog"])
+            orig = tkinter_fd.askopenfilename
+            tkinter_fd.askopenfilename = lambda **kw: str(short)
+            try:
+                gui._on_lab_pick_audio()
+                cond = "素材不合格" in _status(gui) and "太短" in _status(gui)
+                print(f"  短素材（5s）→ 提示「{_status(gui)[:34]}…」  {'OK' if cond else '✗'}")
+                ok &= cond
+                gui._on_lab_clone()
+                # ⚠️ 必须等线程：否则「还没发出去」会冒充「被拦住了」（本用例最初就是这么假绿的，
+                #    变异验证——去掉素材校验——当场把它抓出来）
+                for m in _drain(gui, 1.5):
+                    if m[0] == "voice_lab":
+                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+                cond = not fake.enrolled
+                print(f"  短素材点克隆 → 请求仍 {len(fake.enrolled)} 个（必须 0）  "
+                      f"{'OK' if cond else '✗'}")
+                ok &= cond
+            finally:
+                tkinter_fd.askopenfilename = orig
+        finally:
+            fake.restore()
+    return ok
+
+
+def test_clone_then_autoplay_and_save() -> bool:
+    """克隆成功 → 列表里出现并被选中 → **自动试听**（用 vc 模型合成）→ 保存进配置。"""
+    import wave
+    ok = True
+    fake = FakeVoiceLab(voices=[])
+    with _gui() as (gui, cfg_path, tmp):
+        fake.install()
+        try:
+            good = tmp / "sample.wav"
+            with wave.open(str(good), "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+                w.writeframes(b"\x00\x00" * 24000 * 12)         # 12 秒（合格）
+            fd = __import__("tkinter.filedialog", fromlist=["filedialog"])
+            orig = fd.askopenfilename
+            fd.askopenfilename = lambda **kw: str(good)
+            try:
+                gui._on_lab_pick_audio()
+                cond = "素材合格" in _status(gui)
+                print(f"  选素材 → {_status(gui)[:40]}…  {'OK' if cond else '✗'}")
+                ok &= cond
+                PLAYED.clear()
+                gui._on_lab_clone()
+                for _ in range(3):                    # 克隆 → 刷新列表 → 自动试听
+                    got = _drain(gui)
+                    for m in got:
+                        if m[0] == "voice_lab":
+                            gui._on_lab_done(m[1], m[2], m[3], m[4])
+                    if not got:
+                        break
+            finally:
+                fd.askopenfilename = orig
+
+            cond = len(fake.enrolled) == 1 and fake.enrolled[0][0] == "my_clone" \
+                and fake.enrolled[0][1].startswith("data:audio/wav")
+            print(f"  复刻请求：{len(fake.enrolled)} 次，名字={fake.enrolled[0][0]!r}、"
+                  f"素材形态={fake.enrolled[0][1]}…  {'OK' if cond else '✗'}")
+            ok &= cond
+            cond = any(v.kind == "clone" for v in gui._lab_voices)
+            print(f"  列表里出现复刻音色（kind=clone）：{len(gui._lab_voices)} 条  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+            cond = fake.sampled and fake.sampled[-1][1] == vl.CLONE_TARGET_MODEL and bool(PLAYED)
+            print(f"  自动试听：合成模型={fake.sampled[-1][1] if fake.sampled else '—'}"
+                  f"（必须是 vc 那个）、播放 {len(PLAYED)} 次  {'OK' if cond else '✗'}")
+            ok &= cond
+            cond = "音色已克隆" in _status(gui)
+            print(f"  状态里保留了「已克隆」结论  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            gui._lab_list.selection_clear(0, "end")
+            gui._lab_list.selection_set(0)
+            gui._on_lab_select()
+            gui._on_lab_save()
+            text = cfg_path.read_text(encoding="utf-8")
+            cond = (f"model: {vl.CLONE_TARGET_MODEL}" in text
+                    and "voice: qwen-tts-vc-my_clone-voice-" in text)
+            print(f"  保存进配置：model={vl.CLONE_TARGET_MODEL} + vc 音色 id  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            fake.restore()
+    return ok
+
+
+def test_clone_reuse_does_not_pay_again() -> bool:
+    """同名复刻复用：文案说清「没有再花钱」。"""
+    ok = True
+    fake = FakeVoiceLab(voices=[], clone_existing=True)
+    with _gui() as (gui, _cfg_path, tmp):
+        fake.install()
+        try:
+            import wave
+            sample = tmp / "reuse.wav"                    # 真文件：worker 会读盘 + base64
+            with wave.open(str(sample), "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+                w.writeframes(bytes(24000 * 12 * 2))     # 12s silence (bytes())
+            gui._lab_audio = vl.probe_audio(sample)
+            gui._on_lab_clone()
+            for _ in range(2):
+                got = _drain(gui)
+                for m in got:
+                    if m[0] == "voice_lab":
+                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+                if not got:
+                    break
+            cond = "没有再花钱" in _status(gui)
+            print(f"  复用文案：{_status(gui)[:44]}…  {'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            fake.restore()
+    return ok
+
+
 if __name__ == "__main__":
     print("test_voice_lab_gui:")
     print(" 1) 生成 → 列表 → 保存（model+voice 一起写）")
@@ -609,5 +765,11 @@ if __name__ == "__main__":
     ok &= test_empty_prompt_and_no_key()
     print(" 9) _poll 接线")
     ok &= test_poll_dispatch_wired()
+    print("10) 克隆的本地闸门（没素材/素材不合格 → 零请求）")
+    ok &= test_clone_requires_valid_sample()
+    print("11) 克隆 → 自动试听（vc 模型）→ 保存进配置")
+    ok &= test_clone_then_autoplay_and_save()
+    print("12) 同名复刻复用（没有再花钱）")
+    ok &= test_clone_reuse_does_not_pay_again()
     assert ok, "音色页接线用例失败（见上）"
     print("ALL PASSED")
