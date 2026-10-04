@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import time
 import urllib.error
@@ -648,7 +649,8 @@ class ClonePreset:
     key: str
     label: str                                  # 中文显示名
     spec: str                                   # 范本文本（人话：几段、什么顺序、多长、什么规格）
-    sample_name: str = ""                       # 期望的样本文件名（本地按名找）
+    sample_name: str = ""                       # 期望的样本文件名（本地按名找 / 远端按名拉）
+    sample_sha256: str = ""                     # 拉回来的音频必须对得上（防镜像串味/半截文件）
     labels: dict = field(default_factory=dict)  # 其它语言的显示名（缺省回落 label）
 
 
@@ -670,6 +672,7 @@ BUILTIN_CLONE_PRESETS: tuple[ClonePreset, ...] = (
             "填错会被判 wer_too_high 静默降级。"
         ),
         sample_name="source_sample_v2.wav",
+        sample_sha256="93c84fa33ccfd3c5f39cff648fb14bb387a78de1b2cb4568ca2861464f346756",
         labels={},          # 用户点名就叫 MetroPolice（各语言统一用这个英文名）
     ),
 )
@@ -750,11 +753,11 @@ def find_preset_sample(app_dir, preset: ClonePreset) -> Path | None:
         cands.append(Path(explicit))
     name = str(preset.sample_name or "").strip()
     if name:
-        base = preview_dir(app_dir)
-        cands.append(base / name)
+        cands.append(preview_dir(app_dir) / name)        # ① 已拉取的本地缓存
         try:
             repo = Path(__file__).resolve().parents[1]
-            cands.append(repo / "out" / "clone" / name)
+            cands.append(repo / "vo_sample" / name)      # ② 跑源码：仓库里就有一份（免下载）
+            cands.append(repo / "out" / "clone" / name)  # ③ 开发机上的历史位置
         except Exception:
             pass
     for c in cands:
@@ -764,6 +767,170 @@ def find_preset_sample(app_dir, preset: ClonePreset) -> Path | None:
         except OSError:
             continue
     return None
+
+
+# ---------------------------------------------------------------- 范本音频的按需拉取
+#
+# 为什么音频不随包发：用户点名的做法 —— 范本样本**只托管在仓库里**（独立目录 `vo_sample/`），
+# 应用需要的时候才去取（启动时查一次更新；试听 / 一键克隆那一刻按需拉）。
+# ⚠️ **不在 `assets/` 里**：打包脚本只收 assets/testdata/config.example.yaml，放 assets 会被塞进 exe。
+# 拉回来落到 `APP_DIR/voices/`（与试听缓存同目录）→ 之后所有路径都是本地文件，不再联网。
+PRESET_RAW_BASE = ("https://raw.githubusercontent.com/Sand-85/vrchat-livetranslate-extra"
+                   "/main/vo_sample/")
+# 兜底镜像：GitHub raw 在国内常被掐，jsDelivr 一般能通（同一份 git 内容，@main 跟分支走）
+PRESET_CDN_BASE = ("https://cdn.jsdelivr.net/gh/Sand-85/vrchat-livetranslate-extra"
+                   "@main/vo_sample/")
+PRESET_MAX_BYTES = 20 * 1024 * 1024
+SAMPLE_MANIFEST_NAME = "manifest.json"      # 清单：远端样本的 sha256（启动查更新的依据）
+
+
+def preset_sample_urls(preset: ClonePreset) -> list[str]:
+    """按顺序试的下载地址（raw 在前、CDN 兜底）。"""
+    name = str(preset.sample_name or "").strip()
+    if not name:
+        return []
+    return [PRESET_RAW_BASE + name, PRESET_CDN_BASE + name]
+
+
+def preset_cache_path(app_dir, preset: ClonePreset) -> Path:
+    """拉回来放哪 —— 与试听缓存同一个目录，`find_preset_sample` 天然认它。"""
+    return preview_dir(app_dir) / str(preset.sample_name or "preset_sample.wav")
+
+
+def _http_get_bytes(url: str, *, timeout: float, opener=None) -> bytes:
+    """取一个 URL 的字节（带 UA；有体积上限，别把内存吃光）。"""
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "vrchat-livetranslate-extra/preset-fetch",
+        "Accept": "application/octet-stream, audio/*, */*",
+    })
+    op = opener or urllib.request.urlopen
+    with op(req, timeout=timeout) as resp:            # type: ignore[attr-defined]
+        data = resp.read(PRESET_MAX_BYTES + 1)
+    if not data:
+        raise VoiceLabError("拉回来是空的")
+    if len(data) > PRESET_MAX_BYTES:
+        raise VoiceLabError(f"文件太大（>{PRESET_MAX_BYTES // 1048576}MB），拒绝")
+    return data
+
+
+def fetch_preset_sample(app_dir, preset: ClonePreset, *, opener=None,
+                        timeout: float = 60.0) -> Path:
+    """把范本音频从仓库拉到本地缓存；已经有（本地/已拉过）就直接返回，不联网。
+
+    失败会抛 `VoiceLabError`（把每个地址的失败原因都带上，界面照实显示）。
+    """
+    hit = find_preset_sample(app_dir, preset)
+    if hit is not None:
+        return hit
+    urls = preset_sample_urls(preset)
+    if not urls:
+        raise VoiceLabError("这条预设没写样本文件名，无法拉取")
+    # 认可两个 sha：内置那份（随代码走）与清单那份（远端更新过）—— 任一对上就算数
+    allowed = {str(preset.sample_sha256 or "").strip().lower()} - {""}
+    try:
+        rows = dict((fetch_sample_manifest(opener=opener, timeout=min(timeout, 8.0))
+                     .get("samples") or {}))
+        remote = str((rows.get(str(preset.sample_name or "")) or {}).get("sha256") or "")
+        if remote.strip():
+            allowed.add(remote.strip().lower())
+    except Exception as exc:                                         # noqa: BLE001
+        print(f"[voice_lab] 取清单失败（就按内置 sha 校验）：{type(exc).__name__}: {exc}",
+              flush=True)
+    problems: list[str] = []
+    for url in urls:
+        try:
+            raw = _http_get_bytes(url, timeout=timeout, opener=opener)
+        except Exception as exc:                                     # noqa: BLE001
+            problems.append(f"{url} → {type(exc).__name__}: {exc}")
+            continue
+        got = hashlib.sha256(raw).hexdigest()
+        if allowed and got not in allowed:
+            # 镜像串味 / 半截文件 / 被人换过 —— 一律不要，试下一个地址
+            problems.append(f"{url} → sha256 不符（期望 {'/'.join(sorted(x[:12] for x in allowed))}…，"
+                            f"实得 {got[:12]}…）")
+            continue
+        dest = preset_cache_path(app_dir, preset)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(raw)
+        print(f"[voice_lab] 范本音频已拉取：{dest.name}（{len(raw) / 1024:.0f} KB，来自 {url}）",
+              flush=True)
+        return dest
+    raise VoiceLabError("拉取范本音频失败：" + "；".join(problems or ["没有可用地址"]))
+
+
+def sample_manifest_urls() -> list[str]:
+    """清单的两个候选地址（raw → CDN）。"""
+    return [PRESET_RAW_BASE + SAMPLE_MANIFEST_NAME, PRESET_CDN_BASE + SAMPLE_MANIFEST_NAME]
+
+
+def _get_first(urls, *, timeout: float, opener=None) -> bytes:
+    """按顺序试这些地址，返回第一个取到的字节；全挂则抛（错误里点名每个地址）。"""
+    problems: list[str] = []
+    for url in urls:
+        try:
+            return _http_get_bytes(url, timeout=timeout, opener=opener)
+        except Exception as exc:                                     # noqa: BLE001
+            problems.append(f"{url} → {type(exc).__name__}: {exc}")
+    raise VoiceLabError("；".join(problems or ["没有可用地址"]))
+
+
+def fetch_sample_manifest(*, opener=None, timeout: float = 8.0) -> dict:
+    """取远端清单（`vo_sample/manifest.json`）。取不到就抛 —— 调用方决定怎么记日志。"""
+    raw = _get_first(sample_manifest_urls(), timeout=timeout, opener=opener)
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except Exception as exc:                                         # noqa: BLE001
+        raise VoiceLabError(f"清单不是合法 JSON：{type(exc).__name__}: {exc}") from exc
+    if not isinstance(obj, dict) or not isinstance(obj.get("samples"), dict):
+        raise VoiceLabError("清单结构不对（缺 samples 段）")
+    return obj
+
+
+def check_sample_updates(app_dir, presets=None, *, opener=None,
+                         timeout: float = 8.0) -> list[str]:
+    """启动时查一次：清单里的 sha 与本地（缓存优先，其次仓库副本）不一致 → 把新样本拉到缓存。
+
+    返回这次更新了哪些文件名（空 = 都已是最新）。**只拉到本地缓存**，不动仓库里的那份。
+    """
+    man = fetch_sample_manifest(opener=opener, timeout=timeout)
+    rows = dict(man.get("samples") or {})
+    if not rows:
+        return []
+    todo = list(presets if presets is not None else BUILTIN_CLONE_PRESETS)
+    changed: list[str] = []
+    for p in todo:
+        name = str(getattr(p, "sample_name", "") or "").strip()
+        want = str((rows.get(name) or {}).get("sha256") or "").strip().lower()
+        if not name or not want:
+            continue
+        local = find_preset_sample(app_dir, p)
+        if local is not None:
+            try:
+                if hashlib.sha256(local.read_bytes()).hexdigest() == want:
+                    continue                                        # 本地就是最新的
+            except OSError:
+                pass
+        urls = preset_sample_urls(p)
+        if not urls:
+            continue
+        try:
+            raw = _get_first(urls, timeout=timeout, opener=opener)
+        except VoiceLabError as exc:
+            print(f"[voice_lab] 范本样本 {name} 下载失败：{exc}", flush=True)
+            continue
+        got = hashlib.sha256(raw).hexdigest()
+        if got != want:
+            print(f"[voice_lab] 范本样本 {name} 下载后 sha 不符（期望 {want[:12]}…，"
+                  f"实得 {got[:12]}…），跳过这一次", flush=True)
+            continue
+        dest = preset_cache_path(app_dir, p)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(raw)
+        changed.append(name)
+        print(f"[voice_lab] 范本样本已更新：{name}（{len(raw) / 1024:.0f} KB）", flush=True)
+    return changed
 
 
 def sample_pcm_from_file(path) -> tuple[bytes, float]:

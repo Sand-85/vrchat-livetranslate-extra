@@ -557,4 +557,10 @@ STRINGS: dict[str, str] = {
         "Previewing template ({s:.1f}s, played locally, free)…",
     "范本试听完成（{s} 秒，本地播放）":
         "Template preview finished ({s}s, local playback)",
+    "正在从仓库拉取范本音频（{n}）…":
+        "Fetching template audio from the repo ({n})…",
+    "拉取范本音频失败：{msg}":
+        "Failed to fetch template audio: {msg}",
+    "范本样本已更新：{n}":
+        "Template samples updated: {n}",
 }

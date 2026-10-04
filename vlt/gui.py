@@ -688,6 +688,7 @@ class TranslationGUI:
         if not headless:
             self._build_ui()
             self._kick_tts_voice_list()   # 后台拉一次本账号自定义音色（只读、免费）
+            self._kick_sample_check()     # 每次启动查一次范本样本更新（只读、几 KB）
 
     # ================================================================ UI 构建
 
@@ -2417,7 +2418,8 @@ class TranslationGUI:
         self._lab_clone_ok = False                    # 复刻的费用确认（与设计分开）
         self._lab_audio = None                        # 已选素材的本地探测结果
         self._lab_autoplay_voice = ""
-        self._lab_playing_preset = False                 # 克隆完自动试听哪条（列表刷新后触发）
+        self._lab_playing_preset = False
+        self._lab_preset_then = ""       # 拉取完成后接着做哪件事（preview / clone）                 # 克隆完自动试听哪条（列表刷新后触发）
         self._lab_audition_suffix = ""                # 异步试听完成后要拼在状态后面的话
         self._lab_busy = False
         self._lab_last: dict[str, str] = {}          # voice → 生成时的描述（保存时一并写日志）
@@ -2615,23 +2617,45 @@ class TranslationGUI:
             pass
         return presets[idx]
 
-    def _lab_preset_sample_or_report(self):
-        """范本的样本音频：找不到就报清楚该放哪，并留痕。"""
+    def _lab_preset_begin(self, action: str) -> None:
+        """范本的两件事（试听 / 一键克隆）**统一入口**：本地有就直接做，没有就先从仓库拉。
+
+        用户点名的做法：范本音频只托管在仓库里，**需要的时候才拉**；拉回来落到本地缓存，
+        之后试听/克隆都走本地文件，不再联网。
+        """
         p = self._lab_preset()
         if p is None:
-            return None, None
+            return
         sample = voice_lab.find_preset_sample(APP_DIR, p)
-        if sample is None:
+        if sample is not None:
+            self._lab_preset_run(action, sample)
+            return
+        if self._lab_busy:
+            return
+        if not voice_lab.preset_sample_urls(p):
             self._lab_set_status(t("范本的样本音频没找到：把 {n} 放到 {d}",
                                    n=p.sample_name or t("范本样本"),
                                    d=str(voice_lab.preview_dir(APP_DIR))))
-            print(f"[gui] 范本样本没找到：{p.key}（期望 {p.sample_name}）", flush=True)
-        return p, sample
+            print(f"[gui] 范本没写样本文件名，无法拉取：{p.key}", flush=True)
+            return
+        self._lab_preset_then = action
+        self._lab_running("preset_fetch", True)
+        self._lab_set_status(t("正在从仓库拉取范本音频（{n}）…", n=p.sample_name))
+        print(f"[gui] 拉取范本音频：{p.sample_name}（接下来用于 {action}）", flush=True)
+        threading.Thread(target=self._lab_worker, args=("preset_fetch",),
+                         kwargs={"app_dir": APP_DIR, "preset": p}, daemon=True).start()
 
-    def _on_lab_preset_preview(self) -> None:
-        """试听范本：本地播这份样本音频（不联网、不花钱、绝不进虚拟声卡）。"""
-        p, sample = self._lab_preset_sample_or_report()
-        if p is None or sample is None:
+    def _lab_preset_run(self, action: str, sample) -> None:
+        """本地音频到手后才真正干活：`preview` = 本地试听，`clone` = 挂素材 + 走克隆。"""
+        if action == "clone":
+            p = self._lab_preset()
+            if p is None:
+                return
+            self._lab_clone_name_var.set(voice_lab.normalize_name(p.key))
+            if not self._lab_apply_audio(sample):
+                return
+            print(f"[gui] 一键克隆：按范本 {p.key} ← {sample}", flush=True)
+            self._on_lab_clone()
             return
         if self._lab_playing_preset:
             self._lab_set_status(t("还在试听上一段范本…"))
@@ -2644,9 +2668,17 @@ class TranslationGUI:
             return
         self._lab_playing_preset = True
         self._lab_set_status(t("正在试听范本（{s:.1f} 秒，本地播放不花钱）…", s=seconds))
-        print(f"[gui] 试听范本：{sample.name}（{seconds:.1f}s，本地）", flush=True)
+        print(f"[gui] 试听范本：{Path(str(sample)).name}（{seconds:.1f}s，本地）", flush=True)
         threading.Thread(target=self._lab_play_preset_worker, args=(pcm, seconds),
                          daemon=True).start()
+
+    def _on_lab_preset_preview(self) -> None:
+        """试听范本：本地播这份样本音频（不联网、不花钱、绝不进虚拟声卡）。"""
+        self._lab_preset_begin("preview")
+
+    def _on_lab_preset_clone(self) -> None:
+        """一键克隆：范本素材挂上 + 名字预填 → 直接走克隆（费用确认、自动试听都在那条路上）。"""
+        self._lab_preset_begin("clone")
 
     def _lab_play_preset_worker(self, pcm: bytes, seconds: float) -> None:
         """播完/播挂了都经队列回主线程改状态（播放是阻塞的，绝不能占界面线程）。"""
@@ -2655,17 +2687,6 @@ class TranslationGUI:
             self._q.put(("voice_lab", "preset_play", True, f"{seconds:.1f}", None))
         except Exception as exc:  # noqa: BLE001
             self._q.put(("voice_lab", "preset_play", False, f"{type(exc).__name__}: {exc}", None))
-
-    def _on_lab_preset_clone(self) -> None:
-        """一键克隆：范本素材挂上 + 名字预填 → 直接走克隆（费用确认、自动试听都在那条路上）。"""
-        p, sample = self._lab_preset_sample_or_report()
-        if p is None or sample is None:
-            return
-        self._lab_clone_name_var.set(voice_lab.normalize_name(p.key))
-        if not self._lab_apply_audio(sample):
-            return
-        print(f"[gui] 一键克隆：按范本 {p.key} ← {sample}", flush=True)
-        self._on_lab_clone()
 
     def _on_lab_clone(self) -> None:
         """克隆并试听：本地校验 → 费用确认 → 后台复刻 → 刷新列表 → 自动试听。"""
@@ -2805,6 +2826,20 @@ class TranslationGUI:
                     voice_lab.save_preview(APP_DIR, kw["voice"], pcm)
                 self._q.put(("voice_lab", "audition", True, "", {
                     "voice": kw["voice"], "name": kw["name"], "pcm": pcm}))
+            elif job == "sample_check":
+                # 自带兜底：查更新失败不影响任何功能，只留痕（不占状态栏）
+                try:
+                    changed = voice_lab.check_sample_updates(kw["app_dir"])
+                except Exception as exc:                             # noqa: BLE001
+                    print(f"[gui] 范本样本更新检查失败（不影响功能）："
+                          f"{type(exc).__name__}: {exc}", flush=True)
+                    changed = []
+                self._q.put(("voice_lab", "sample_check", True, "", changed))
+                return
+            elif job == "preset_fetch":
+                got = voice_lab.fetch_preset_sample(kw["app_dir"], kw["preset"])
+                self._q.put(("voice_lab", "preset_fetch", True, "", got))
+                return
             elif job == "tts_list":
                 res = voice_lab.list_voices(api_key=kw["api_key"], base_url=kw["base_url"],
                                             workspace_id=kw["ws_id"], family="all")
@@ -2834,7 +2869,8 @@ class TranslationGUI:
         if not ok:
             verb = {"create": t("生成失败：{msg}", msg=msg),
                     "list": t("读取失败：{msg}", msg=msg),
-                    "delete": t("删除失败：{msg}", msg=msg)}.get(job, msg)
+                    "delete": t("删除失败：{msg}", msg=msg),
+                    "preset_fetch": t("拉取范本音频失败：{msg}", msg=msg)}.get(job, msg)
             self._lab_set_status(verb)
             print(f"[gui] 音色页 {job} 失败：{msg}", flush=True)
             return
@@ -2854,6 +2890,21 @@ class TranslationGUI:
                   f"（预览 {len(res.preview_wav)}B）", flush=True)
             self._on_lab_refresh()          # 立刻刷新列表，新音色就在里面（选中它即可保存）
             return
+        if job == "sample_check":
+            changed = list(payload or [])
+            if changed:
+                self._lab_set_status(t("范本样本已更新：{n}", n="、".join(changed)))
+            return
+
+        if job == "preset_fetch":
+            # 失败已在上面那张表里统一报过（「拉取范本音频失败：…」）；这里只管成功：接着把
+            # 用户点的那件事做完（试听 / 一键克隆），他不用再点第二下。
+            then = self._lab_preset_then
+            self._lab_preset_then = ""
+            if payload is not None and then:
+                self._lab_preset_run(then, payload)
+            return
+
         if job == "tts_list":
             self._tts_custom = list(payload or [])
             print(f"[gui] 本账号自定义音色 {len(self._tts_custom)} 条 → 并入「打字译音」下拉",
@@ -4518,6 +4569,16 @@ class TranslationGUI:
         else:
             print(f"[gui] 打字译音下拉候选 {len(self._tts_voice_choices())} 条（含自定义音色 "
                   f"{len(getattr(self, '_tts_custom', None) or [])} 条）", flush=True)
+
+    def _kick_sample_check(self) -> None:
+        """每次启动查一次范本样本有没有更新（清单 + sha 比对，几 KB 的请求）。
+
+        与账号音色那次不同：**失败只记日志、不上状态栏**（后台维护动作，离线启动不该打扰用户），
+        只有真更新到了才提示一句。
+        """
+        print("[gui] 启动检查：范本样本更新", flush=True)
+        threading.Thread(target=self._lab_worker, args=("sample_check",),
+                         kwargs={"app_dir": APP_DIR}, daemon=True).start()
 
     def _kick_tts_voice_list(self) -> None:
         """启动后台拉一次本账号的自定义音色，好把它们排进「打字译音」下拉。

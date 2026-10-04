@@ -127,6 +127,8 @@ def build() -> Path:
            "--add-data", f"{REPO / 'config.example.yaml'}{';'}.",   # 首次运行要生成 config.yaml
            "--add-data", f"{REPO / 'testdata'}{';'}testdata",        # --self-test 用
            "--add-data", f"{REPO / 'assets'}{';'}assets",            # 图标 + 赞助弹窗的两张收款码
+           # ⚠️ 故意**不**收 `vo_sample/`：克隆预设的范本样本只托管在仓库里，
+           #    应用需要时才去拉（vlt/voice_lab.py::fetch_preset_sample）。别顺手加进来。
            ] + (["--icon", str(ICON)] if ICON.exists() else [])
     if not ICON.exists():
         print(f"[!] 没找到图标 {ICON}，本次打包不带自定义图标", flush=True)

@@ -403,6 +403,7 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 # 打字腿 + 语音腿 B 模式；A 模式是实时模型自带音频，不播）。留空 = 不播。
                 "open_sfx": str((raw_textin.get("tts") or {}).get("open_sfx") or ""),
                 "close_sfx": str((raw_textin.get("tts") or {}).get("close_sfx") or ""),
+                "sfx_voice": str((raw_textin.get("tts") or {}).get("sfx_voice") or ""),
                 "timeout_s": float((raw_textin.get("tts") or {}).get("timeout_s", 30.0)),
             },
         },

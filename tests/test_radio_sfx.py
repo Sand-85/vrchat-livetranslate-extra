@@ -145,9 +145,91 @@ def test_engine_push_order() -> bool:
     return ok
 
 
+def test_voice_binding() -> bool:
+    """★ 开关音按音色绑定：`sfx_voice` 留空 = 任何音色都播；填了 = 只在当前音色是它时播。
+
+    用户要求：「这个选项只和国民护卫队音色绑定」。闸门在引擎里**每次调用都判一次** ——
+    界面上换音色，下一条打字立刻生效，不用重启。
+    """
+    import vlt.engine as engine_mod
+
+    MP = "qwen-tts-vc-MetroPolice-voice-20261003201838644-0a4b"
+    CA = "qwen-tts-vd-clear_auto-voice-20260926233229068-247d"
+    ok = True
+
+    # ① 纯函数：留空/相符/不符/重建容错/当前为空
+    cases = [
+        ("留空 = 不绑定 → 任何音色都播", {"voice": CA}, True),
+        ("绑 M、当前 M → 播", {"voice": MP, "sfx_voice": MP}, True),
+        ("绑 M、当前 clear_auto → 不播", {"voice": CA, "sfx_voice": MP}, False),
+        ("绑 M、当前是重建后的 M（时间戳不同）→ 仍播",
+         {"voice": "qwen-tts-vc-MetroPolice-voice-20261004120000000-ffff", "sfx_voice": MP}, True),
+        ("绑 M 但当前没设音色 → 不播", {"voice": "", "sfx_voice": MP}, False),
+    ]
+    for label, cfg, want in cases:
+        got = sfx_mod.bound_to_current_voice(cfg)
+        good = got is want
+        print(f"    {label}：{got} {'OK' if good else '✗'}")
+        ok &= good
+
+    # ② 引擎闸门：绑到别的音色 → 一点开关音都不推
+    class Recorder:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def push(self, pcm: bytes) -> None:
+            self.events.append("push")
+
+        def end_sentence(self) -> None:
+            self.events.append("end")
+
+    class Slot:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = chunks
+
+        def take(self, idx: int):
+            if idx < len(self.chunks):
+                return self.chunks[idx], False
+            return None, True
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        _write_wav(d / "on.wav", sr=22050, seconds=0.2, freq=845.0)
+        _write_wav(d / "off.wav", sr=22050, seconds=0.4, freq=1325.0)
+        old_bundle = engine_mod.BUNDLE_DIR
+        engine_mod.BUNDLE_DIR = d
+        try:
+            tts = {"open_sfx": "on.wav", "close_sfx": "off.wav"}
+            eng = engine_mod.Engine.__new__(engine_mod.Engine)
+            eng._cfg = SimpleNamespace(text_input={"tts": dict(tts, voice=CA, sfx_voice=MP)})
+            eng._virtualmic = Recorder()
+            eng._sfx_cache = None
+            eng._drain_slot_to_mic(Slot([np.zeros(2400, dtype=np.int16).tobytes()]))
+            cond = eng._virtualmic.events == ["push", "end"]     # 只有正文分片 + 封句
+            print(f"    引擎：当前 clear_auto（非绑定音色）→ 无开关音  "
+                  f"{'OK' if cond else '✗'}  {eng._virtualmic.events}")
+            ok &= cond
+
+            # ③ 换成绑定的那条音色 → 立刻带上开关音（同一实例，不重启）
+            eng._cfg.text_input["tts"]["voice"] = MP
+            eng._virtualmic.events.clear()
+            eng._drain_slot_to_mic(Slot([np.zeros(2400, dtype=np.int16).tobytes()]))
+            cond = (len(eng._virtualmic.events) == 4
+                    and eng._virtualmic.events[0] == "push"
+                    and eng._virtualmic.events[-1] == "end")
+            print(f"    引擎：切到绑定音色 → 开关音立刻回来（{eng._virtualmic.events}）  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            engine_mod.BUNDLE_DIR = old_bundle
+    return ok
+
+
 def main() -> int:
     results = [
         ("读任意格式 → 24k 单声道", test_read_wav_any_format()),
+        ("开关音按音色绑定（留空/相符/不符/重建容错 + 引擎闸门 + 切音色即时生效）",
+         test_voice_binding()),
         ("缺文件只影响一侧 + 留痕", test_load_pair_missing_file_traces()),
         ("引擎推入顺序", test_engine_push_order()),
     ]

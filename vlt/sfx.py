@@ -9,6 +9,7 @@
       tts:
         open_sfx: assets/sfx/on2.wav      # 相对路径按「打包目录 → 可写目录」依次找；留空 = 不播
         close_sfx: assets/sfx/off2.wav
+        sfx_voice: qwen-tts-vc-XXXX-voice-…   # 可选：**只在这条音色上播**；留空 = 任何音色都播
 
 为什么单独一个模块：读 WAV / 重采样 / 转声道这些与引擎无关，放这儿离线可测（`tests/test_radio_sfx.py`），
 引擎那边只负责"什么时候推"。
@@ -28,6 +29,7 @@ log = logging.getLogger(__name__)
 TARGET_RATE = 24000        # 先统一到 24k 单声道 s16le，再交给现有 resample_24k_mono_to_48k_stereo
 OPEN_KEY = "open_sfx"
 CLOSE_KEY = "close_sfx"
+VOICE_KEY = "sfx_voice"    # 可选：这对开关音只绑在这条音色上（留空 = 任何音色都播）
 
 
 def read_wav_as_24k_mono(path: Path) -> bytes:
@@ -61,6 +63,31 @@ def read_wav_as_24k_mono(path: Path) -> bytes:
         n2 = int(round(len(x) * TARGET_RATE / sr))
         x = np.interp(np.linspace(0, len(x) - 1, n2), np.arange(len(x)), x).astype(np.float32)
     return (np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes()
+
+
+def _voice_base(voice: str) -> str:
+    """取 voice id 的「家族基名」：`qwen-tts-vc-<名>-voice-<时间戳>-<后缀>` → 前面那段。
+
+    为什么要它：同一条音色重建一次，时间戳/后缀会变；按基名比就不会因为重建而突然不播。
+    """
+    v = (voice or "").strip()
+    return v.split("-voice-")[0] if "-voice-" in v else v
+
+
+def bound_to_current_voice(tts_cfg: dict | None) -> bool:
+    """这对开关音现在该不该播（按**当前音色**判断）。
+
+    - `sfx_voice` 留空 → 不绑定，任何音色都播（老配置/老行为）；
+    - 填了 voice id（或它的家族基名）→ 只有当前 `voice` 与之相符时才播。
+    """
+    cfg = tts_cfg or {}
+    want = str(cfg.get(VOICE_KEY) or "").strip()
+    if not want:
+        return True
+    cur = str(cfg.get("voice") or "").strip()
+    if not cur:
+        return False
+    return cur == want or _voice_base(cur) == _voice_base(want)
 
 
 def _resolve(name: str, bases: tuple[Path, ...]) -> Path | None:

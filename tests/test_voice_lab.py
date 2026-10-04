@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import shutil
 import sys
@@ -554,6 +555,203 @@ def test_clone_presets() -> bool:
     return ok
 
 
+def test_preset_fetch() -> bool:
+    """范本音频按需拉取：地址顺序 / sha 校验 / 拉过就不再拉 / 全挂时报清楚。"""
+    ok = True
+    tmp = Path(tempfile.mkdtemp(prefix="vlt-fetch-"))
+    try:
+        raw = (Path(__file__).resolve().parents[1] / "vo_sample"
+               / "source_sample_v2.wav").read_bytes()
+        custom = vl.ClonePreset(key="t_fetch", label="测试范本", spec="",
+                                sample_name="t_fetch_sample.wav",
+                                sample_sha256=hashlib.sha256(raw).hexdigest())
+        cond = vl.find_preset_sample(tmp, custom) is None
+        print(f"  自定义样本名在本地不存在（触发下载）  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        calls: list[str] = []
+
+        class _Resp:
+            def __init__(self, data: bytes) -> None:
+                self._d = data
+
+            def read(self, n: int = -1) -> bytes:
+                return self._d[:n] if (n and n > 0) else self._d
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a) -> bool:
+                return False
+
+        file_calls: list[str] = []
+
+        def opener(req, timeout=None):                               # noqa: ANN001
+            url = str(getattr(req, "full_url", req))
+            calls.append(url)
+            if url.endswith("manifest.json"):        # 取清单是「先看一眼有没有新版本」
+                return _Resp(b'{"samples": {}}')
+            file_calls.append(url)
+            return _Resp(raw)
+
+        got = vl.fetch_preset_sample(tmp, custom, opener=opener)
+        cond = (got.is_file() and got.read_bytes() == raw and len(file_calls) == 1
+                and file_calls[0].startswith("https://raw.githubusercontent.com/")
+                and file_calls[0].endswith("vo_sample/t_fetch_sample.wav"))
+        print(f"  首次拉取 → {got.name}（{got.stat().st_size} 字节）、文件只请求首个地址  "
+              f"{'OK' if cond else '✗'}")
+        ok &= cond
+
+        calls.clear(); file_calls.clear()
+        got2 = vl.fetch_preset_sample(tmp, custom, opener=opener)
+        cond = got2 == got and calls == []
+        print(f"  第二次 → 命中本地缓存、0 次请求  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        got.unlink()
+        calls.clear(); file_calls.clear()
+
+        def tampered(req, timeout=None):                             # noqa: ANN001
+            url = str(getattr(req, "full_url", req))
+            if url.endswith("manifest.json"):
+                return _Resp(b'{"samples": {}}')
+            file_calls.append(url)
+            return _Resp(b"tampered not audio")
+
+        try:
+            vl.fetch_preset_sample(tmp, custom, opener=tampered)
+            cond = False
+        except vl.VoiceLabError as exc:
+            cond = ("sha256" in str(exc) and len(file_calls) == 2
+                    and not vl.preset_cache_path(tmp, custom).exists())
+            print(f"  sha 不符 → 拒绝、文件两个地址都试过、不落盘（{len(file_calls)} 次请求）  "
+                  f"{'OK' if cond else '✗'}")
+        ok &= cond
+
+        def dead(req, timeout=None):                                 # noqa: ANN001
+            raise OSError("网络不通")
+
+        try:
+            vl.fetch_preset_sample(tmp, custom, opener=dead)
+            cond = False
+        except vl.VoiceLabError as exc:
+            cond = ("raw.githubusercontent.com" in str(exc) and "jsdelivr" in str(exc)
+                    and "vo_sample/t_fetch_sample.wav" in str(exc))
+            print(f"  地址全挂 → 报错里两个文件地址都点名  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        empty = vl.ClonePreset(key="t_empty", label="空范本", spec="")
+        try:
+            vl.fetch_preset_sample(tmp, empty, opener=opener)
+            cond = False
+        except vl.VoiceLabError as exc:
+            cond = "没写样本文件名" in str(exc)
+            print(f"  没写样本文件名 → 明确报错  {'OK' if cond else '✗'}")
+        ok &= cond
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
+def test_sample_update_check() -> bool:
+    """启动查更新（清单驱动）：本地已最新 → 不下载；sha 不一致 → 拉到缓存；
+    清单取不到 → 抛（调用方记日志）；清单结构不对 → 抛。"""
+    ok = True
+    tmp = Path(tempfile.mkdtemp(prefix="vlt-sampleupd-"))
+    try:
+        raw = (Path(__file__).resolve().parents[1] / "vo_sample"
+               / "source_sample_v2.wav").read_bytes()
+        good = hashlib.sha256(raw).hexdigest()
+        manifest = {"版本": 1, "samples": {"source_sample_v2.wav": {"sha256": good,
+                                                                   "bytes": len(raw)}}}
+
+        class _Resp:
+            def __init__(self, data: bytes) -> None:
+                self._d = data
+
+            def read(self, n: int = -1) -> bytes:
+                return self._d[:n] if (n and n > 0) else self._d
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a) -> bool:
+                return False
+
+        hits: list[str] = []
+
+        def opener(req, timeout=None):                               # noqa: ANN001
+            url = str(getattr(req, "full_url", req))
+            hits.append(url)
+            if url.endswith("manifest.json"):
+                return _Resp(json.dumps(manifest).encode("utf-8"))
+            return _Resp(raw)
+
+        # ① 跑源码：仓库里那份就是最新的 → 不下载
+        hits.clear()
+        changed = vl.check_sample_updates(tmp, opener=opener)
+        cond = changed == [] and all(u.endswith("manifest.json") for u in hits)
+        print(f"  本地已最新 → 不下载（只请求清单 {len(hits)} 次）  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # ② 清单里换了 sha（远端更新）→ 拉到本地缓存
+        other = vl.ClonePreset(key="my_clip_4x", label="MetroPolice",
+                               spec=vl.BUILTIN_CLONE_PRESETS[0].spec,
+                               sample_name="source_sample_v2.wav", sample_sha256="deadbeef")
+        # 用「缓存里放一份旧内容」模拟本地过期
+        cache = vl.preset_cache_path(tmp, other)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(b"old content")
+        hits.clear()
+        changed = vl.check_sample_updates(tmp, [other], opener=opener)
+        cond = (changed == ["source_sample_v2.wav"] and cache.read_bytes() == raw
+                and any(u.endswith("source_sample_v2.wav") for u in hits))
+        print(f"  本地过期 → 自动拉到缓存并覆盖（{changed}）  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # ③ 拉下来再查一次 → 已经最新，不再下载
+        hits.clear()
+        changed = vl.check_sample_updates(tmp, [other], opener=opener)
+        cond = changed == [] and all(u.endswith("manifest.json") for u in hits)
+        print(f"  再查一次 → 不再下载（请求 {len(hits)} 次）  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # ④ 清单取不到 → 抛（调用方记日志、不影响功能）
+        def dead(req, timeout=None):                                 # noqa: ANN001
+            raise OSError("网络不通")
+
+        try:
+            vl.check_sample_updates(tmp, opener=dead)
+            cond = False
+        except vl.VoiceLabError as exc:
+            cond = "manifest.json" in str(exc)
+            print(f"  清单取不到 → 抛（含地址）  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # ⑤ 清单结构不对 → 抛
+        def bad(req, timeout=None):                                  # noqa: ANN001
+            return _Resp(b'{"nope": 1}')
+
+        try:
+            vl.fetch_sample_manifest(opener=bad)
+            cond = False
+        except vl.VoiceLabError as exc:
+            cond = "samples" in str(exc)
+            print(f"  清单缺 samples 段 → 抛  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # ⑥ 仓库里的清单与样本 sha 对得上（避免改了样本忘了改清单）
+        man = json.loads((Path(__file__).resolve().parents[1] / "vo_sample"
+                          / "manifest.json").read_text(encoding="utf-8"))
+        row = (man.get("samples") or {}).get("source_sample_v2.wav") or {}
+        cond = str(row.get("sha256") or "").lower() == good and int(row.get("bytes") or 0) == len(raw)
+        print(f"  仓库清单与样本一致（sha/字节数都对）  {'OK' if cond else '✗'}")
+        ok &= cond
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
 if __name__ == "__main__":
     print("test_voice_lab:")
     print(" 1) 音色名规范化")
@@ -586,5 +784,9 @@ if __name__ == "__main__":
     ok &= test_labels_registry()
     print(" 15) 克隆预设（内置/本地覆盖/定位样本/本地试听解码）")
     ok &= test_clone_presets()
+    print(" 16) 范本音频按需拉取（地址顺序/sha 校验/不重复拉/全挂报错）")
+    ok &= test_preset_fetch()
+    print(" 17) 启动查更新（清单驱动：最新不下载 / 过期自动拉 / 取不到就抛 / 结构校验）")
+    ok &= test_sample_update_check()
     assert ok, "voice_lab 用例失败（见上）"
     print("ALL PASSED")

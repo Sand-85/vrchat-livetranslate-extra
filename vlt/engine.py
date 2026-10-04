@@ -29,6 +29,7 @@ from .output.merger import Merger
 from .output.overlay import OverlayConfig
 from .output.virtualmic import VirtualMic, pick_output_device, resample_24k_mono_to_48k_stereo
 from .paths import APP_DIR, BUNDLE_DIR
+from .sfx import bound_to_current_voice as sfx_bound_to_voice
 from .sfx import load_pair as load_sfx_pair
 from .session.base import SessionConfig, TextDelta, create_session
 from .textin import DEFAULT_MODEL as DEFAULT_TEXT_MODEL
@@ -1329,9 +1330,14 @@ class Engine:
         相对路径先按 `BUNDLE_DIR`（随程序分发）找，再按 `APP_DIR`（用户可覆盖）找；
         没配就是空字节（不播），配了却读不出来会在 `vlt.sfx` 里留痕（禁静默降级）。
         """
+        tts_cfg = (self._cfg.text_input or {}).get("tts")
         if self._sfx_cache is None:
             bases = tuple(p for p in (BUNDLE_DIR, APP_DIR) if p)
-            self._sfx_cache = load_sfx_pair((self._cfg.text_input or {}).get("tts"), bases)
+            self._sfx_cache = load_sfx_pair(tts_cfg, bases)
+        # 绑定了音色就只在那个音色上播（`sfx_voice` 留空 = 任何音色都播，跟以前一样）。
+        # 每次调用都过一次闸 —— 用户在界面上换音色，下一条打字立刻生效，不用重启。
+        if not sfx_bound_to_voice(tts_cfg):
+            return b"", b""
         return self._sfx_cache
 
     def _push_sfx_open(self) -> None:

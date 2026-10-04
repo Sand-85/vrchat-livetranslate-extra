@@ -957,6 +957,155 @@ def test_tts_voice_list_includes_custom() -> bool:
     return ok
 
 
+def test_preset_fetch_on_demand() -> bool:
+    """范本音频不在本地时：点「试听范本 / 一键克隆」会先自动去仓库拉，**拉完自动继续**；
+    拉失败只如实提示，绝不硬播、绝不发克隆请求。"""
+    import wave
+
+    ok = True
+    fake = FakeVoiceLab()
+    with _gui() as (gui, _cfg_path, tmp):
+        fake.install()
+        real_find, real_fetch = vl.find_preset_sample, vl.fetch_preset_sample
+        try:
+            sample = tmp / "fetched_sample.wav"
+            with wave.open(str(sample), "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+                w.writeframes(bytes(24000 * 12 * 2))
+            fetched: list[str] = []
+
+            def find_miss(_app, _preset):
+                return None                                  # 本地没有 → 必须走拉取
+
+            def fetch_ok(_app, preset, **_kw):
+                fetched.append(preset.key)
+                return sample
+
+            gui._lab_presets = vl.all_clone_presets(gui_mod.APP_DIR)
+            vl.find_preset_sample = find_miss                    # type: ignore[assignment]
+            vl.fetch_preset_sample = fetch_ok                    # type: ignore[assignment]
+
+            # ① 试听 → 先拉 → 拉完自动播
+            played_before = len(PLAYED)
+            gui._on_lab_preset_preview()
+            cond = (len(fetched) == 1 and gui._lab_busy
+                    and "正在从仓库拉取范本音频" in gui._lab_status.cget("text"))
+            print(f"  试听 → 先发起拉取（状态：「{gui._lab_status.cget('text')[:22]}…」）  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+            for m in _drain(gui, 2.0):
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            for m in _drain(gui, 2.0):
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            cond = len(PLAYED) == played_before + 1
+            print(f"  拉到后自动继续播放（本地播 {len(PLAYED) - played_before} 次）  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ② 一键克隆 → 先拉 → 自动走克隆
+            fetched.clear()
+            gui._lab_audio = None
+            gui._on_lab_preset_clone()
+            for _ in range(3):
+                for m in _drain(gui, 1.5):
+                    if m[0] == "voice_lab":
+                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+            cond = (len(fetched) == 1 and len(fake.enrolled) == 1
+                    and fake.enrolled[0][0] == "my_clip_4x")
+            print(f"  一键克隆 → 先拉再克隆（请求 {len(fake.enrolled)} 次、"
+                  f"名字「{fake.enrolled[0][0] if fake.enrolled else '—'}」）  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ③ 拉取失败 → 只提示，不播、不发克隆请求
+            def fetch_dead(_app, _preset, **_kw):
+                raise vl.VoiceLabError("两个地址都不通")
+
+            vl.fetch_preset_sample = fetch_dead                 # type: ignore[assignment]
+            for m in _drain(gui, 0.6):              # 先清掉上一段残留的「播放完成」消息
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            played_before, enrolled_before = len(PLAYED), len(fake.enrolled)
+            gui._on_lab_preset_preview()
+            for m in _drain(gui, 1.5):
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            cond = (len(PLAYED) == played_before
+                    and "拉取范本音频失败" in gui._lab_status.cget("text"))
+            print(f"  拉取失败 → 只提示不硬播  {'OK' if cond else '✗'}")
+            ok &= cond
+            gui._on_lab_preset_clone()
+            for m in _drain(gui, 1.5):
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            cond = len(fake.enrolled) == enrolled_before
+            print(f"  拉取失败 → 一条克隆请求都不发  {'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            vl.find_preset_sample, vl.fetch_preset_sample = real_find, real_fetch
+            fake.restore()
+    return ok
+
+
+def test_sample_check_wiring() -> bool:
+    """启动查更新的接线：每次启动后台跑一次；**有更新才提示一句**；失败不上状态栏。"""
+    ok = True
+    fake = FakeVoiceLab()
+    with _gui() as (gui, _cfg_path, tmp):
+        fake.install()
+        real = vl.check_sample_updates
+        calls: list[object] = []
+        try:
+            # ① 有更新 → 状态栏提示一句
+            def updated(app_dir, presets=None, **kw):                # noqa: ANN001
+                calls.append(app_dir)
+                return ["source_sample_v2.wav"]
+
+            vl.check_sample_updates = updated                       # type: ignore[assignment]
+            gui._on_lab_done("sample_check", True, "", ["source_sample_v2.wav"])
+            cond = "范本样本已更新" in gui._lab_status.cget("text")
+            print(f"  有更新 → 状态「{gui._lab_status.cget('text')[:22]}」  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ② 没有更新 → 留原样（别刷状态）
+            gui._lab_set_status("原始状态")
+            gui._on_lab_done("sample_check", True, "", [])
+            cond = gui._lab_status.cget("text") == "原始状态"
+            print(f"  没更新 → 状态不变（{gui._lab_status.cget('text')}）  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ③ 启动挂钩：真起线程、真调用（失败也在内部兜住）
+            gui._kick_sample_check()
+            for _ in range(2):
+                for m in _drain(gui, 1.5):
+                    if m[0] == "voice_lab":
+                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+            cond = len(calls) == 1
+            print(f"  启动挂钩 → 后台调用 {len(calls)} 次  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ④ 查更新炸了 → 不弹状态栏（只在日志里）
+            def boom(*_a, **_kw):
+                raise vl.VoiceLabError("清单取不到")
+
+            vl.check_sample_updates = boom                          # type: ignore[assignment]
+            gui._lab_set_status("原始状态")
+            gui._kick_sample_check()
+            for _ in range(2):
+                for m in _drain(gui, 1.5):
+                    if m[0] == "voice_lab":
+                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+            cond = gui._lab_status.cget("text") == "原始状态"
+            print(f"  检查失败 → 不打扰（状态仍是「{gui._lab_status.cget('text')}」）  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            vl.check_sample_updates = real                          # type: ignore[assignment]
+            fake.restore()
+    return ok
+
+
 if __name__ == "__main__":
     print("test_voice_lab_gui:")
     print(" 1) 生成 → 列表 → 保存（model+voice 一起写）")
@@ -989,5 +1138,9 @@ if __name__ == "__main__":
     ok &= test_clone_preset_wiring()
     print("15) 打字译音下拉含自定义音色 + 切音色连带换模型")
     ok &= test_tts_voice_list_includes_custom()
+    print("16) 范本音频按需拉取（先拉后播 / 先拉后克隆 / 拉失败不硬来）")
+    ok &= test_preset_fetch_on_demand()
+    print("17) 启动查样本更新（有更新才提示 / 失败不打扰 / 挂钩真跑）")
+    ok &= test_sample_check_wiring()
     assert ok, "音色页接线用例失败（见上）"
     print("ALL PASSED")
