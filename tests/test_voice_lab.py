@@ -596,9 +596,9 @@ def test_preset_fetch() -> bool:
 
         got = vl.fetch_preset_sample(tmp, custom, opener=opener)
         cond = (got.is_file() and got.read_bytes() == raw and len(file_calls) == 1
-                and file_calls[0].startswith("https://raw.githubusercontent.com/")
-                and file_calls[0].endswith("vo_sample/t_fetch_sample.wav"))
-        print(f"  首次拉取 → {got.name}（{got.stat().st_size} 字节）、文件只请求首个地址  "
+                and file_calls[0].endswith("vo_sample/t_fetch_sample.wav")
+                and "jsdelivr" in file_calls[0])       # 快的镜像排在最前（raw 兜底且国内必超时）
+        print(f"  首次拉取 → {got.name}（{got.stat().st_size} 字节）、文件只请求首个（镜像）地址  "
               f"{'OK' if cond else '✗'}")
         ok &= cond
 
@@ -622,9 +622,10 @@ def test_preset_fetch() -> bool:
             vl.fetch_preset_sample(tmp, custom, opener=tampered)
             cond = False
         except vl.VoiceLabError as exc:
-            cond = ("sha256" in str(exc) and len(file_calls) == 2
+            want_calls = len(vl.preset_sample_urls(custom)) * vl.PRESET_FETCH_ATTEMPTS
+            cond = ("sha256" in str(exc) and len(file_calls) == want_calls
                     and not vl.preset_cache_path(tmp, custom).exists())
-            print(f"  sha 不符 → 拒绝、文件两个地址都试过、不落盘（{len(file_calls)} 次请求）  "
+            print(f"  sha 不符 → 拒绝、每个地址都试过（含重试 {len(file_calls)} 次请求）、不落盘  "
                   f"{'OK' if cond else '✗'}")
         ok &= cond
 
@@ -635,9 +636,10 @@ def test_preset_fetch() -> bool:
             vl.fetch_preset_sample(tmp, custom, opener=dead)
             cond = False
         except vl.VoiceLabError as exc:
-            cond = ("raw.githubusercontent.com" in str(exc) and "jsdelivr" in str(exc)
+            cond = (all(lbl in str(exc) or base in str(exc)
+                        for lbl, base in vl.PRESET_MIRRORS)
                     and "vo_sample/t_fetch_sample.wav" in str(exc))
-            print(f"  地址全挂 → 报错里两个文件地址都点名  {'OK' if cond else '✗'}")
+            print(f"  地址全挂 → 报错里每个镜像地址都点名  {'OK' if cond else '✗'}")
         ok &= cond
 
         empty = vl.ClonePreset(key="t_empty", label="空范本", spec="")

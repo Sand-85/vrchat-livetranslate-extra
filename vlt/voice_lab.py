@@ -775,21 +775,29 @@ def find_preset_sample(app_dir, preset: ClonePreset) -> Path | None:
 # 应用需要的时候才去取（启动时查一次更新；试听 / 一键克隆那一刻按需拉）。
 # ⚠️ **不在 `assets/` 里**：打包脚本只收 assets/testdata/config.example.yaml，放 assets 会被塞进 exe。
 # 拉回来落到 `APP_DIR/voices/`（与试听缓存同目录）→ 之后所有路径都是本地文件，不再联网。
-PRESET_RAW_BASE = ("https://raw.githubusercontent.com/Sand-85/vrchat-livetranslate-extra"
-                   "/main/vo_sample/")
-# 兜底镜像：GitHub raw 在国内常被掐，jsDelivr 一般能通（同一份 git 内容，@main 跟分支走）
-PRESET_CDN_BASE = ("https://cdn.jsdelivr.net/gh/Sand-85/vrchat-livetranslate-extra"
-                   "@main/vo_sample/")
+_REPO = "Sand-85/vrchat-livetranslate-extra"
+# ⚠️ 顺序是**实测**定的（2026-10-04，本机走代理）：
+#   fastly.jsdelivr 1.0s ✓ / cdn.jsdelivr 2.9s ✓ / ghproxy.net 40s ✓ / **raw 每次 60s 超时 ✗**（国内被掐）。
+# 所以 raw 放**最后**只当兜底 —— 放前面会让国内用户每次都白等一分钟（第一次真链路验证就是这么撞的）。
+PRESET_MIRRORS: tuple[tuple[str, str], ...] = (
+    ("fastly.jsdelivr", f"https://fastly.jsdelivr.net/gh/{_REPO}@main/vo_sample/"),
+    ("cdn.jsdelivr", f"https://cdn.jsdelivr.net/gh/{_REPO}@main/vo_sample/"),
+    ("ghproxy", f"https://ghproxy.net/https://raw.githubusercontent.com/{_REPO}/main/vo_sample/"),
+    ("github-raw", f"https://raw.githubusercontent.com/{_REPO}/main/vo_sample/"),
+)
+PRESET_RAW_BASE = PRESET_MIRRORS[-1][1]        # 兼容旧引用（= 兜底的 github raw）
+PRESET_CDN_BASE = PRESET_MIRRORS[1][1]         # 兼容旧引用（= cdn.jsdelivr）
+PRESET_FETCH_ATTEMPTS = 2                      # 每个地址试几次（实测有一次偶发断流）
 PRESET_MAX_BYTES = 20 * 1024 * 1024
 SAMPLE_MANIFEST_NAME = "manifest.json"      # 清单：远端样本的 sha256（启动查更新的依据）
 
 
 def preset_sample_urls(preset: ClonePreset) -> list[str]:
-    """按顺序试的下载地址（raw 在前、CDN 兜底）。"""
+    """按顺序试的下载地址（镜像顺序见 `PRESET_MIRRORS`：快的在前、raw 兜底）。"""
     name = str(preset.sample_name or "").strip()
     if not name:
         return []
-    return [PRESET_RAW_BASE + name, PRESET_CDN_BASE + name]
+    return [base + name for _label, base in PRESET_MIRRORS]
 
 
 def preset_cache_path(app_dir, preset: ClonePreset) -> Path:
@@ -838,41 +846,67 @@ def fetch_preset_sample(app_dir, preset: ClonePreset, *, opener=None,
     except Exception as exc:                                         # noqa: BLE001
         print(f"[voice_lab] 取清单失败（就按内置 sha 校验）：{type(exc).__name__}: {exc}",
               flush=True)
-    problems: list[str] = []
-    for url in urls:
-        try:
-            raw = _http_get_bytes(url, timeout=timeout, opener=opener)
-        except Exception as exc:                                     # noqa: BLE001
-            problems.append(f"{url} → {type(exc).__name__}: {exc}")
-            continue
-        got = hashlib.sha256(raw).hexdigest()
-        if allowed and got not in allowed:
-            # 镜像串味 / 半截文件 / 被人换过 —— 一律不要，试下一个地址
-            problems.append(f"{url} → sha256 不符（期望 {'/'.join(sorted(x[:12] for x in allowed))}…，"
-                            f"实得 {got[:12]}…）")
-            continue
-        dest = preset_cache_path(app_dir, preset)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(raw)
-        print(f"[voice_lab] 范本音频已拉取：{dest.name}（{len(raw) / 1024:.0f} KB，来自 {url}）",
-              flush=True)
-        return dest
-    raise VoiceLabError("拉取范本音频失败：" + "；".join(problems or ["没有可用地址"]))
+    try:
+        raw = _first_verified(urls, allowed, timeout=timeout, opener=opener)
+    except VoiceLabError as exc:
+        raise VoiceLabError(f"拉取范本音频失败：{exc}") from exc
+    dest = preset_cache_path(app_dir, preset)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(raw)
+    print(f"[voice_lab] 范本音频已拉取：{dest.name}（{len(raw) / 1024:.0f} KB）", flush=True)
+    return dest
 
 
 def sample_manifest_urls() -> list[str]:
-    """清单的两个候选地址（raw → CDN）。"""
-    return [PRESET_RAW_BASE + SAMPLE_MANIFEST_NAME, PRESET_CDN_BASE + SAMPLE_MANIFEST_NAME]
+    """清单的候选地址（与样本同一套镜像顺序）。"""
+    return [base + SAMPLE_MANIFEST_NAME for _label, base in PRESET_MIRRORS]
 
 
-def _get_first(urls, *, timeout: float, opener=None) -> bytes:
-    """按顺序试这些地址，返回第一个取到的字节；全挂则抛（错误里点名每个地址）。"""
+def _get_first(urls, *, timeout: float, opener=None,
+               attempts: int = PRESET_FETCH_ATTEMPTS) -> bytes:
+    """按顺序试这些地址，返回第一个取到的字节；全挂则抛（错误里点名每个地址）。
+
+    每个地址试 `attempts` 次 —— 真链路实测遇到过一次「连接被对端重置」的偶发断流，
+    重试一次就过了；重试之间的间隔很短（0.4s），不值得为它搞退避。
+    """
     problems: list[str] = []
     for url in urls:
-        try:
-            return _http_get_bytes(url, timeout=timeout, opener=opener)
-        except Exception as exc:                                     # noqa: BLE001
-            problems.append(f"{url} → {type(exc).__name__}: {exc}")
+        for attempt in range(max(1, attempts)):
+            if attempt:
+                time.sleep(0.4)
+            try:
+                return _http_get_bytes(url, timeout=timeout, opener=opener)
+            except Exception as exc:                                 # noqa: BLE001
+                last = f"{url} → {type(exc).__name__}: {exc}"
+                if attempt == attempts - 1:
+                    problems.append(last)
+    raise VoiceLabError("；".join(problems or ["没有可用地址"]))
+
+
+def _first_verified(urls, allowed: set[str], *, timeout: float, opener=None,
+                    attempts: int = PRESET_FETCH_ATTEMPTS) -> bytes:
+    """按顺序取，**每个地址最多试 attempts 次，每次都要 sha 对得上**才收。
+
+    两层循环都留着是有原因的（真链路实测）：偶发断流 → 同一地址重试就过；
+    CDN 缓存串味/半截文件 → 同一地址重试无用，得换下一个镜像。
+    """
+    problems: list[str] = []
+    for url in urls:
+        for attempt in range(max(1, attempts)):
+            if attempt:
+                time.sleep(0.4)
+            try:
+                raw = _http_get_bytes(url, timeout=timeout, opener=opener)
+            except Exception as exc:                                 # noqa: BLE001
+                if attempt == attempts - 1:
+                    problems.append(f"{url} → {type(exc).__name__}: {exc}")
+                continue
+            got = hashlib.sha256(raw).hexdigest()
+            if not allowed or got in allowed:
+                return raw
+            if attempt == attempts - 1:
+                problems.append(f"{url} → sha256 不符（期望 "
+                                f"{'/'.join(sorted(x[:12] for x in allowed))}…，实得 {got[:12]}…）")
     raise VoiceLabError("；".join(problems or ["没有可用地址"]))
 
 
@@ -916,14 +950,9 @@ def check_sample_updates(app_dir, presets=None, *, opener=None,
         if not urls:
             continue
         try:
-            raw = _get_first(urls, timeout=timeout, opener=opener)
+            raw = _first_verified(urls, {want}, timeout=timeout, opener=opener)
         except VoiceLabError as exc:
             print(f"[voice_lab] 范本样本 {name} 下载失败：{exc}", flush=True)
-            continue
-        got = hashlib.sha256(raw).hexdigest()
-        if got != want:
-            print(f"[voice_lab] 范本样本 {name} 下载后 sha 不符（期望 {want[:12]}…，"
-                  f"实得 {got[:12]}…），跳过这一次", flush=True)
             continue
         dest = preset_cache_path(app_dir, p)
         dest.parent.mkdir(parents=True, exist_ok=True)
