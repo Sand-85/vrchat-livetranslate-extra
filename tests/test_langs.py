@@ -17,14 +17,26 @@
   zh→th 译文 `สวัสดี, ฉันคือ Nixi. วันนี้เราจะมาทดสอบกัน …`
   th→zh 译文 `你好，我叫尼克西。很高兴认识你。今天天气很好。`
 文本腿 `qwen-mt-flash`（zh↔th / en↔th 四条）与 `qwen3-tts-flash` 也都能处理 th。
-实测背景（2026-10-04）：用户要求加意大利语（it）。**文档级支持已核实** ——
-`qwen3-livetranslate-flash` 的 18 语种表里 `it` Italian 标注为「音频+文本」输出；
-内置音色 `Cherry`/`Nofish` 的支持语言表也明确含 Italian；文本腿 `qwen-mt-flash`（92 语种）
-与 `qwen3-tts-flash` 的 `LANG_NAMES` 同样认 `it`。意大利语是拉丁字母，不像泰语那样
-要额外处理字体（无需 `test_thai_font.py` 那类字形守卫）。
 泰语比俄语多一层风险：**默认 CJK 字体（微软雅黑）不含泰文字形**，界面选得到、
 模型也翻得出，画到手腕屏上却是静默的豆腐块 —— 那一层由 `tests/test_thai_font.py`
 用位图比对钉住，本文件只守「语言表两侧都登记了 th」。
+
+实测背景（2026-10-04）：用户要求加意大利语（it）。**真链路实测通过** ——
+
+  语音腿 zh→it：源「你好，我叫 SAND。今天我们测试意大利语的翻译。」→
+    译文 `Ciao. Mi chiamo Sand.`（模型自带音频 2.08s；探针只取到第一个 turn 的译文，
+    是探针按句喂、每个 turn 各出一段响应所致 —— 同一句文本腿译全了，见下）
+  语音腿 it→zh：把上面那段意大利语音频**回喂** → `你好！`（往返闭环：模型认得出自己的意大利语）
+  文本腿 `qwen-mt-flash`：zh→it `Ciao, mi chiamo SAND. Oggi testiamo la traduzione in italiano.`
+    ／ it→zh `你好。我叫桑德。`
+  自定义音色（**文档没覆盖的那一半**）：设计族与复刻族**都能说意大利语** ——
+    `clear_auto`（vd，5.52s）与 `MetroPolice`（vc，4.72s）各合成
+    `Ciao, mi chiamo SAND. Questa è una prova della voce in italiano.`，
+    `qwen3-asr-flash` 转写逐字正确（连 `è` 的重音都对）。
+
+文档级依据：`qwen3-livetranslate-flash` 的 18 语种表里 `it` Italian 标注「音频+文本」；
+内置音色 `Cherry`/`Nofish` 的支持语言表含 Italian。意大利语是拉丁字母，
+不像泰语那样要字形守卫（无需 `test_thai_font.py` 那类处理）。
 """
 from __future__ import annotations
 
