@@ -687,8 +687,12 @@ class TranslationGUI:
 
         if not headless:
             self._build_ui()
-            self._kick_tts_voice_list()   # 后台拉一次本账号自定义音色（只读、免费）
-            self._kick_sample_check()     # 每次启动查一次范本样本更新（只读、几 KB）
+            # ⚠️ 两个后台维护动作都用 `after()` **延迟**触发，别在构造里直接起线程：
+            #    它们持着 GUI 的绑定方法，而 CI 那些「真开窗口」的用例不跑 mainloop →
+            #    `after` 永不触发（干净）；真跑时启动几秒后才联网，也避开启动高峰。
+            #    （之前直接起线程，把 Tk 拆卸竞态 `Tcl_AsyncDelete` 的间歇红放大了。）
+            self._root.after(4000, self._kick_tts_voice_list)   # 拉本账号自定义音色（只读、免费）
+            self._root.after(4500, self._kick_sample_check)     # 查范本样本更新（只读、几 KB）
 
     # ================================================================ UI 构建
 
