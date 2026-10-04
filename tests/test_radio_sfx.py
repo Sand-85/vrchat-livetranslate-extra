@@ -372,6 +372,56 @@ def test_gain_is_hot_reloadable() -> None:
     return ok
 
 
+
+def test_fresh_install_gets_sfx_for_metropolice() -> None:
+    """★ 新用户开箱即用：示例配置（= 新装时生成的 config.yaml）里开关音**必须是开着的**，
+    且只绑在 MetroPolice 这一族上。
+
+    这条钉的是「下载应用的人克隆完 MetroPolice 就能听到电台音」这个承诺：
+      ① 示例里三个键要**active**（不是注释）—— 新用户的配置是从它复制出来的；
+      ② `sfx_voice` 要用**家族基名**，否则别人克隆出来的 id（时间戳/后缀都不同）匹配不上；
+      ③ 引用的素材文件在仓库/打包目录里真的存在（相对路径两边都能解析）。
+    """
+    import yaml
+
+    from vlt.sfx import bound_to_current_voice, load_pair
+
+    ok = True
+    template = yaml.safe_load((ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+    tts = ((template.get("text_input") or {}).get("tts")) or {}
+
+    cond = bool(tts.get("open_sfx")) and bool(tts.get("close_sfx"))
+    print(f"    示例里开关音是开着的（open={tts.get('open_sfx')!r} close={tts.get('close_sfx')!r}）  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+
+    want = str(tts.get("sfx_voice") or "")
+    cond = want == "qwen-tts-vc-MetroPolice"
+    print(f"    sfx_voice 用家族基名（{want!r}）  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # 别人克隆出来的（时间戳/后缀全不同）→ 要播；别的音色 → 不播
+    foreign = "qwen-tts-vc-MetroPolice-voice-20261111101010101-dead"
+    other = "qwen-tts-vc-quiet_a-voice-20260927014134692-29ce"
+    cond = (bound_to_current_voice({"sfx_voice": want, "voice": foreign})
+            and not bound_to_current_voice({"sfx_voice": want, "voice": other}))
+    print(f"    别人克隆的 MetroPolice → 播，换成别的音色 → 不播  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # 素材真的找得到（源码运行 = 仓库根；exe = _MEIPASS，两者都按相对路径找）
+    opener, closer = load_pair(tts, (ROOT,))
+    cond = bool(opener) and bool(closer)
+    print(f"    素材能解析到（开头音 {len(opener)} 字节 / 结尾音 {len(closer)} 字节）  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+
+    # 增益也带了（否则新用户会被默认音量吵到）
+    cond = float(tts.get("sfx_gain", 0) or 0) > 0
+    print(f"    sfx_gain 随示例下发（{tts.get('sfx_gain')!r}）  {'OK' if cond else '✗'}")
+    ok &= cond
+    return ok
+
+
 def main() -> int:
     results = [
         ("读任意格式 → 24k 单声道", test_read_wav_any_format()),
@@ -383,6 +433,7 @@ def main() -> int:
         ("增益读取与留痕", test_gain_of_reads_config_and_traces()),
         ("load_pair 真应用增益 + 配置归一化", test_load_pair_applies_gain_and_config_normalizes()),
         ("音量热更（改 sfx_gain 不用重启）", test_gain_is_hot_reloadable()),
+        ("新用户开箱即有开关音（绑 MetroPolice）", test_fresh_install_gets_sfx_for_metropolice()),
     ]
     bad = [n for n, r in results if not r]
     print("ALL PASSED" if not bad else f"FAILED: {', '.join(bad)}")
