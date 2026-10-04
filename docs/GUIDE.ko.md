@@ -287,6 +287,8 @@ session:
   voice: Tina                 # ⚠️ 반드시 명시. 비우면 Voice 'Chelsie' is not supported 오류
   turn_detection: null        # 비움 = 서버 기본값
   final_silence_s: 3.0        # ⚠️ 서버 증분 간격(실측 최대 2.3s)보다 커야 합니다. 줄이면 문장 중간에 최종본이 튀어나옵니다
+  fast_final_silence_s: 1.1   # 빠른 확정: 상류도 조용하면(아무도 말하지 않으면) 이 텍스트 무음 시간에 확정(약 1.8s 단축). null = 끄기
+  fast_final_user_quiet_s: 0.5  # "아무도 말하지 않음" 판정은 **레벨** 기준. 주변 소음이 임계값을 계속 넘으면 위 3.0s로 퇴화
   max_new_sessions_per_minute: 4   # RPM 10 예산: WS 연결 1회 = 요청 1회로 계산
   reconnect_backoff: [2, 5, 10, 30]
 
@@ -435,6 +437,7 @@ output:
 | `Invalid translation parameter` | `session.update` 에 `translation` 필드가 없습니다(코드에서 보장됨. 수정할 때 주의) |
 | `1007 Requests rate limit exceeded` | RPM 10에 도달했습니다. 1분 기다리세요. 자주 재시작하지 마세요(**WS 연결 1회마다 요청 1회**로 계산됩니다) |
 | 번역이 문장 중간에서 멈춤 | 무음 폴백 임계값이 낮아졌습니다. `session.final_silence_s` 는 2.3s보다 커야 합니다(기본 3.0) |
+| 말을 마치고 최종본까지 ~3s 걸림 | 빠른 확정이 꺼져 있거나(`session.fast_final_silence_s: null`) 동작하지 않음. 판정은 **레벨** 기준이라 시끄러운 환경에서는 위 3.0s로 퇴화(보수적, 중간에 확정하지 않음) |
 | `[overlay] ⚠️ SteamVR not running or unavailable` | 정상적인 성능 저하입니다. 손목 오버레이만 안 나오고 chatbox에는 영향이 없습니다 |
 | 손목 오버레이가 안 보임 | 먼저 SteamVR이 실행 중인지 확인하고, "미세 조정"에서 위치/크기를 조절하세요. `--overlay-dry-run` 으로 PNG가 나오면 렌더링 자체는 정상입니다 |
 | 잠시 뒤 손목 오버레이가 사라짐 | 2단계 자가 치유가 들어 있습니다(3회 연속 실패 → 오버레이 재구성 → 다시 3회 → openvr 연결 하드 재시작 → 이후 50회에 1회만 재시도). 로그에 30초마다 `[overlay][diag] heartbeat: …` 줄이 있어 "마지막 성공 이후 경과 시간 / 재구성 횟수"를 볼 수 있습니다 |

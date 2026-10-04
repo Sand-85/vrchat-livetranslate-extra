@@ -261,6 +261,14 @@ STOP_WAIT_S = 5.0              # 单个引擎；收尾线程**逐个**等，两�
 CLOSE_WAIT_STOP_S = 6.0        # 关窗时**界面最多**等这么久，等不到就直接关
 #                              （上面的收尾线程是 daemon，进程退出会释放麦克风/虚拟声卡）
 
+# ---- 桌面字幕（PC 桌面模式那块屏幕叠加窗）的滑块范围 ----
+# ⚠️ 与上面手腕屏的「微调」参数**各自独立**：桌面字幕是屏幕像素面板，单位/场景都不同，
+#    配置不许共享（2026-10-04 维护者口径）。
+FONT_MIN, FONT_MAX = 12, 96            # 译文字号（px）
+SRC_FONT_MIN = 8                       # 原文字号下限（上限同 FONT_MAX）
+PANEL_W_MIN, PANEL_W_MAX = 320, 2560   # 面板宽（px）
+PANEL_H_MIN, PANEL_H_MAX = 120, 900    # 面板高（px）
+
 SETTINGS_CHROME_H = 66         # tab 条 + 页面上下留白：算窗高时在内容高度上加这一份
 # 每页内容 frame 的左右内边距（内容区位置固定，不随标签条动）
 TAB_INSET_X = 20
@@ -314,9 +322,13 @@ def updater_env() -> dict[str, str]:
     `OWD` / `ARGV0` 也要剥掉，让新 AppImage 干干净净地自己挂载。
     （`PYTHONPATH` 不清：AppRun 是**追加**而不是覆盖继承值，新挂载的路径排在前面，
     清掉反而会抹掉用户自己设的东西。）
+
+    ⚠️ 还有第三条（`platform.child_env()`）：PyInstaller 会把包内目录前置进
+    `LD_LIBRARY_PATH`。更新器是宿主程序、新实例自己会重新挂载 —— 都不能带着父进程
+    「旧挂载点」的库搜索路径去启动（那目录马上随父进程消失，路径还排在前面）。
     """
     strip = ("_MEI", "_PYI_", "APPIMAGE", "APPDIR", "OWD", "ARGV0")
-    return {k: v for k, v in os.environ.items() if not k.startswith(strip)}
+    return {k: v for k, v in platform.child_env().items() if not k.startswith(strip)}
 
 
 def _source_name(code: str | None) -> str:
@@ -363,6 +375,11 @@ def _font_spec_key(font_spec) -> object:
         return tuple(font_spec)
     except TypeError:
         return str(font_spec)
+
+
+def _int_fmt(v: float) -> str:
+    """桌面字幕滑块值标签的统一格式（字号 / 像素尺寸都是整数）。"""
+    return f"{int(round(v))}"
 
 
 def _char_width_for(text: str, font_spec, minimum: int = 0) -> int:
@@ -1091,11 +1108,6 @@ class TranslationGUI:
         tk.Checkbutton(out_frame, text=t("手腕屏"), variable=self._overlay_var,
                        command=self._on_overlay_toggle,
                        **self._indicator_kw()).pack(side=tk.LEFT, padx=(10, 0))
-        # 微调按钮紧跟「手腕屏」勾选：它是手腕屏的从属工具，放远了看不出归属
-        self._tune_btn = ttk.Button(out_frame, text=t("微调 ▸"),
-                                    width=_char_width_for(t("微调 ▸"), FONT_UI, 7),
-                                    command=self._toggle_tune_panel)
-        self._tune_btn.pack(side=tk.LEFT, padx=(4, 0))
         tk.Checkbutton(out_frame, text=t("译音输出"), variable=self._vmic_var,
                        command=self._save_audio_flag,
                        **self._indicator_kw()).pack(side=tk.LEFT, padx=(10, 0))
@@ -1105,13 +1117,9 @@ class TranslationGUI:
         tk.Checkbutton(out_frame, text=t("桌面字幕"), variable=self._desktop_var,
                        command=self._on_desktop_toggle,
                        **self._indicator_kw()).pack(side=tk.LEFT, padx=(10, 0))
-
-        # 微调面板：外层常驻（保证位置固定），只切换内层 body 的显隐——
-        # 若整块 pack_forget 再 pack，会被排到窗口最底部去。
-        self._tune_frame = ttk.Frame(self._root, padding=(14, 0))
-        self._tune_frame.pack(fill=tk.X)
-        self._tune_body = ttk.Frame(self._tune_frame)
-        self._build_tune_body()
+        # 手腕屏微调 / 桌面字幕调整这两块**不在这里**：它们是「设一次就不再动」的参数，
+        # 收进「⚙ 设置」弹窗（设置 → 手腕屏 / 设置 → 桌面字幕）—— 2026-10-04 维护者口径。
+        # 弹出的字幕窗 / 手腕屏会按 config.yaml **热重载**，在设置里拖完即时生效。
 
     @staticmethod
     def _indicator_kw() -> dict:
@@ -1390,36 +1398,13 @@ class TranslationGUI:
                   flush=True)
 
     # ---------------------------------------------------------------- 手腕屏微调
-    def _toggle_tune_panel(self) -> None:
-        """展开/收起微调面板（只切内层 body，外层常驻以固定位置）。
+    def _build_tune_page(self, body: ttk.Frame) -> None:
+        """「设置 → 手腕屏」页：滑块改动 → 写回 config.yaml → overlay 热重载（无需重启）。
 
-        展开时同步把窗口加高：否则聊天区被面板挤扁（实测 434px → 329px），
-        而调参时正需要一边看译文一边拖。
-        """
-        win_h = self._root.winfo_height()
-        win_w = self._root.winfo_width()
-        if self._tune_body.winfo_ismapped():
-            self._tune_body.pack_forget()
-            # ⚠️ 只 pack_forget 不够：Tk 不会重算空 frame 的高度（实测 reqheight 仍停在 106），
-            # 那 106px 会一直占着把聊天区压扁。必须显式关掉传播并把高度压到 0。
-            self._tune_frame.pack_propagate(False)
-            self._tune_frame.configure(height=1)
-            self._tune_btn.configure(text=t("微调 ▸"))
-            new_h = max(self._root.minsize()[1], win_h - getattr(self, "_tune_added_h", 0))
-        else:
-            self._tune_frame.pack_propagate(True)
-            self._tune_body.pack(fill=tk.X)
-            self._tune_btn.configure(text=t("微调 ▾"))
-            self._root.update_idletasks()
-            self._tune_added_h = self._tune_body.winfo_reqheight() + 8
-            new_h = win_h + self._tune_added_h
-        self._root.geometry(f"{win_w}x{new_h}")
+        参数全都能拖：锚点 + 位置/旋转/大小/弯曲/透明度/字号/面板高/两块不透明度。
 
-    def _build_tune_body(self) -> None:
-        """手腕屏微调：滑块改动 → 写回 config.yaml → overlay 配置热重载（无需重启）。
-
-        面板做成**可收起**的（默认收起）：它是调试期工具，平时不该占屏幕，
-        但参数全都要能拖——位置/旋转/大小/弯曲/透明度 + 锚点。
+        为什么在设置里而不是主界面（2026-10-04 维护者口径）：这些是**设一次就不再动**
+        的参数，常驻主界面只占地方；字幕面板本身按 config.yaml 热重载，改完即时生效。
         """
         ov = self._cfg.overlay if isinstance(self._cfg.overlay, dict) else {}
         off = ov.get("offset") or {}
@@ -1454,7 +1439,7 @@ class TranslationGUI:
         }
         self._ov_save_job: str | None = None
 
-        row = ttk.Frame(self._tune_body)
+        row = ttk.Frame(body)
         row.pack(fill=tk.X, pady=(2, 2))
         ttk.Label(row, text=t("锚点:"), font=FONT_UI).pack(side=tk.LEFT)
         self._anchor_combo = ttk.Combobox(row, values=list(self._anchor_label_to_key),
@@ -1476,9 +1461,6 @@ class TranslationGUI:
         ttk.Label(row, text=t("（仅锚点=外部 tracker 时有效）"),
                   font=FONT_STATUS, foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(10, 0))
 
-        grid = ttk.Frame(self._tune_body)
-        self._tune_grid = grid      # 供测试按控件树定位 specs 那批滑块（本面板还挂着桌面字幕的滑块）
-        grid.pack(fill=tk.X, pady=(2, 2))
         specs = [
             ("pos_x", t("位置X"), -0.30, 0.30, 0.005, "m"),
             ("pos_y", t("位置Y"), -0.30, 0.30, 0.005, "m"),
@@ -1501,14 +1483,36 @@ class TranslationGUI:
         # 标签宽度按**当前语言**最长的那条算：中文是 3-4 字（width=6 够），
         # 但英语 "Curvature"、俄语 "Размер оригинала" 会被 6 字宽截断 ——
         # 俄语下「Позиция X/Y/Z」全挤成「Позиц.」，三个位置参数根本分不出来（实测）。
-        # 标签长到放不下三列时自动降成两列，宁可面板高一点，也不裁字。
         label_w = max(6, max(_char_width_for(spec[1], FONT_UI) for spec in specs))
-        cols = 3 if label_w <= 9 else 2
         # 切锚点要把该锚点那一份位姿**回填到滑块**上（见 _load_anchor_offset），
         # 所以 var / 值标签都得留个引用。
         self._tune_vars: dict[str, tk.DoubleVar] = {}
         self._tune_lbls: dict[str, ttk.Label] = {}
         self._tune_units: dict[str, str] = {}
+        # 一页放几列：**让 Tk 自己量**（先按 3 列建出来，装不下就降列重建）。
+        # 这一页现在挂在设置弹窗里（宽度固定 760）：俄语统一标签宽 26 字符，三列 768px
+        # 顶破 756px 的内容区，最右边那列的值标签会被裁（实测）。宁可页面高一点，不裁字。
+        _avail = SETTINGS_WIDTH - 2 * TAB_INSET_X - 24
+        grid = None
+        for cols in (3, 2, 1):
+            if grid is not None:            # 换列重来：先把上一版拆掉、引用清空，再建新的
+                grid.destroy()
+                self._tune_vars, self._tune_lbls, self._tune_units = {}, {}, {}
+            candidate = ttk.Frame(body)
+            self._build_tune_grid(candidate, specs, label_w, cols)
+            body.update_idletasks()
+            grid = candidate
+            if candidate.winfo_reqwidth() <= _avail or cols == 1:
+                break                        # 装得下（或已降到一列）：这一版就是最终版
+        self._tune_grid = grid        # 供测试按控件树定位 specs 那批滑块
+        grid.pack(fill=tk.X, pady=(2, 2))
+
+        # ⚠️ 桌面字幕的参数**不在这里**：那是屏幕上的一块像素面板，与手腕屏（VR 贴图）
+        # 完全独立，界面也在「设置 → 桌面字幕」另一页，见 _build_desktop_tune_page()。
+
+    def _build_tune_grid(self, grid: ttk.Frame, specs: list[tuple], label_w: int,
+                         cols: int) -> None:
+        """把 specs 那批「标签 + 滑块 + 值」按 `cols` 列铺进 `grid`（可重复调用重建）。"""
         for i, (key, label, lo, hi, res, unit) in enumerate(specs):
             row_i, col_i = divmod(i, cols)
             cell = ttk.Frame(grid)
@@ -1521,30 +1525,84 @@ class TranslationGUI:
                      variable=var, showvalue=False, length=104, width=10,
                      bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
                      highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
-                     command=self._make_tune_handler(key, var, val_lbl, unit)).pack(side=tk.LEFT, padx=(4, 6))
+                     command=self._make_tune_handler(key, var, val_lbl, unit)).pack(
+                         side=tk.LEFT, padx=(4, 6))
             val_lbl.pack(side=tk.LEFT)
             self._tune_vars[key] = var
             self._tune_lbls[key] = val_lbl
             self._tune_units[key] = unit
 
-        # 桌面字幕（PC 桌面模式）：只需要「透明度 + 拖动解锁」两件，与上面那堆 VR 参数
-        # 无关；放在同一块「微调」里，用户不用记两处入口。
-        #
-        # ⚠️ 滑块初值必须与**窗口真实透明度同源**：窗口那侧是
-        #    `DesktopOverlayConfig.from_dict(desktop_overlay 段, overlay 段)` 解析出来的
-        #    （desktop_overlay.alpha → overlay.alpha → 默认值）。只读本段的 alpha 会让
-        #    「overlay.alpha=0.5 且没写 desktop_overlay.alpha」的用户看到滑块停在 0.90、
-        #    而窗口其实是 0.50 —— 更糟的是碰一下滑块就把 0.90 写回配置（透明度突然变了）。
+    def _build_desktop_tune_page(self, body: ttk.Frame) -> None:
+        """「设置 → 桌面字幕」页：桌面字幕**自己**的一套参数（与手腕屏互不影响）。
+
+        与「设置 → 手腕屏」互不影响：这里只写 `desktop_overlay:` 段自己的键，
+        字幕窗 50ms 一跳热重载 → 拖完 300ms 落盘即生效，不用重启。
+
+        为什么要有这一块：桌面面板与手腕屏**不是一回事**（屏幕像素 vs VR 贴图、
+        使用场景/分辨率都不同），配置不许共享，界面入口也就不许共用（2026-10-04）。
+        """
         from .output.desktop_overlay import DesktopOverlayConfig
-        _dcfg = DesktopOverlayConfig.from_dict(self._desktop_cfg(),
-                                               visual=self._cfg.overlay or {})
-        drow = ttk.Frame(self._tune_body)
-        drow.pack(fill=tk.X, pady=(6, 2))
-        ttk.Label(drow, text=t("桌面字幕"), font=FONT_UI).pack(side=tk.LEFT)
+
+        _dcfg = DesktopOverlayConfig.from_dict(self._desktop_cfg())
+        self._desktop_tuned: set[str] = set()
+        # 值标签：宽度按文案实测换算、并给足余量（width=N 的单位是字体平均字符宽，
+        # 写死会被 test_i18n 的「固定宽度控件会裁字」守卫判红，而 Linux runner 的字体更宽 ——
+        # 实测 '1.00×' 在那边量出 7、本机 Windows 只量出 6；4 位数字在那边量出 6）。
+        _w_num = max(_char_width_for("0000", FONT_UI, 8), _char_width_for("000", FONT_UI, 8))
+        _w_alpha = _char_width_for("0.00", FONT_UI, 5)
+
+        grid = ttk.Frame(body)
+        grid.pack(fill=tk.X, pady=(4, 2))
+
+        def _slider(cell, label, lo, hi, res, value, width, cmd):
+            """一个「标签 + 滑块 + 值」单元；返回它的值标签（供回调更新）。"""
+            ttk.Label(cell, text=label, font=FONT_UI).pack(side=tk.LEFT)
+            var = tk.DoubleVar(value=float(value))
+            lbl = ttk.Label(cell, text="", font=FONT_STATUS, foreground=TEXT_DIM, width=width)
+            tk.Scale(cell, from_=lo, to=hi, resolution=res, orient=tk.HORIZONTAL,
+                     variable=var, showvalue=False, length=104, width=10,
+                     bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
+                     highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
+                     command=cmd).pack(side=tk.LEFT, padx=(4, 6))
+            lbl.pack(side=tk.LEFT)
+            return var, lbl
+
+        # 第 1 行：字号（译文 / 原文）
+        r1 = ttk.Frame(grid)
+        r1.grid(row=0, column=0, sticky="w", padx=(0, 24), pady=1)
+        c = ttk.Frame(r1)
+        c.pack(side=tk.LEFT)
+        self._desktop_font_var, self._desktop_font_lbl = _slider(
+            c, t("译文字号"), FONT_MIN, FONT_MAX, 1, _dcfg.font_size, _w_num,
+            self._on_desktop_font)
+        c2 = ttk.Frame(r1)
+        c2.pack(side=tk.LEFT, padx=(16, 0))
+        self._desktop_srcfont_var, self._desktop_srcfont_lbl = _slider(
+            c2, t("原文字号"), SRC_FONT_MIN, FONT_MAX, 1, _dcfg.source_font_size, _w_num,
+            self._on_desktop_srcfont)
+
+        # 第 2 行：面板尺寸（宽 / 高，像素）
+        r2 = ttk.Frame(grid)
+        r2.grid(row=1, column=0, sticky="w", padx=(0, 24), pady=1)
+        c = ttk.Frame(r2)
+        c.pack(side=tk.LEFT)
+        self._desktop_w_var, self._desktop_w_lbl = _slider(
+            c, t("面板宽度"), PANEL_W_MIN, PANEL_W_MAX, 10, _dcfg.size_px[0], _w_num,
+            self._on_desktop_width)
+        c2 = ttk.Frame(r2)
+        c2.pack(side=tk.LEFT, padx=(16, 0))
+        self._desktop_h_var, self._desktop_h_lbl = _slider(
+            c2, t("面板高度"), PANEL_H_MIN, PANEL_H_MAX, 10, _dcfg.size_px[1], _w_num,
+            self._on_desktop_height)
+
+        # 第 3 行：透明度 + 拖动解锁
+        r3 = ttk.Frame(grid)
+        r3.grid(row=2, column=0, sticky="w", padx=(0, 24), pady=1)
+        ttk.Label(r3, text=t("透明度"), font=FONT_UI).pack(side=tk.LEFT)
         self._desktop_alpha_var = tk.DoubleVar(value=float(_dcfg.alpha))
-        self._desktop_alpha_lbl = ttk.Label(drow, text=f"{self._desktop_alpha_var.get():.2f}",
-                                            font=FONT_STATUS, foreground=TEXT_DIM, width=5)
-        tk.Scale(drow, from_=0.20, to=1.00, resolution=0.05, orient=tk.HORIZONTAL,
+        self._desktop_alpha_lbl = ttk.Label(r3, text=f"{self._desktop_alpha_var.get():.2f}",
+                                            font=FONT_STATUS, foreground=TEXT_DIM, width=_w_alpha)
+        tk.Scale(r3, from_=0.20, to=1.00, resolution=0.05, orient=tk.HORIZONTAL,
                  variable=self._desktop_alpha_var, showvalue=False, length=104, width=10,
                  bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
                  highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
@@ -1552,13 +1610,43 @@ class TranslationGUI:
         self._desktop_alpha_lbl.pack(side=tk.LEFT)
         # 按钮文案会在「解锁拖动 / 锁定位置」之间切，宽度按两者里更长的算，免得不换语言也裁字
         self._desktop_drag_btn = ttk.Button(
-            drow, text=t("解锁拖动"),
+            r3, text=t("解锁拖动"),
             width=max(_char_width_for(t("解锁拖动"), FONT_UI, 6),
                       _char_width_for(t("锁定位置"), FONT_UI, 6)),
             command=self._toggle_desktop_drag)
-        self._desktop_drag_btn.pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Label(drow, text=t("（字幕窗默认可穿透，先解锁再拖）"), font=FONT_STATUS,
-                  foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(8, 0))
+        self._desktop_drag_btn.pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(body, text=t("（字幕窗默认可穿透，先解锁再拖；改动即时生效）"),
+                  font=FONT_STATUS, foreground=TEXT_MUTED).pack(anchor="w", pady=(0, 2))
+
+        # 初值回填到值标签（`_slider` 建的时候只给了空串）
+        for var, lbl, fmt in ((self._desktop_font_var, self._desktop_font_lbl, _int_fmt),
+                              (self._desktop_srcfont_var, self._desktop_srcfont_lbl, _int_fmt),
+                              (self._desktop_w_var, self._desktop_w_lbl, _int_fmt),
+                              (self._desktop_h_var, self._desktop_h_lbl, _int_fmt)):
+            lbl.configure(text=fmt(float(var.get())))
+
+    @staticmethod
+    def _apply_desktop_slider(key: str, var, lbl, fmt, gui) -> None:  # noqa: ANN001
+        """桌面字幕滑块的公共动作：记「动过」+ 刷新值标签 + 防抖落盘（热重载生效）。"""
+        gui._desktop_tuned.add(key)
+        lbl.configure(text=fmt(float(var.get())))
+        gui._schedule_desktop_save()
+
+    def _on_desktop_font(self, _v: str = "") -> None:
+        self._apply_desktop_slider("font_size", self._desktop_font_var,
+                                   self._desktop_font_lbl, _int_fmt, self)
+
+    def _on_desktop_srcfont(self, _v: str = "") -> None:
+        self._apply_desktop_slider("source_font_size", self._desktop_srcfont_var,
+                                   self._desktop_srcfont_lbl, _int_fmt, self)
+
+    def _on_desktop_width(self, _v: str = "") -> None:
+        self._apply_desktop_slider("panel_width", self._desktop_w_var,
+                                   self._desktop_w_lbl, _int_fmt, self)
+
+    def _on_desktop_height(self, _v: str = "") -> None:
+        self._apply_desktop_slider("panel_height", self._desktop_h_var,
+                                   self._desktop_h_lbl, _int_fmt, self)
 
     def _current_anchor(self) -> str:
         """下拉当前选中的锚点键（right_hand / left_hand / tracker / hmd）。"""
@@ -1713,11 +1801,17 @@ class TranslationGUI:
 
         # 分页口径 = 「我要改什么」→ 去哪页：
         #   常规 = 填 key / 换界面语言；音频 = 声音的进出（设备 · 门限 · 音色）；
+        #   手腕屏 = 头显里那块贴图的 锚点/位姿/字号…；桌面字幕 = 贴在 VRChat 窗口上的
+        #   那块字幕窗的 尺寸/字号/透明度（与手腕屏**各管各的**，配置不共享）；
         #   词库 = 专有名词怎么译；房间 = 多人互看字幕的房间码/昵称；
         #   关于 = 版本与日志（出问题时给维护者的东西）
+        #   ⚠️ 后两块（手腕屏 / 桌面字幕）是「设一次就不再动」的参数，从主界面搬进来的
+        #   （2026-10-04 维护者口径）；它们都按 config.yaml 热重载，拖完即时生效。
         self._build_settings_general(self._settings_page(nb, t("常规")))
         self._build_settings_audio(self._settings_page(nb, t("音频")))
-        self._build_settings_voice(self._settings_page(nb, t("音色")))
+        self._build_settings_voice(self._settings_page(nb, t("音色")))       # 我们的：音色页
+        self._build_settings_wrist(self._settings_page(nb, t("手腕屏")))     # 上游：手腕屏/桌面字幕从主界面搬进设置
+        self._build_settings_desktop(self._settings_page(nb, t("桌面字幕")))
         self._build_settings_glossary(self._settings_page(nb, t("词库")))
         self._build_settings_room(self._settings_page(nb, t("房间")))
         self._build_settings_about(self._settings_page(nb, t("关于")))
@@ -1887,6 +1981,90 @@ class TranslationGUI:
                                        style="Muted.TLabel", justify=tk.LEFT,
                                        wraplength=SETTINGS_WRAP)
         self._ui_lang_note.pack(anchor=tk.W)
+
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+
+        # ---- VRChat OSC 端口 ----
+        # 默认 9000 是 **VRChat 那边**的 OSC 接收端口（我们往它发 /chatbox/input）。
+        # 用户在 VRChat 里改过端口、或中间挂了 OSC 转发工具（VRCT 之类）时，不跟着改就
+        # 一条气泡都发不出去 —— 而症状只是「chatbox 没反应」，界面上看不出是端口不对。
+        # 「VRChat OSC」是专有名词，不进词表（见仓库约定：专有名词不翻译）。
+        ttk.Label(body, text="VRChat OSC", style="Section.TLabel").pack(anchor=tk.W)
+        osc_row = ttk.Frame(body)
+        osc_row.pack(fill=tk.X, pady=(8, 4))
+        # 按钮先占右侧：空间不足时被压的才是输入区（与 key 行同一口径）
+        self._osc_save_btn = ttk.Button(osc_row, text=t("保存端口"),
+                                        command=self._on_save_osc_port)
+        self._osc_save_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Label(osc_row, text=t("端口:"), style="Dim.TLabel").pack(side=tk.LEFT)
+        self._osc_port_var = tk.StringVar(value=str(self._chatbox_port()))
+        self._osc_port_entry = ttk.Entry(osc_row, textvariable=self._osc_port_var,
+                                         width=8, style="Key.TEntry")
+        self._osc_port_entry.pack(side=tk.LEFT, padx=(8, 0))
+        self._osc_port_entry.bind("<Return>", lambda _e: self._on_save_osc_port())
+        self._attach_edit_menu(self._osc_port_entry)
+        ttk.Label(body,
+                  text=t("VRChat 默认收 9000 端口；只有你在 VRChat 里改过 OSC 端口"
+                         "（或中间挂了转发工具）时才需要动这里"),
+                  style="Muted.TLabel", justify=tk.LEFT,
+                  wraplength=SETTINGS_WRAP).pack(anchor=tk.W)
+        # 就地红字（与线路页同一口径）：保存被拒时必须在这一屏看得见
+        self._osc_err = ttk.Label(body, text="", style="Error.TLabel",
+                                  justify=tk.LEFT, wraplength=SETTINGS_WRAP)
+        self._osc_err.pack(anchor=tk.W, pady=(6, 0))
+
+    def _chatbox_port(self) -> int:
+        """当前 chatbox.port（脏值一律回落到 9000，绝不把非数字显示到输入框里）。"""
+        try:
+            return int((self._cfg.chatbox or {}).get("port", 9000))
+        except Exception:  # noqa: BLE001
+            return 9000
+
+    def _on_save_osc_port(self) -> None:
+        """把 VRChat 的 OSC 接收端口就地写回 config.yaml 的 `chatbox.port`。
+
+        写法照 `_save_room_cfg` / `_on_save_provider`：就地改文本，保住注释与键顺序；
+        `chatbox:` 段在老配置里可能缺失 → 用 `_yaml_set_or_create` 补建。
+        校验失败**不写盘**，就地红字 + 状态栏各留一行（禁静默丢弃）。
+        """
+        raw = (self._osc_port_var.get() or "").strip()
+        port = int(raw) if raw.isdigit() else None
+        if port is None or not 1 <= port <= 65535:
+            err = t("端口必须是 1–65535 之间的整数")
+            self._osc_err.configure(text="❌ " + err)
+            self._set_status("error", t("❌ 没保存：{msg}", msg=err))
+            print(f"[gui] ❌ OSC 端口没保存：{raw!r}（{err}）", flush=True)
+            return
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            msg = f"找不到 {p.name}"
+            self._osc_err.configure(text=t("❌ 没保存：{msg}", msg=msg))
+            self._set_status("error", t("❌ 没保存：{msg}", msg=msg))
+            print(f"[gui] ❌ OSC 端口没保存：{msg}", flush=True)
+            return
+        try:
+            text = p.read_text(encoding="utf-8")
+            text = _yaml_set_or_create(text, ["chatbox", "port"], str(port))
+            _write_config_text(p, text)
+        except Exception as exc:                # noqa: BLE001  写盘失败只留痕，配置保持原样
+            self._osc_err.configure(text=t("❌ 没保存：{msg}", msg=exc))
+            self._set_status("error", t("❌ 没保存：{msg}", msg=exc))
+            print(f"[gui] ❌ 保存 OSC 端口失败（配置未改动）：{exc}", flush=True)
+            return
+        self._osc_err.configure(text="")
+        # ⚠️ 必须同步内存：引擎是在「开始翻译」时按 `self._cfg.chatbox` 建 Chatbox 的 ——
+        # 不同步的话本轮点开始翻译还用旧端口，症状＝「改了没反应」。
+        if isinstance(self._cfg.chatbox, dict):
+            self._cfg.chatbox["port"] = port
+        if any(e.running for e in self._engines):
+            # 已经在跑的那条引擎，端口在建链时就定死了（与线路同理）
+            self._set_status("warn", t("OSC 端口已保存：{port}（正在翻译，重开翻译后生效）",
+                                       port=port))
+            print(f"[gui] ⚠️ OSC 端口已保存：{port}，但翻译正在进行中 —— "
+                  f"需先停止再重新开始才生效", flush=True)
+        else:
+            self._set_status("ok", t("OSC 端口已保存：{port}", port=port))
+            print(f"[gui] OSC 端口已保存：{port}", flush=True)
 
     # ---------------------------------------------------------------- 设置弹窗 · 服务线路
     def _build_provider_section(self, body: ttk.Frame) -> None:
@@ -2192,6 +2370,24 @@ class TranslationGUI:
         self._voice_note.pack(anchor=tk.W, pady=(6, 0))
 
     # ---------------------------------------------------------------- 设置弹窗 · 词库页
+    def _build_settings_wrist(self, body: ttk.Frame) -> None:
+        """「设置 → 手腕屏」：头显里那块手腕屏微调（原主界面「微调 ▸」面板原样搬来）。
+
+        搬家的理由（2026-10-04 维护者口径）：这些是**设一次就不再动**的参数。
+        ⚠️ 与「设置 → 桌面字幕」**完全独立**：两边各写各的配置段，互不影响。
+        """
+        ttk.Label(body, text=t("头显里那块手腕屏的锚点、位置 / 旋转 / 字号等参数。"),
+                  style="Dim.TLabel").pack(anchor="w", pady=(0, 6))
+        self._build_tune_page(body)
+        self._wrist_page = body      # 供测试按控件树定位（控件随设置弹窗在启动时建好）
+
+    def _build_settings_desktop(self, body: ttk.Frame) -> None:
+        """「设置 → 桌面字幕」：桌面字幕**自己**的一套参数（与手腕屏互不影响）。"""
+        ttk.Label(body, text=t("贴在 VRChat 窗口上的那块字幕窗：尺寸 / 字号 / 透明度。"),
+                  style="Dim.TLabel").pack(anchor="w", pady=(0, 6))
+        self._build_desktop_tune_page(body)
+        self._desktop_page = body    # 同上：桌面字幕那页的载体 frame
+
     def _build_settings_glossary(self, body: ttk.Frame) -> None:
         """「词库」页：专有名词怎么译（社团名 / 人名 / 术语）。"""
         # ---- 专有词库 ----
@@ -3227,7 +3423,7 @@ class TranslationGUI:
 
     # `_open_settings(page=…)` 的参数 → tab 标题。**新增可跳转的页只在这里加一行**：
     # tab 是用标题登记的（`_settings_tabs[t(标题)]`），把映射散在各个调用点就会漂移。
-    _SETTINGS_PAGE_TAB = {"room": "房间", "general": "常规"}
+    _SETTINGS_PAGE_TAB = {"room": "房间", "general": "常规", "wrist": "手腕屏", "desktop": "桌面字幕"}
 
     def _select_settings_page(self, page: str) -> None:
         """把设置弹窗切到某一页；切页失败只留痕，**绝不拦住弹窗打开**。"""
@@ -5202,12 +5398,12 @@ class TranslationGUI:
         """勾选/取消「手腕屏」的即时反应。
 
         勾上就**立刻**把屏拉起来，而不是等点开始翻译 —— 用户勾上多半是想先看位置对不对
-        （微调面板要对着屏拖），把「调试」和「开跑」绑死会很难用。
+        （位置在「设置 → 手腕屏」里拖），把「调试」和「开跑」绑死会很难用。
         起不来就自动退回未勾选：否则界面显示已开启、实际什么都没有。
         """
         if self._overlay_var.get():
             if self._start_overlay(force=True):
-                self._set_status("info", t("手腕屏已开启（可用「微调 ▸」调位置）"))
+                self._set_status("info", t("手腕屏已开启（位置 / 字号等见「设置 → 手腕屏」）"))
             else:
                 self._overlay_var.set(False)          # 启动失败 → 自动跳回去
                 self._set_status("error", t(
@@ -5254,8 +5450,8 @@ class TranslationGUI:
             return False
         try:
             from .output.desktop_overlay import DesktopOverlay, DesktopOverlayConfig
-            cfg = DesktopOverlayConfig.from_dict(self._desktop_cfg(),
-                                                 visual=self._cfg.overlay or {})
+            # ⚠️ 只读 `desktop_overlay:` 段：桌面字幕的配置与 `overlay:`（手腕屏）独立。
+            cfg = DesktopOverlayConfig.from_dict(self._desktop_cfg())
             out = DesktopOverlay(cfg, config_path=DEFAULT_CONFIG, root=self._root)
             if not out.start():
                 return False                       # start() 内部已打印原因
@@ -5275,7 +5471,7 @@ class TranslationGUI:
         """
         if self._desktop_var.get():
             if self._start_desktop(force=True):
-                self._set_status("info", t("桌面字幕已开启（拖到想要的位置，透明度见「微调 ▸」）"))
+                self._set_status("info", t("桌面字幕已开启（拖到想要的位置；尺寸/字号/透明度见「设置 → 桌面字幕」）"))
             else:
                 self._desktop_var.set(False)
                 self._set_status("error", t("桌面字幕没启动起来，已自动取消勾选"))
@@ -5335,16 +5531,17 @@ class TranslationGUI:
         self._desktop_save_job = self._root.after(300, self._save_desktop_cfg)
 
     def _save_desktop_cfg(self) -> None:
-        """把桌面字幕的参数（透明度 + 拖动折算出的锚点/偏移）写回 config.yaml。
+        """把桌面字幕的参数写回 config.yaml 的 `desktop_overlay:` 段。
+
+        写什么：用户**真动过**的滑块（字号 / 尺寸 / 透明度）+ 拖动折算出的锚点/偏移。
 
         用 `_yaml_set_or_create` 而不是就地改：用户的 config.yaml 是从**旧模板**生成的，
         里面根本没有 `desktop_overlay:` 段，就地改会因为找不到父键静默失效
         （表现就是"拖了、调了，重启全没了"）。
 
-        ⚠️ alpha 只在**用户真的动过滑块**时才写：本函数也被「锁定位置」与拖动落盘调到，
-        无条件写的话，用户只是把字幕拖了个位置，滑块上那个值（可能是从 `overlay.alpha`
-        继承来的、甚至只是默认的 0.90）就被写进 `desktop_overlay.alpha` 并热重载生效 ——
-        表现为「拖一下位置，透明度突然变了」。
+        ⚠️ 滑块值只在**用户真的动过**时才写：本函数也被「锁定位置」与拖动落盘调到，
+        无条件写的话，用户只是把字幕拖了个位置，滑块上那些（默认）值就被写进配置并
+        热重载生效 —— 表现为「拖一下位置，字号/透明度突然变了」。
         """
         self._desktop_save_job = None
         p = DEFAULT_CONFIG
@@ -5353,9 +5550,26 @@ class TranslationGUI:
         try:
             text = p.read_text(encoding="utf-8")
             updates: list[tuple[list[str], str]] = []
+            mem: dict[str, Any] = {}
+            tuned = getattr(self, "_desktop_tuned", set())
             if self._desktop_alpha_touched:
-                updates.append((["desktop_overlay", "alpha"],
-                                _fmt_scalar(float(self._desktop_alpha_var.get()))))
+                a = float(self._desktop_alpha_var.get())
+                updates.append((["desktop_overlay", "alpha"], _fmt_scalar(a)))
+                mem["alpha"] = a
+            if "font_size" in tuned:
+                v = int(float(self._desktop_font_var.get()))
+                updates.append((["desktop_overlay", "font_size"], str(v)))
+                mem["font_size"] = v
+            if "source_font_size" in tuned:
+                v = int(float(self._desktop_srcfont_var.get()))
+                updates.append((["desktop_overlay", "source_font_size"], str(v)))
+                mem["source_font_size"] = v
+            if tuned & {"panel_width", "panel_height"}:
+                # size_px 是一个键的两个值 → 两个滑块谁动过都整对写回（取当前两个滑块的值）
+                w = int(float(self._desktop_w_var.get()))
+                h = int(float(self._desktop_h_var.get()))
+                updates.append((["desktop_overlay", "size_px"], f"[{w}, {h}]"))
+                mem["size_px"] = [w, h]
             if self._desktop_out is not None:
                 for key, val in (self._desktop_out.snap_to_config() or {}).items():
                     if key in ("offset", "pos"):
@@ -5367,6 +5581,12 @@ class TranslationGUI:
             for key_path, value in updates:
                 text = _yaml_set_or_create(text, key_path, value)
             _write_config_text(p, text)
+            # 同步内存快照：`_start_desktop()` 是按 `self._cfg` 建窗的，不同步的话
+            # 「关掉桌面字幕再勾上」会用旧值重建窗口（OSC 端口那条设置同一个道理）。
+            if mem:
+                if not isinstance(self._cfg.desktop_overlay, dict):
+                    self._cfg.desktop_overlay = {}
+                self._cfg.desktop_overlay.update(mem)
             print("[gui] 桌面字幕参数已写入 config.yaml："
                   + " ".join(f"{'/'.join(k)}={v}" for k, v in updates), flush=True)
         except Exception as exc:  # noqa: BLE001

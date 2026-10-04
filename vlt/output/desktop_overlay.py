@@ -69,14 +69,32 @@ _ANCHOR_GRID: dict[str, tuple[int, int]] = {
 _MISSING = object()
 
 
+# 桌面字幕**自带**的视觉键（配色 / 底板与边框透明度 / 分隔线 / 说话人竖条色）。
+# 默认值取 OverlayConfig 的**代码默认值** —— 不是用户 config.yaml 里的 `overlay:` 段：
+# 两个面板长得像，但配置完全独立（2026-10-04 维护者口径：两者区别太大，不能共享配置）。
+_VISUAL_FIELDS = ("color_translation", "color_source", "source_alpha", "color_border",
+                  "border_alpha", "color_bg", "bg_alpha", "color_mine", "color_theirs",
+                  "separator", "fade_after_s")
+
+
+def desktop_visual_defaults() -> dict:
+    """桌面字幕的视觉默认值（配色等）—— 取自 OverlayConfig 的**代码**默认值。
+
+    用户改 `overlay:` 段（手腕屏）不会牵动这里，反过来也一样。
+    """
+    base = OverlayConfig()
+    return {k: getattr(base, k) for k in _VISUAL_FIELDS}
+
+
 # ---------------------------------------------------------------- 配置
 @dataclass
 class DesktopOverlayConfig:
-    """桌面字幕窗的配置。
+    """桌面字幕窗的配置（**完全独立于 `overlay:` 段**）。
 
-    视觉参数（字体/字号/配色/行数/是否显示原文）**继承 `config.yaml` 的 `overlay:` 段**
-    —— 桌面字幕与手腕屏应该长一个样，不该让用户再配一遍配色。
-    本段（`desktop_overlay:`）显式写出的键覆盖同名视觉键，见 :meth:`from_dict`。
+    ⚠️ 桌面面板与头显里的手腕屏长得像，但**两者不是一回事**（尺寸单位、使用场景、
+    屏幕分辨率都不同），所以配置不许共享：本段自带一整套视觉键（字体 / 字号 / 配色 /
+    行数 / 是否显示原文 / 面板尺寸），缺省时回落 **OverlayConfig 的代码默认值**。
+    维护者口径（2026-10-04）：原来的「视觉参数默认继承 `overlay:` 段」打回重做。
     """
 
     enabled: bool = False
@@ -91,42 +109,29 @@ class DesktopOverlayConfig:
     click_through: bool = True            # 鼠标穿透（拖动时临时关掉）
     follow: bool = True                   # 游戏窗口移动/缩放时跟随
     game_title: str = "VRChat"
-    # ---- 视觉参数：默认值与 OverlayConfig 对齐，实际以 from_dict 的 visual 段为准 ----
+    # ---- 视觉参数：**全在本段**，不从 overlay 段继承 ----
     font: str = ""                        # 空 = 按平台自动探测（见 overlay.resolve_font_path）
     font_size: int = 36
     source_font_size: int = 29
     max_lines: int = 3
     show_source: bool = True
-    # 其余视觉参数（配色 / 底板与边框透明度 / 分隔线 / 说话人竖条色）原样继承 overlay 段
+    # 其余视觉键（配色 / 底板与边框透明度 / 分隔线 / 说话人竖条色）也全在本段：
+    # 这里只装**本段显式写出的**那部分，渲染时缺的用 desktop_visual_defaults() 补。
     visual: dict = field(default_factory=dict)
 
-    # 本段可以覆盖 overlay 段的键（其余视觉键只继承、不覆盖）
-    _OVERRIDE_KEYS = ("size_px", "alpha", "font", "font_size",
-                      "source_font_size", "max_lines", "show_source")
-
     @staticmethod
-    def from_dict(d: dict, visual: dict | None = None) -> "DesktopOverlayConfig":
-        """`visual` = config.yaml 的 `overlay:` 段，`d` = `desktop_overlay:` 段。
+    def from_dict(d: dict) -> "DesktopOverlayConfig":
+        """解析 `desktop_overlay:` 段。
 
-        `d` 里显式给出的键覆盖 visual 的同名键（size_px / alpha / font_size /
-        source_font_size / max_lines / show_source / font）；缺键一律回落本 dataclass 的默认值。
-
-        ⚠️ **只有上面那 7 个视觉键会从 visual 继承**。`enabled` / `anchor` / `offset`
-        这些绝不能继承：`overlay.enabled` 默认是 true（手腕屏开着），继承过来等于
-        给所有老用户悄悄打开桌面字幕；`overlay.anchor` 是 "right_hand"、`overlay.offset`
-        是个 dict（米制位姿），语义完全不同。
+        ⚠️ **不接收也不读 `overlay:` 段**：两个面板的配置完全独立（见类文档）。
+        每个键缺省时回落本 dataclass 的默认值（视觉键回落 OverlayConfig 的代码默认值）。
         """
         d = dict(d or {})
-        visual = dict(visual or {})
         base = DesktopOverlayConfig()
 
         def own(key: str, default: Any, cast: Any = None) -> Any:
             """只认本段（`desktop_overlay:`）的键。"""
-            return _pick(d, key, default, cast, inherit=None)
-
-        def vis(key: str, default: Any, cast: Any = None) -> Any:
-            """本段优先，缺则继承 `overlay:` 段。"""
-            return _pick(d, key, default, cast, inherit=visual)
+            return _pick(d, key, default, cast)
 
         anchor = str(own("anchor", base.anchor, _as_str) or base.anchor)
         if anchor not in ANCHORS:
@@ -139,7 +144,7 @@ class DesktopOverlayConfig:
                   f" → 用 {base.mode}")
             mode = base.mode
         # backend 只看本段：`overlay.backend`（auto/null）是手腕屏那套，语义完全不同，
-        # 继承过来会让桌面字幕跟着手腕屏的开关走，属于配置语义漂移。
+        # 读过来会让桌面字幕跟着手腕屏的开关走，属于配置语义漂移。
         backend = str(own("backend", base.backend, _as_str) or base.backend)
         if backend not in BACKENDS:
             print(f"[desktop] ⚠️ 配置里的 backend={backend!r} 不认识（可选 {BACKENDS}）"
@@ -154,31 +159,28 @@ class DesktopOverlayConfig:
             anchor=anchor,
             offset=own("offset", base.offset, _as_pair),
             pos=own("pos", base.pos, _as_pair),
-            size_px=vis("size_px", base.size_px, _as_pair),
-            alpha=clamp_alpha(vis("alpha", base.alpha)),
+            size_px=own("size_px", base.size_px, _as_pair),
+            alpha=clamp_alpha(own("alpha", base.alpha)),
             click_through=bool(own("click_through", base.click_through, _as_bool)),
             follow=bool(own("follow", base.follow, _as_bool)),
             game_title=str(own("game_title", base.game_title, _as_str) or base.game_title),
-            font=str(vis("font", base.font, _as_str) or ""),
-            font_size=vis("font_size", base.font_size, _as_int),
-            source_font_size=vis("source_font_size", base.source_font_size, _as_int),
-            max_lines=vis("max_lines", base.max_lines, _as_int),
-            show_source=bool(vis("show_source", base.show_source, _as_bool)),
+            font=str(own("font", base.font, _as_str) or ""),
+            font_size=own("font_size", base.font_size, _as_int),
+            source_font_size=own("source_font_size", base.source_font_size, _as_int),
+            max_lines=own("max_lines", base.max_lines, _as_int),
+            show_source=bool(own("show_source", base.show_source, _as_bool)),
         )
-        merged = dict(visual)
-        for key in DesktopOverlayConfig._OVERRIDE_KEYS:
-            if d.get(key) is not None:
-                merged[key] = d[key]
-        cfg.visual = merged
+        # 视觉键（配色等）同样只认本段：整段原样收下，渲染时用代码默认值补缺。
+        cfg.visual = {k: v for k, v in d.items() if k in _VISUAL_FIELDS}
         return cfg
 
     def visual_config(self) -> OverlayConfig:
-        """渲染用的视觉配置：**overlay 段的配色/底板** + **本段的尺寸/字号/行数**。
+        """渲染用的视觉配置：**本段自己的**配色/底板/字体 + 尺寸/字号/行数。
 
-        `size_px` 必须用本段的 —— 桌面字幕是贴在屏幕上的像素面板，
-        与手腕屏那块 1024x440 的贴图不必同尺寸。
+        ⚠️ 不从 `overlay:` 段取任何东西 —— 两个面板的观感各自独立。
         """
-        d = dict(self.visual or {})
+        d = desktop_visual_defaults()
+        d.update(self.visual or {})
         d.update({
             "enabled": True,
             "size_px": list(self.size_px),
@@ -192,11 +194,13 @@ class DesktopOverlayConfig:
         return OverlayConfig.from_dict(d)
 
 
-def _pick(d: dict, key: str, default: Any, cast: Any, inherit: dict | None) -> Any:
-    """取值：本段 → （可选）继承段 → 默认值。`None` 视作「没写」。"""
+def _pick(d: dict, key: str, default: Any, cast: Any) -> Any:
+    """取值：本段写了（且不是 None）就转成目标类型，否则用 `default`。
+
+    ⚠️ 这里**没有**「继承另一个段」的口子 —— 桌面字幕与 `overlay:`（手腕屏）
+    的配置完全独立（2026-10-04 维护者口径）。别再加回来。
+    """
     raw = d.get(key, _MISSING)
-    if (raw is _MISSING or raw is None) and inherit is not None:
-        raw = inherit.get(key, _MISSING)
     if raw is _MISSING or raw is None:
         return default
     if cast is None:
@@ -980,8 +984,8 @@ class DesktopOverlay:
             import yaml
 
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            new = DesktopOverlayConfig.from_dict(raw.get("desktop_overlay") or {},
-                                                 visual=raw.get("overlay") or {})
+            # ⚠️ 只读本段：桌面字幕的配置与 `overlay:`（手腕屏）完全独立。
+            new = DesktopOverlayConfig.from_dict(raw.get("desktop_overlay") or {})
         except Exception as exc:  # noqa: BLE001
             print(f"[desktop] ⚠️ 热重载失败（保留旧配置）：{type(exc).__name__}: {exc}")
             return

@@ -14,8 +14,10 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,7 @@ IS_LINUX = sys.platform.startswith("linux")
 __all__ = [
     "IS_WINDOWS", "IS_LINUX",
     "backend", "device_backend",
-    "open_path", "find_cjk_font", "find_thai_font", "detect_ui_language",
+    "child_env", "open_path", "find_cjk_font", "find_thai_font", "detect_ui_language",
     # 桌面叠加窗（issue #11）：缺失实现的平台会拿到下面的安全默认值
     "desktop_window_backend", "find_game_window", "window_client_rect", "is_window",
     "set_click_through", "set_tool_window", "set_window_shape",
@@ -144,22 +146,86 @@ def open_audio_out(audio_cfg: dict, on_status: Any) -> Any:
     return backend().open_audio_out(audio_cfg, on_status)
 
 
+def child_env() -> dict[str, str]:
+    """给「宿主子进程」用的环境变量：还原被 PyInstaller 改过的动态库搜索路径。
+
+    ## 为什么必须这么做（2026-10 官方 AppImage 真机故障）
+
+    frozen（AppImage / 单文件 exe）时，PyInstaller 引导器会把包内目录**前置**进
+    `LD_LIBRARY_PATH`（原值存进 `LD_LIBRARY_PATH_ORIG`），所有子进程都会继承。
+    宿主程序（`xdg-open` 拉起的 thunar、PipeWire 的 `pw-*` 工具等）于是先加载到
+    **包内自带的另一套系统库**，按构建机的版本顶掉宿主的：
+
+      * 官方 AppImage 在 Ubuntu 上构建 → 包内 `libfontconfig` 2.15 缺
+        `FcConfigSetDefaultSubstitute`，而 Arch 的 `libpangoft2` 需要它 →
+        宿主 thunar 秒退（`symbol lookup error`）→ 点「打开日志文件夹」没反应；
+        本地构建因包内库就是从本机收的，才侥幸没事。
+      * `libstdc++.so.6` / `libgcc_s.so.1` 等同理（构建机 GLIBCXX 版本较旧的场合）。
+
+    口径（PyInstaller 官方文档的推荐做法）：
+
+      * 有 `LD_LIBRARY_PATH_ORIG` → 还原为它（原值为空则删掉变量）；
+      * 没有 ORIG 且 `sys.frozen` → 删除 `LD_LIBRARY_PATH`（引导器刚设的）；
+      * 源码运行 / Windows → 原样返回副本（用户自己设的路径必须保留）。
+    """
+    env = dict(os.environ)
+    if IS_WINDOWS:
+        return env
+    orig = env.pop("LD_LIBRARY_PATH_ORIG", None)
+    if orig is not None:
+        if orig:
+            env["LD_LIBRARY_PATH"] = orig
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+        return env
+    if getattr(sys, "frozen", False):
+        env.pop("LD_LIBRARY_PATH", None)
+    return env
+
+
+# `open_path` 启动后等一小段：xdg-open 的 generic 分支会在前台等文件管理器退出
+# （还活着 = 已交接），失败分支（找不到默认程序 / 子进程加载即崩）在毫秒级就退出。
+# 实测失败退出 < 0.15s；0.6s 是给慢机器的余量，也是这次点击对界面的最大阻塞。
+_OPEN_PATH_GRACE_S = 0.6
+
+
 def open_path(p: str | Path) -> None:
     """用系统默认程序打开一个文件/目录。失败抛异常，由调用方决定怎么提示。
 
-    Windows：`os.startfile`（不产生子进程）；Linux：`xdg-open` 分离启动。
-    打不开**不许静默** —— 现有 `gui._on_open_log_folder` 的做法是状态栏 + 日志都留痕。
+    Windows：`os.startfile`（不产生子进程）；Linux：`xdg-open`。
+    打不开**不许静默**（`gui._on_open_log_folder` 的做法：状态栏 + 日志都留痕）：
+
+      * 子进程必须带 `child_env()` —— 绝不能继承 PyInstaller 包内的库搜索路径，
+        否则宿主文件管理器加载即崩、stderr 又被 /dev/null 吞掉，用户只看到
+        「点了没反应」（详见 `child_env` 注释）；
+      * 不再把 stderr 丢进 DEVNULL 且不看退出码：启动后短暂等待，已经退出且
+        非零（例如「no method available」）就连同 stderr 一起抛出去；
+        还在跑说明已交给文件管理器，正常返回。
     """
     target = str(p)
     if IS_WINDOWS:
-        import os
         os.startfile(target)                      # type: ignore[attr-defined]
         return
-    subprocess.Popen(
-        ["xdg-open", target],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True,                   # 别跟着我们一起被杀
-    )
+
+    errfile = tempfile.TemporaryFile(prefix="vlt-open-path-")
+    try:
+        proc = subprocess.Popen(
+            ["xdg-open", target],
+            stdout=subprocess.DEVNULL, stderr=errfile,
+            start_new_session=True,                   # 别跟着我们一起被杀
+            env=child_env(),
+        )
+        try:
+            rc = proc.wait(timeout=_OPEN_PATH_GRACE_S)
+        except subprocess.TimeoutExpired:
+            return                                # 还活着：已交接给文件管理器
+        if rc != 0:
+            errfile.seek(0)
+            err = errfile.read(4096).decode("utf-8", "replace").strip()
+            detail = f"退出码 {rc}" + (f"：{err}" if err else "")
+            raise RuntimeError(f"xdg-open 打不开 {target}（{detail}）")
+    finally:
+        errfile.close()
 
 
 def find_cjk_font() -> str | None:

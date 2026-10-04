@@ -430,6 +430,7 @@ class _SessionProxy:
         self.chunks = 0
         self.silent_chunks = 0
         self.send_fails = 0          # 发送失败的块数（不计入静音统计，只用于留痕/诊断）
+        self._voice_note_warned = False   # 「上报有人说话」失败只留一次痕（每块都打会刷屏）
         # 长静音闸门（②）：配置非法时 silence_gate_settings 已留痕并回落默认值
         en, after_s, preroll_s = silence_gate_settings(
             getattr(engine._cfg, "session_base", None))          # noqa: SLF001
@@ -450,6 +451,10 @@ class _SessionProxy:
         loud = peak >= SILENCE_PEAK
         if loud:
             eng._last_loud_ts = time.monotonic()     # noqa: SLF001
+            # 顺手把这声「有人在说」上报给会话：静默兜底的快路径靠它判断「上游已无人在说话」
+            # （⚠️ 不能拿「距上次上送音频的间隔」代替 —— 麦克风腿没有闸门，静音块照样
+            #   每 ~0.1s 上送一次，那个间隔恒为 ~0.1s；见 session/base.note_voice 的说明）。
+            self._note_voice()
         else:
             self.silent_chunks += 1
             eng._silent_chunks += 1                  # noqa: SLF001
@@ -460,6 +465,22 @@ class _SessionProxy:
                                  now=time.monotonic())
         for chunk in chunks:
             await self._send_one(chunk)
+
+    def _note_voice(self) -> None:
+        """把「这一块有人在说话」上报给**当前**会话（重连后自动落到新会话上）。
+
+        失败绝不能影响音频上送：这里吞掉异常、只留**一次**痕（每块都打会刷屏）。
+        """
+        session = self._engine._session             # noqa: SLF001
+        if session is None:
+            return
+        try:
+            session.note_voice()
+        except Exception as exc:  # noqa: BLE001
+            if not self._voice_note_warned:
+                self._voice_note_warned = True
+                print(f"[session] ⚠️ 上报「有人说话」失败（快封句退回慢路径）：{exc}",
+                      flush=True)
 
     async def _send_one(self, pcm: bytes) -> None:
         session = self._engine._session             # noqa: SLF001

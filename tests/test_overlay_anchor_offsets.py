@@ -82,7 +82,7 @@ def make_gui(config: Path):
     if gui._update_check_job is not None:
         gui._root.after_cancel(gui._update_check_job)
         gui._update_check_job = None
-    gui._toggle_tune_panel()
+    # 手腕屏微调那页的控件随设置弹窗在启动时就建好了（弹窗只是隐藏着），不需要展开面板。
     return gui
 
 

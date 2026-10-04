@@ -47,11 +47,16 @@ FAKE_TITLE = "VLT_FAKE_VRCHAT_WINDOW"
 # 一定不存在的标题：界面那条用例靠它退化成屏幕绝对定位，不依赖本机是否真开着 VRChat
 FAKE_MISSING_TITLE = "___vlt_不存在的窗口___"
 
-# 界面透明度滑块用例：沙箱配置里 overlay 段的 alpha，以及用户拖动滑块后的值
+# 界面透明度滑块用例的三个值：
+#   GUI_OVERLAY_ALPHA = 手腕屏（`overlay:` 段）的透明度 —— 桌面字幕**绝不该**读它；
+#   GUI_SANDBOX_ALPHA = 桌面段（`desktop_overlay:`）自己的透明度；
+#   GUI_SLIDER_ALPHA  = 用户拖动滑块后落盘的值。
+# 三个值互不相同，「读错了哪一段」一断言就现形。
 GUI_SANDBOX_DIR = ROOT / "out" / "desktop_overlay_cfg"
 GUI_SANDBOX = GUI_SANDBOX_DIR / "config.yaml"
-GUI_INHERITED_ALPHA = 0.5
-GUI_SLIDER_ALPHA = 0.65
+GUI_OVERLAY_ALPHA = 0.5
+GUI_SANDBOX_ALPHA = 0.65
+GUI_SLIDER_ALPHA = 0.35
 
 SAMPLE_ENTRIES = [
     ("theirs", "Hello there, can you hear me?", "你好，能听到我说话吗？"),
@@ -198,7 +203,11 @@ def test_alpha_mask_bits() -> None:
     print("  alpha_mask_bits（LSB-first / 行补零 / 默认阈值 32 / 显式阈值）OK")
 
 
-def test_from_dict_defaults_inherit_and_override() -> None:
+def test_from_dict_defaults_and_own_keys() -> None:
+    """桌面字幕的配置**完全独立**：所有键只认 `desktop_overlay:` 段，缺省回落代码默认值。
+
+    （2026-10-04 维护者口径：桌面面板与手腕屏区别太大，不许共享配置。）
+    """
     # a) 缺段 → 全默认
     c = DesktopOverlayConfig.from_dict({})
     assert (c.enabled, c.mode, c.anchor, c.attach_to_game) == \
@@ -207,32 +216,18 @@ def test_from_dict_defaults_inherit_and_override() -> None:
     assert abs(c.alpha - 0.9) < 1e-9 and c.click_through and c.follow
     assert c.game_title == "VRChat"
     v = c.visual_config()
-    assert v.size_px == (1024, 360)       # ★ size_px 用本段的，不是 overlay 段的
+    assert v.size_px == (1024, 360)
     assert v.font_size == 36 and v.source_font_size == 29 and v.max_lines == 3
-    assert v.color_bg == (12, 14, 20)     # 配色回落 OverlayConfig 默认（没配 overlay 段也能画）
+    assert v.color_bg == (12, 14, 20)     # 视觉默认取 OverlayConfig 的**代码默认值**
     assert v.show_source is True
 
-    # b) visual 段继承（配色 / 字号 / 行数 / 显示原文 / 尺寸 / 透明度）
-    visual = {"font_size": 44, "source_font_size": 30, "max_lines": 5,
-              "show_source": False, "color_bg": [1, 2, 3], "bg_alpha": 128,
-              "size_px": [640, 240], "alpha": 0.5}
-    c = DesktopOverlayConfig.from_dict({}, visual=visual)
-    assert c.font_size == 44 and c.source_font_size == 30 and c.max_lines == 5, c
-    assert c.show_source is False
-    assert c.size_px == (640, 240), c.size_px      # 没写本段 → 继承 visual
-    assert abs(c.alpha - 0.5) < 1e-9, c.alpha
-    v = c.visual_config()
-    assert v.color_bg == (1, 2, 3) and v.bg_alpha == 128 and v.size_px == (640, 240)
-    # ⚠️ 非视觉键绝不能从 overlay 段继承（老用户的手腕屏配置不该悄悄打开桌面字幕）
-    assert c.enabled is False and c.anchor == "bottom_center" and c.offset == (0, -48), c
-
-    # c) 本段显式键覆盖 visual
+    # b) 本段显式键全部生效（含配色 —— 桌面段自己就能配一套观感）
     c = DesktopOverlayConfig.from_dict(
         {"enabled": True, "mode": "latest", "anchor": "top_right", "offset": [10, -20],
          "pos": [5, 6], "size_px": [800, 300], "alpha": 0.75, "click_through": False,
          "follow": False, "game_title": "VRChat Desktop", "font_size": 28,
-         "source_font_size": 20, "max_lines": 2, "show_source": True, "font": "X.ttf"},
-        visual=visual)
+         "source_font_size": 20, "max_lines": 2, "show_source": True, "font": "X.ttf",
+         "color_bg": [1, 2, 3], "bg_alpha": 128})
     assert c.enabled and c.mode == "latest" and c.anchor == "top_right", c
     assert c.offset == (10, -20) and c.pos == (5, 6), c
     assert c.size_px == (800, 300) and abs(c.alpha - 0.75) < 1e-9, c
@@ -242,16 +237,48 @@ def test_from_dict_defaults_inherit_and_override() -> None:
     assert c.show_source is True and c.font == "X.ttf"
     v = c.visual_config()
     assert v.size_px == (800, 300) and v.font_size == 28 and v.max_lines == 2
-    assert v.color_bg == (1, 2, 3), v.color_bg     # 没被覆盖的配色仍然继承
+    assert v.color_bg == (1, 2, 3) and v.bg_alpha == 128, (v.color_bg, v.bg_alpha)
 
-    # d) 垃圾值不许把整段炸掉（配置是用户手改的）
+    # c) 垃圾值不许把整段炸掉（配置是用户手改的）
     c = DesktopOverlayConfig.from_dict({"offset": "nope", "size_px": [1, 2, 3],
-                                        "alpha": None, "font_size": "big"}, visual=visual)
+                                        "alpha": None, "font_size": "big"})
     assert c.offset == (0, -48), c.offset          # 回落本段默认
     assert c.size_px == (1024, 360), c.size_px
-    assert abs(c.alpha - 0.5) < 1e-9, c.alpha      # None 视作「没写」→ 继承 visual
+    assert abs(c.alpha - 0.9) < 1e-9, c.alpha      # None 视作「没写」
     assert c.font_size == 36, c.font_size
-    print("  from_dict 默认 / visual 继承 / 显式覆盖 / 垃圾值回落 OK")
+    print("  from_dict 默认 / 本段显式键 / 垃圾值回落 OK")
+
+
+def test_desktop_config_is_decoupled_from_overlay_section() -> None:
+    """★ 桌面字幕与手腕屏的配置**完全独立**（2026-10-04 返工的核心，别再合回去）。
+
+    三条判据：
+      ① `from_dict()` 只接一个参数 —— 想传 `overlay:` 段都传不进去；
+      ② 源码里不许再出现「读 overlay 段」的痕迹（`raw.get("overlay")` / `visual=`）；
+      ③ 视觉默认值来自 OverlayConfig 的**代码默认值**，且桌面自己的默认尺寸/字号
+         与手腕屏的默认值**本来就不同**（1024x360/36 vs 1024x440/36）——
+         谁把继承接回来，这里立刻红。
+    """
+    import inspect
+
+    from vlt.output.desktop_overlay import desktop_visual_defaults
+    from vlt.output.overlay import OverlayConfig
+
+    sig = inspect.signature(DesktopOverlayConfig.from_dict)
+    assert list(sig.parameters) == ["d"], f"from_dict 又多出了参数：{list(sig.parameters)}"
+
+    src = (ROOT / "vlt" / "output" / "desktop_overlay.py").read_text(encoding="utf-8")
+    assert 'raw.get("overlay")' not in src, "热重载又把 overlay: 段读回来了（两段必须独立）"
+    assert "visual=" not in src, "又长出「继承 overlay 段」的参数了"
+
+    wrist = OverlayConfig()
+    desk = desktop_visual_defaults()
+    assert desk["color_bg"] == wrist.color_bg, (desk["color_bg"], wrist.color_bg)
+    assert desk["bg_alpha"] == wrist.bg_alpha
+    # 默认尺寸本来就不同 → 「独立」不是嘴上说说
+    assert DesktopOverlayConfig.from_dict({}).size_px == (1024, 360)
+    assert wrist.size_px == (1024, 440), wrist.size_px
+    print("  配置独立（签名 / 源码 / 默认值三分）OK")
 
 
 def test_backend_config() -> None:
@@ -266,7 +293,7 @@ def test_backend_config() -> None:
     for want in ("native", "tk", "wayland", "x11"):
         assert DesktopOverlayConfig.from_dict({"backend": want}).backend == want, want
     assert DesktopOverlayConfig.from_dict({"backend": "glx"}).backend == "auto"    # 垃圾值
-    assert DesktopOverlayConfig.from_dict({}, visual={"backend": "null"}).backend == "auto"
+    # 手腕屏的 `overlay.backend`（auto/null）与桌面无关：from_dict 只接本段（见独立配置用例）
     print("  backend 配置（默认 / 五个合法值 / 垃圾值回落 / 不继承）OK")
 
 
@@ -1099,11 +1126,12 @@ def test_own_window_excluded_from_game_search() -> None:
 
 # ---------------------------------------------------------------- 界面：透明度滑块
 def _make_gui_sandbox() -> None:
-    """把模板改成**沙箱**配置：`overlay.alpha=0.5`、`desktop_overlay` 段**没有** alpha，
+    """把模板改成**沙箱**配置：手腕屏 `overlay.alpha=0.5`、桌面段自己写 `alpha: 0.65`、
     目标窗口标题指向一个一定不存在的窗口。
 
-    于是「窗口真实透明度」= 从 overlay 段继承来的 0.5，而旧代码里滑块初值只读
-    `desktop_overlay` 段（缺键 → 兜底 0.9）—— 两边是否同源，一验就现形。
+    用途：证明**两个面板的配置互不影响** —— 桌面字幕的滑块与窗口只认
+    `desktop_overlay:` 段（0.65），绝不是手腕屏那段的 0.5（返工前正是「视觉参数继承
+    `overlay:` 段」，这里就是那条口径的回归守卫）。
     用行级替换而不是整文件重写：沙箱要跟用户手写配置一样保留注释，
     后面「落盘不丢东西」那几条验的才是真实场景。
 
@@ -1112,14 +1140,13 @@ def _make_gui_sandbox() -> None:
     """
     text = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
 
-    # ① overlay 段补一行**顶层** alpha（模板里只有 overlay.offset.alpha，不是同一个键：
-    #    `DesktopOverlayConfig.from_dict` 继承的是 overlay 段的顶层 alpha）
+    # ① overlay 段补一行**顶层** alpha（手腕屏的）—— 桌面字幕绝不该读它
     text, n = re.subn(r"(?m)^(  size_px: \[1024, 440\].*)$",
-                      f"  alpha: {GUI_INHERITED_ALPHA}\n\\g<1>", text)
+                      f"  alpha: {GUI_OVERLAY_ALPHA}\n\\g<1>", text)
     assert n == 1, f"模板里应有且只有 1 行 overlay 段的 `  size_px: [1024, 440]`，命中 {n} 处"
 
-    # ② desktop_overlay 段的 alpha 整行删掉（本用例要的就是"本段没写"）
-    text, n = re.subn(r"(?m)^  alpha: 0\.90.*\n", "", text)
+    # ② 桌面段的 alpha 改成自己的值（模板里是 0.90）
+    text, n = re.subn(r"(?m)^  alpha: 0\.90.*$", f"  alpha: {GUI_SANDBOX_ALPHA}", text)
     assert n == 1, f"模板里 desktop_overlay 段应有且只有 1 行 `  alpha: 0.90`，命中 {n} 处"
 
     # ③ 目标窗口标题指向一定不存在的窗口：结论不依赖本机是否真开着 VRChat
@@ -1131,8 +1158,9 @@ def _make_gui_sandbox() -> None:
     GUI_SANDBOX.write_text(text, encoding="utf-8", newline="\n")
 
     data = _read_gui_sandbox()
-    assert data["overlay"]["alpha"] == GUI_INHERITED_ALPHA, data["overlay"].get("alpha")
-    assert "alpha" not in data["desktop_overlay"], data["desktop_overlay"]
+    assert data["overlay"]["alpha"] == GUI_OVERLAY_ALPHA, data["overlay"].get("alpha")
+    assert float(data["desktop_overlay"]["alpha"]) == GUI_SANDBOX_ALPHA, \
+        data["desktop_overlay"].get("alpha")
     assert data["desktop_overlay"]["game_title"] == FAKE_MISSING_TITLE
 
 
@@ -1140,18 +1168,16 @@ def _read_gui_sandbox() -> dict:
     return yaml.safe_load(GUI_SANDBOX.read_text(encoding="utf-8"))
 
 
-def test_gui_alpha_slider_inherits_and_only_saves_on_touch() -> None:
-    """界面透明度滑块：初值必须与窗口**同源**，且只有用户真拖过才写进配置。
+def test_gui_alpha_slider_reads_its_own_section_only() -> None:
+    """★ 桌面字幕的滑块与窗口只认 `desktop_overlay:` 段，**不读**手腕屏的 `overlay:` 段。
 
-    一条用例钉住两个真 bug：
-    ① 初值原来读 `_dov.get("alpha", 0.9)`（只有 desktop_overlay 段），而窗口那侧走的是
-       `DesktopOverlayConfig.from_dict(desktop_overlay 段, overlay 段)` ——
-       `overlay.alpha=0.5` 且本段没写 alpha 时，窗口是 0.50、滑块停在 0.90；
-    ② `_save_desktop_cfg()` 原来**无条件**把滑块值写进 `desktop_overlay.alpha`，而它也被
-       「锁定位置」与拖动落盘调到 → 用户只把字幕拖了个位置，透明度就被改成 0.90 并热重载。
+    这条用例守的是 2026-10-04 那次返工：桌面面板与手腕屏的配置**完全独立**
+    （返工前是「视觉参数继承 `overlay:` 段」，被维护者打回）。
+    沙箱里三个值互不相同：手腕屏 0.5 / 桌面段 0.65 / 用户拖到 0.35 —— 读错一段就现形。
 
-    顺带钉住两处卫生项：`_stop_desktop()` 要把拖动按钮文案复位成「解锁拖动」；
-    字幕窗没起来时点解锁，文案不许谎称"已自动取消勾选"。
+    顺带钉住：只有用户真拖过滑块才写盘（`_save_desktop_cfg()` 也被拖动落盘调到）；
+    `_stop_desktop()` 要把拖动按钮文案复位成「解锁拖动」；字幕窗没起来时点解锁，
+    文案不许谎称"已自动取消勾选"。
     """
     # 起界面会走 `load_api_key()`：干净环境（CI）上没有 key 直接 SystemExit → 假红。
     # 给一个**拼接出来的假 key**（不触发仓库的凭据扫描钩子）；本用例跟 key 真假无关。
@@ -1180,11 +1206,13 @@ def test_gui_alpha_slider_inherits_and_only_saves_on_touch() -> None:
             gui._update_check_job = None
         gui._root.update()
 
-        # ① 滑块初值 == 从 overlay 段继承来的 0.5（不是本段兜底的 0.90）
+        # ① 滑块初值 == 桌面段自己的 0.65 —— **不是**手腕屏段的 0.5，也不是默认 0.90
         got = float(gui._desktop_alpha_var.get())
-        assert abs(got - GUI_INHERITED_ALPHA) < 1e-9, \
-            f"滑块初值应继承 overlay.alpha={GUI_INHERITED_ALPHA}，实际 {got}（旧代码是 0.9）"
-        assert abs(got - 0.9) > 1e-9, "滑块初值仍是 0.90 —— 没跟窗口同源"
+        assert abs(got - GUI_SANDBOX_ALPHA) < 1e-9, \
+            f"滑块初值应取 desktop_overlay.alpha={GUI_SANDBOX_ALPHA}，实际 {got}"
+        assert abs(got - GUI_OVERLAY_ALPHA) > 1e-9, \
+            f"滑块初值读到了手腕屏的 overlay.alpha={GUI_OVERLAY_ALPHA}（两段必须独立）"
+        assert abs(got - 0.9) > 1e-9, "滑块初值是兜底 0.90 —— 没跟本段配置同源"
 
         # ② 起字幕窗：窗口那侧解析出来的 alpha 必须与滑块显示的是同一个值
         gui._desktop_var.set(True)
@@ -1197,7 +1225,7 @@ def test_gui_alpha_slider_inherits_and_only_saves_on_touch() -> None:
             f"窗口透明度 {gui._desktop_out.cfg.alpha} 与滑块 {got} 不同源"
         assert gui._desktop_alpha_touched is False, "没碰过滑块就不该算'动过了'"
 
-        # ③ 只解锁/锁定拖动（模拟拖到某处放手），绝不碰滑块 → 配置里不许出现 alpha。
+        # ③ 只解锁/锁定拖动（模拟拖到某处放手），绝不碰滑块 → 配置里的 alpha 不许被改写。
         #    落点故意**不等于**模板里的 pos:[80, 80]：否则「位置写进去了」那条断言即使
         #    落盘整条路失效也照样绿（空过）。拖动放手时 `_on_drag_end` 做的正是这个赋值
         #    （真鼠标那一路已由 test_drag_moves_window_and_snaps_to_anchor 覆盖）。
@@ -1212,8 +1240,8 @@ def test_gui_alpha_slider_inherits_and_only_saves_on_touch() -> None:
             gui._desktop_drag_btn.cget("text")
         gui._toggle_desktop_drag()                   # 锁定 → 落盘
         data = _read_gui_sandbox()
-        assert "alpha" not in data["desktop_overlay"], \
-            f"只拖了位置就把 alpha 写进配置了：{data['desktop_overlay']}"
+        assert abs(float(data["desktop_overlay"]["alpha"]) - GUI_SANDBOX_ALPHA) < 1e-9, \
+            f"只拖了位置就把 alpha 改写了：{data['desktop_overlay'].get('alpha')}"
         # 落盘这条路本身得是通的（否则上一条断言是空过）：位置写进去了，值就是落点
         assert list(data["desktop_overlay"]["pos"]) == list(landed), \
             f"位置没写进去（落盘路径失效？）：{data['desktop_overlay'].get('pos')} vs {landed}"
@@ -1255,8 +1283,8 @@ def test_gui_alpha_slider_inherits_and_only_saves_on_touch() -> None:
         (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG,
          _i18n.detect_system_language) = saved
         # 沙箱文件留在 out/ 下即可（已 gitignore）；用户的 config.yaml 全程没被碰过
-    print(f"  界面透明度滑块：初值继承 overlay.alpha={GUI_INHERITED_ALPHA} / "
-          f"只拖位置不写 alpha / 拖过滑块才写 {GUI_SLIDER_ALPHA} / "
+    print(f"  桌面字幕透明度滑块：初值取本段的 {GUI_SANDBOX_ALPHA}（不是手腕屏的 "
+          f"{GUI_OVERLAY_ALPHA}）/ 只拖位置不改写 alpha / 拖过滑块才写 {GUI_SLIDER_ALPHA} / "
           "按钮文案与提示如实 OK")
 
 
@@ -1312,7 +1340,8 @@ if __name__ == "__main__":
     test_resolve_position_falls_back_to_cfg_pos()
     test_clamp_alpha_bounds()
     test_alpha_mask_bits()
-    test_from_dict_defaults_inherit_and_override()
+    test_from_dict_defaults_and_own_keys()
+    test_desktop_config_is_decoupled_from_overlay_section()
     test_backend_config()
     test_native_window_wiring()
     test_native_backend_falls_back_to_tk()
@@ -1332,6 +1361,6 @@ if __name__ == "__main__":
     test_best_anchor_picks_nearest_grid_point()
     test_drag_moves_window_and_snaps_to_anchor()
     test_own_window_excluded_from_game_search()
-    test_gui_alpha_slider_inherits_and_only_saves_on_touch()
+    test_gui_alpha_slider_reads_its_own_section_only()
     test_update_entries_keeps_room_label()
     print("ALL PASSED")

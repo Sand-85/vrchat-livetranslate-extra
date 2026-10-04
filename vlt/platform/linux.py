@@ -46,6 +46,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import child_env
 from .audio import QueueAudioSource, SoundDeviceMicSource
 from .base import AudioSource, LoopbackTarget
 
@@ -77,7 +78,8 @@ def _pw_dump(force: bool = False) -> list[dict]:
     if shutil.which("pw-dump") is None:
         raise PipeWireUnavailable("找不到 pw-dump（装 pipewire 包）")
     try:
-        res = subprocess.run(["pw-dump"], capture_output=True, timeout=10)
+        res = subprocess.run(["pw-dump"], capture_output=True, timeout=10,
+                             env=child_env())
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PipeWireUnavailable(f"执行 pw-dump 失败：{exc}") from exc
     if res.returncode != 0:
@@ -346,6 +348,7 @@ def find_cjk_font() -> str | None:
             res = subprocess.run(
                 ["fc-match", "-f", "%{file}", "Noto Sans CJK SC:lang=zh-cn"],
                 capture_output=True, timeout=5,
+                env=child_env(),          # 别让宿主 fc-match 加载包内旧 fontconfig
             )
             if res.returncode == 0:
                 cand = res.stdout.decode("utf-8", "replace").strip()
@@ -397,6 +400,7 @@ def find_thai_font() -> str | None:
             res = subprocess.run(
                 ["fc-list", ":lang=th", "-f", "%{file}\n"],
                 capture_output=True, timeout=5,
+                env=child_env(),          # 别让宿主 fc-list 加载包内旧 fontconfig
             )
             if res.returncode == 0:
                 for line in res.stdout.decode("utf-8", "replace").splitlines():
@@ -602,7 +606,8 @@ class VirtualMicCable:
             self._proc = subprocess.Popen(
                 loopback_argv(self.sink_name, self.source_name, self._description,
                               channels=self._channels),
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                env=child_env())
         except Exception as exc:  # noqa: BLE001
             log.warning("[vmic] 拉起 pw-loopback 失败：%s: %s", type(exc).__name__, exc)
             return False
@@ -779,7 +784,7 @@ class PwRecordSource(QueueAudioSource):
         self._proc = subprocess.Popen(
             self.argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             bufsize=0,                      # 不做用户态缓冲：100ms 一块要实时到位
-        )
+            env=child_env())
         assert self._proc.stdout is not None
         try:
             while not stop.is_set():

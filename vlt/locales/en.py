@@ -28,8 +28,6 @@ STRINGS: dict[str, str] = {
     "双向同时": "Both",
     "输出:": "Output:",
     "手腕屏": "Wrist Overlay",
-    "微调 ▸": "Tune ▸",
-    "微调 ▾": "Tune ▾",
     "译音输出": "Voice Output",
     "就绪": "Ready",
     "状态：{msg}": "Status: {msg}",
@@ -416,16 +414,18 @@ STRINGS: dict[str, str] = {
     "下载的文件与发布页的摘要对不上，已删除（请重试）":
         "The downloaded file doesn't match the checksum on the release page; "
         "it has been deleted (please retry)",
-    "手腕屏已开启（可用「微调 ▸」调位置）":
-        "Wrist overlay is on — use \"Tune ▸\" to adjust its position",
+    "手腕屏已开启（位置 / 字号等见「设置 → 手腕屏」）":
+        "Wrist overlay is on — position, font size and more are under "
+        "\"Settings → Wrist Overlay\"",
     "手腕屏没启动起来，已自动取消勾选（先把 SteamVR 打开，再勾一次即可）":
         "The wrist overlay could not start, so the tick was reverted — "
         "start SteamVR first, then tick it again",
 
     # ---- 桌面字幕（PC 桌面模式叠加窗）----
     "桌面字幕": "Desktop Subtitles",
-    "桌面字幕已开启（拖到想要的位置，透明度见「微调 ▸」）":
-        "Desktop subtitles are on — drag them where you want; opacity is under \"Tune ▸\"",
+    "桌面字幕已开启（拖到想要的位置；尺寸/字号/透明度见「设置 → 桌面字幕」）":
+        "Desktop subtitles are on — drag them where you want; size, font and opacity are "
+        "under \"Settings → Desktop Subtitles\"",
     "桌面字幕没启动起来，已自动取消勾选":
         "Desktop subtitles could not start, so the tick was reverted",
     "桌面字幕还没开启，先勾上「桌面字幕」再解锁拖动":
@@ -563,4 +563,21 @@ STRINGS: dict[str, str] = {
         "Failed to fetch template audio: {msg}",
     "范本样本已更新：{n}":
         "Template samples updated: {n}",
+    "（字幕窗默认可穿透，先解锁再拖；改动即时生效）":
+        "(the window ignores clicks by default — unlock first, then drag; changes apply instantly)",
+    "端口:": "Port:",
+    "保存端口": "Save Port",
+    "VRChat 默认收 9000 端口；只有你在 VRChat 里改过 OSC 端口（或中间挂了转发工具）时才需要动这里":
+        "VRChat listens on port 9000 by default — change this only if you changed "
+        "VRChat's OSC port (or run a forwarding tool in between)",
+    "端口必须是 1–65535 之间的整数": "Port must be an integer between 1 and 65535",
+    "OSC 端口已保存：{port}": "OSC port saved: {port}",
+    "OSC 端口已保存：{port}（正在翻译，重开翻译后生效）":
+        "OSC port saved: {port} (restart translation to apply)",
+    "面板宽度": "Panel Width",
+    "面板高度": "Panel Height",
+    "头显里那块手腕屏的锚点、位置 / 旋转 / 字号等参数。":
+        "Anchor, position / rotation / font size and more for the in-headset wrist overlay.",
+    "贴在 VRChat 窗口上的那块字幕窗：尺寸 / 字号 / 透明度。":
+        "The subtitle window pinned to the VRChat window: size / font size / opacity.",
 }

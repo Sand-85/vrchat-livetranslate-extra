@@ -22,7 +22,7 @@ from typing import Any
 import websockets
 
 from .base import (AudioHandler, LiveTranslateSession, SessionConfig, TextDelta, TextHandler,
-                  UsageHandler, should_finalize)
+                   UsageHandler, should_finalize)
 
 # 关闭握手的上限（秒）。**真链路实测（2026-09-30）：百炼服务端不回 close 帧** ——
 # `ws.close()` 稳吃 10.01s（两次测量一致），也就是 websockets 的默认 close_timeout，
@@ -32,6 +32,11 @@ from .base import (AudioHandler, LiveTranslateSession, SessionConfig, TextDelta,
 CLOSE_TIMEOUT_S = 1.5
 # `ws.close()` 自身的硬上限（比 close_timeout 略宽一点，只用来兜底/留痕）。
 CLOSE_WAIT_S = 2.0
+# 发完 `session.finish` 后等对端 `session.finished` 的上限（秒）。
+# 官方结束序列是 client `session.finish` → server `session.finished` → client 断连；
+# 不等这一步就断连，服务端会把整个 WS 请求记成异常（海外版 QwenCloud 后台实测
+# 每个会话都记 400，见 issue #53）。等不到也必须**有界**收尾，否则「停止翻译」会被拖长。
+FINISH_WAIT_S = 1.0
 
 
 def is_fatal_server_error(payload: dict) -> bool:
@@ -86,13 +91,17 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         self._evt_hist: deque[tuple[str, float]] = deque(maxlen=80)
         self._evt_counts: dict[str, int] = {}
         self._closing = False
+        # 官方结束序列的最后一步：收到服务端 `session.finished` 才算正常结束。
+        # `_finished_evt` 在 start() 里建（那时才在事件循环里）；`_got_finished` 是给
+        # 「等到了没有」留痕用的（停止日志要能对比 QwenCloud / 国内线路）。
+        self._finished_evt: asyncio.Event | None = None
+        self._got_finished = False
         # 服务端判定致命错误的原因（如 model repeat output happened）。
         # 一旦设置，说明本会话已被我们主动放弃，看门狗会直接走重连路径。
         self.fatal_reason = ""
         self._buf: list[str] = []          # 本段已确认文本的增量累加
         self._src_buf: list[str] = []
         self._last_text_at: float = 0.0    # 最近一次文本增量时间（静默兜底用）
-        self._last_audio_at: float = 0.0   # 最近一次**上送音频**时刻（快封句的「麦克风静音」依据）
         self._last_final_text = ""         # 最近一次已发出的最终版文本（允许再次终结）
         self._budget = ConnectionBudget(cfg.max_new_sessions_per_minute)
         # 延迟埋点
@@ -123,6 +132,8 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             pass
         await self._ws.send(json.dumps({"event_id": "evt_update", "type": "session.update",
                                         "session": self._session_payload()}))
+        # 建「等 session.finished」的事件：必须在事件循环里建（close() 与接收循环共用）。
+        self._finished_evt = asyncio.Event()
         self._recv_task = asyncio.create_task(self._recv_loop())
 
     def _session_payload(self) -> dict:
@@ -150,9 +161,6 @@ class QwenLiveTranslateSession(LiveTranslateSession):
     async def send_audio(self, pcm16_16k: bytes) -> None:
         if self._ws is None:
             raise RuntimeError("会话尚未 start()")
-        # 快封句的「麦克风静音」依据：注意引擎的 _SilenceGate 静音时**只暂停上送**，
-        # 所以「距上次上送的间隔」就是用户真实的停顿长度。
-        self._last_audio_at = time.perf_counter()
         await self._ws.send(json.dumps({
             "event_id": "evt_audio",
             "type": "input_audio_buffer.append",
@@ -194,10 +202,16 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         return f"{type(exc).__name__}: {exc}"[:200]
 
     async def close(self) -> None:
-        """关会话：正常路径（对端回 close 帧）秒回；对端装死时有界 + **留痕**。
+        """关会话：先按官方结束序列等 `session.finished`，再有界断连（全程留痕）。
 
-        为什么要有界：实测百炼服务端不回 close 帧 → `ws.close()` 走 websockets 的
-        `close_timeout` 默认 10s，白等会让「停止翻译」多花 10 秒（界面线程同步等它 =
+        顺序（官方文档 + issue #53）：
+            client → session.finish ；server → session.finished ；client → close WebSocket。
+        不等 `session.finished` 就断连，服务端会把整个 WS 请求记成异常（海外版 QwenCloud
+        后台实测每个会话都记 400）。等不到也要有界收尾 —— 服务端不实现/已异常时，
+        干等会把「停止翻译」拖长甚至卡界面。
+
+        为什么断连本身也要有界：实测百炼服务端不回 close 帧 → `ws.close()` 走 websockets
+        的 `close_timeout` 默认 10s，白等会让「停止翻译」多花 10 秒（界面线程同步等它 =
         窗口「未响应」，用户真机复现）。这里两道闸：建连时给 `close_timeout`，
         外层再套一层 `wait_for` —— 前者管协议层握手，后者保证任何实现都不会卡住收尾。
         """
@@ -205,9 +219,9 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         if self._ws is not None:
             try:
                 await self._ws.send(json.dumps({"event_id": "evt_finish", "type": "session.finish"}))
-                await asyncio.sleep(0.3)
             except Exception:
                 pass
+            await self._wait_session_finished()
             t0 = time.perf_counter()
             try:
                 await asyncio.wait_for(self._ws.close(), timeout=CLOSE_WAIT_S)
@@ -226,6 +240,43 @@ class QwenLiveTranslateSession(LiveTranslateSession):
                           flush=True)
         if self._recv_task is not None:
             self._recv_task.cancel()
+
+    def _note_session_finished(self) -> None:
+        """记下「服务端已宣布会话结束」，并唤醒 close() 里等待的那一段（幂等）。"""
+        if self._got_finished:
+            return
+        self._got_finished = True
+        if self._finished_evt is not None:
+            self._finished_evt.set()
+
+    async def _wait_session_finished(self) -> None:
+        """发完 `session.finish` 后等对端 `session.finished`：**有界 + 每条路径都留痕**。
+
+        收到 → 正常结束序列走完（含等待耗时）；连接中途断了 → 不再等、说明一句；
+        等满超时 → 强制断连并说明原因。没 start 过（没有事件）时立即返回。
+        """
+        evt = self._finished_evt
+        if evt is None:
+            return
+        if self.fatal_reason:
+            print("[session] 会话已因服务端致命错误放弃 → 不再等 session.finished", flush=True)
+            return
+        if self._got_finished:
+            print("[session] session.finished 已收到过 → 直接断连", flush=True)
+            return
+        t0 = time.perf_counter()
+        try:
+            await asyncio.wait_for(evt.wait(), timeout=FINISH_WAIT_S)
+        except asyncio.TimeoutError:
+            print(f"[session] 发 session.finish 后 {FINISH_WAIT_S:.1f}s 内没收到 session.finished"
+                  f" → 强制断连（服务端可能不支持或已异常）", flush=True)
+            return
+        ms = (time.perf_counter() - t0) * 1000
+        if self._got_finished:
+            print(f"[session] 已收到 session.finished（等待 {ms:.0f}ms）→ 正常结束序列走完，断连",
+                  flush=True)
+        else:
+            print(f"[session] 等 session.finished 期间连接断开（{ms:.0f}ms）→ 直接断连", flush=True)
 
     def _abort_on_fatal(self, reason: str) -> None:
         """服务端判定致命错误 → 主动放弃本会话（不许静默：必须留痕）。
@@ -257,14 +308,23 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         assert self._ws is not None
         try:
             async for raw in self._ws:
-                if self._closing:
-                    return
                 try:
                     ev = json.loads(raw)
                 except Exception:
+                    if self._closing:
+                        return
                     continue
                 # 黑匣子：记下事件类型序列（断线时用来还原"服务端最后在做什么"）
                 etype = str(ev.get("type", ""))
+                # 官方结束序列的最后一步（issue #53）：收尾阶段**也要收**它 ——
+                # 上面那句「closing 就立刻 return」如果先执行，close() 永远等不到
+                # session.finished，服务端会把整个 WS 请求判成异常。
+                if etype == "session.finished":
+                    self._note_session_finished()
+                    if self._closing:
+                        return
+                if self._closing:
+                    continue
                 self._evt_hist.append((etype, time.monotonic()))
                 self._evt_counts[etype] = self._evt_counts.get(etype, 0) + 1
                 self._handle_event(ev)
@@ -273,6 +333,12 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         except Exception as exc:  # noqa: BLE001
             if not self._closing:
                 print(f"[session] 事件循环中断：{type(exc).__name__}: {exc}")
+        finally:
+            # 连接已断 → 唤醒 close() 里等 session.finished 的那一段（否则白等满超时）。
+            # ⚠️ 只解阻塞、**不置 `_got_finished`**：那个标志是「真的收到 session.finished」
+            #    的证据（停止日志靠它区分 QwenCloud / 国内线路），不能被「连接断了」冒充。
+            if self._finished_evt is not None:
+                self._finished_evt.set()
 
     def _handle_event(self, ev: dict) -> None:
         etype = ev.get("type", "")
@@ -353,10 +419,10 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         `base.should_finalize()`（纯函数，离线可测）。
 
         注意三点（都是实测踩出来的）：
-        1) 慢阈値必须大于服务端的增量间隔（实测最大 2.3s），否则会在句子中间抢跑；
+        1) 慢阈值必须大于服务端的增量间隔（实测最大 2.3s），否则会在句子中间抢跑；
         2) **不能一发就永久封死**——长句后续还会有增量，文本变了就应再次终结；
-        3) 那 2.3s 的大间隔是**句子中间**的停顿 → 快路径必须有「麦克风已静」这一条，
-           否则照样会抢跑。
+        3) 那 2.3s 的大间隔是**句子中间**的停顿 → 快路径必须有「上游已无人在说话」这一条
+           （`note_voice()` 上报的电平信号），否则照样会抢跑。
         """
         if self._closing or not self._buf:
             return
@@ -367,11 +433,13 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             return
         now = time.perf_counter()
         text_quiet = now - self._last_text_at
-        mic_quiet = (now - self._last_audio_at) if self._last_audio_at else None
-        if should_finalize(text_quiet_s=text_quiet, mic_quiet_s=mic_quiet,
+        # 「上游还有没有人在说话」由 _SessionProxy 按**电平**上报（note_voice()）——
+        # 不能用「距上次上送音频的间隔」：麦克风腿没有闸门，静音块照样每 ~0.1s 上送一次。
+        user_quiet = self.user_quiet_s(now)
+        if should_finalize(text_quiet_s=text_quiet, user_quiet_s=user_quiet,
                            silence_s=self.cfg.final_silence_s,
                            fast_silence_s=self.cfg.fast_final_silence_s,
-                           fast_mic_quiet_s=self.cfg.fast_final_mic_quiet_s):
+                           fast_user_quiet_s=self.cfg.fast_final_user_quiet_s):
             self._emit(confirmed=cur, pending="", is_final=True)
 
     def _map_text_event(self, etype: str, ev: dict) -> tuple[str, str, str | None] | None:

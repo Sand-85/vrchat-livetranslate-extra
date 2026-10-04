@@ -236,11 +236,11 @@ def main() -> int:
         if gui._update_check_job is not None:      # 启动 3 秒后会自动查更新：绝不真连 GitHub
             gui._root.after_cancel(gui._update_check_job)
             gui._update_check_job = None
-        gui._toggle_tune_panel()
+        # 面板已搬进「设置 → 手腕屏」：控件随设置弹窗在启动时建好，不用展开任何面板。
 
-        # 只收集 specs 那张网格里的滑块：同一个微调面板下方还挂着「桌面字幕」的透明度
-        # 滑块（不是手腕屏参数），按 `_tune_body` 整棵树收集会把顺序与条数都算错。
-        scales = collect_scales(getattr(gui, "_tune_grid", gui._tune_body))
+        # 只收集 specs 那张网格里的滑块：手腕屏页里不再混桌面字幕的滑块，
+        # 但按整页收集仍会把「设置页说明标签」等算进来，定位在 `_tune_grid` 最稳。
+        scales = collect_scales(getattr(gui, "_tune_grid", gui._wrist_page))
         print("test_tune_rot_range:")
         for fn in (lambda: check_rot_slider_range(scales),
                    lambda: check_out_of_range_not_clamped(scales),

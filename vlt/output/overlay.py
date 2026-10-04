@@ -105,7 +105,7 @@ def resolve_offset(d: dict, anchor: str) -> tuple[tuple[float, ...], tuple[float
     """从 `overlay` 段解析**某个锚点**的 `(pos, rot)`。GUI 与两端后端都走这里，口径只有一处。
 
     取值优先级：
-      ① `overlay.offsets.<anchor>.pos/rot` —— 界面「微调 ▸」为**每个锚点各存一套**；
+      ① `overlay.offsets.<anchor>.pos/rot` —— 界面「设置 → 手腕屏」为**每个锚点各存一套**；
       ② `overlay.offset.pos/rot`          —— 兜底：这个锚点还没单独存过时用它
          （老配置只有这一段，照常工作，不会因为升级就丢位姿）；
       ③ 出厂默认值。

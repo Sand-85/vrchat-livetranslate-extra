@@ -59,7 +59,8 @@ def main() -> int:
     from vlt.gui import TranslationGUI
 
     gui = TranslationGUI()
-    gui._toggle_tune_panel()
+    # 手腕屏微调 / 桌面字幕调整两页的控件随设置弹窗在**启动时**就建好了（弹窗只是隐藏着），
+    # 所以这里不点开设置也能直接操作控件 —— 原来那行 `_toggle_tune_panel()` 已随面板进设置作废。
 
     # 模拟用户操作：改锚点 + 拖滑块 + tracker 序号 + 切译音开关 + 改语言
     # ⚠️ 顺序要跟真界面一致：先切锚点（会把该锚点那一份回填到滑块），再拖滑块。

@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Callable
 
+from ..platform import child_env
+
 log = logging.getLogger(__name__)
 
 OUTPUT_DEVICE_FALLBACK = ["voicemeeter input", "voicemeeter aux input", "cable input", "vb-audio"]
@@ -327,7 +329,8 @@ class PwCatVirtualMic(VirtualMic):
         try:
             self._proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
                                           stdout=subprocess.DEVNULL,
-                                          stderr=subprocess.PIPE)
+                                          stderr=subprocess.PIPE,
+                                          env=child_env())
         except Exception as exc:  # noqa: BLE001
             self._on_status("error", f"启动 pw-cat 失败（{self._target}）：{exc}")
             return False

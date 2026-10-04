@@ -13,7 +13,7 @@ import yaml
 
 from . import endpoints
 from .session.base import (SessionConfig, DEFAULT_FINAL_SILENCE_S,
-                           DEFAULT_FAST_FINAL_SILENCE_S, DEFAULT_FAST_FINAL_MIC_QUIET_S)
+                           DEFAULT_FAST_FINAL_SILENCE_S, DEFAULT_FAST_FINAL_USER_QUIET_S)
 
 from .paths import APP_DIR, BUNDLE_DIR
 
@@ -143,12 +143,14 @@ class Direction:
             reconnect_backoff=tuple(base.get("reconnect_backoff", (2, 5, 10, 30))),
             max_new_sessions_per_minute=int(base.get("max_new_sessions_per_minute", 4)),
             final_silence_s=float(base.get("final_silence_s", DEFAULT_FINAL_SILENCE_S)),  # 默认值必须 > 服务端增量间隔（实测最大 2.3s），改小会让最终版在句子中间抢跑
-            # 快封句（麦克风也静了 → 用户确实说完了）：文字静默到这个值就封，省 ~1.8s；
+            # 快封句（上游也静了 → 说话的人确实说完了）：文字静默到这个值就封，省 ~1.8s；
             # None = 关掉快路径（退回纯 final_silence_s）
-            fast_final_silence_s=_opt_float(base.get("fast_final_silence_s",
-                                                     DEFAULT_FAST_FINAL_SILENCE_S)),
-            fast_final_mic_quiet_s=float(base.get("fast_final_mic_quiet_s",
-                                                 DEFAULT_FAST_FINAL_MIC_QUIET_S)),
+            fast_final_silence_s=_opt_float(
+                base.get("fast_final_silence_s", DEFAULT_FAST_FINAL_SILENCE_S),
+                DEFAULT_FAST_FINAL_SILENCE_S, key="session.fast_final_silence_s"),
+            fast_final_user_quiet_s=_float_or_default(
+                base.get("fast_final_user_quiet_s", DEFAULT_FAST_FINAL_USER_QUIET_S),
+                DEFAULT_FAST_FINAL_USER_QUIET_S, key="session.fast_final_user_quiet_s"),
         )
 
 
@@ -195,14 +197,31 @@ def _opt_int(value) -> int | None:
         return None
 
 
-def _opt_float(value) -> float | None:
-    """可选浮点字段：None/空串 → None（= 不传该参数）；非法值也回 None。"""
+def _opt_float(value, default: float, *, key: str) -> float | None:
+    """快封句的「文字静默」阈值：`None`/空串 = **用户明确关掉**（回 `None`）；非法值 → 留痕 + 回落默认值。
+
+    本仓库的配置是手写的，写错一个字母不该让程序起不来（与 `normalize_provider` 同一取舍）；
+    「关掉」必须能表达 —— 靠 `fast_final_silence_s: null` 退回纯 `final_silence_s`。
+    ⚠️ 但非法值**不许静默**：一个 `1,1` 的笔误会把功能悄悄关掉、日志一个字都没有 ——
+    按本仓库既有口径（`engine.silence_gate_settings` / `repeat_guard_settings`）打一行 `[config] ⚠️`。
+    """
     if value is None or value == "":
         return None
     try:
         return float(value)
     except (TypeError, ValueError):
-        return None
+        print(f"[config] ⚠️ {key}={value!r} 不是数字 → 回落默认值 {default}"
+              f"（要关掉快封句请写 null）", flush=True)
+        return default
+
+
+def _float_or_default(value, default: float, *, key: str) -> float:
+    """普通浮点配置：非法值 → 留痕 + 回落默认值（绝不因一个手写笔误让程序起不来）。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        print(f"[config] ⚠️ {key}={value!r} 不是数字 → 回落默认值 {default}", flush=True)
+        return default
 
 
 def _resolve_api_key(api_key: str | None, require_key: bool, slot: str = "qianwen") -> str:
@@ -304,11 +323,13 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         "reconnect_backoff": s.get("reconnect_backoff", [2, 5, 10, 30]),
         "max_new_sessions_per_minute": s.get("max_new_sessions_per_minute", 4),
         "final_silence_s": float(s.get("final_silence_s", DEFAULT_FINAL_SILENCE_S)),  # 默认值必须 > 服务端增量间隔（实测最大 2.3s），改小会让最终版在句子中间抢跑
-        # 快封句：麦克风也静了 → 文字静默 fast_final_silence_s 就封（省 ~1.8s）；None = 关掉
-        "fast_final_silence_s": _opt_float(s.get("fast_final_silence_s",
-                                                DEFAULT_FAST_FINAL_SILENCE_S)),
-        "fast_final_mic_quiet_s": float(s.get("fast_final_mic_quiet_s",
-                                             DEFAULT_FAST_FINAL_MIC_QUIET_S)),
+        # 快封句：上游也静了 → 文字静默 fast_final_silence_s 就封（省 ~1.8s）；None = 关掉
+        "fast_final_silence_s": _opt_float(
+            s.get("fast_final_silence_s", DEFAULT_FAST_FINAL_SILENCE_S),
+            DEFAULT_FAST_FINAL_SILENCE_S, key="session.fast_final_silence_s"),
+        "fast_final_user_quiet_s": _float_or_default(
+            s.get("fast_final_user_quiet_s", DEFAULT_FAST_FINAL_USER_QUIET_S),
+            DEFAULT_FAST_FINAL_USER_QUIET_S, key="session.fast_final_user_quiet_s"),
         # 长静音闸门 + 本地 repeat 抑制：原样透传，取值校验在 engine 里做
         # （非法值会**留痕**并回落默认值，见 engine.silence_gate_settings / repeat_guard_settings）
         "silence_gate_enabled": s.get("silence_gate_enabled", True),
@@ -398,7 +419,8 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 # 流式合成（SSE）：首包 ~0.4s 就能起播，整段要等 1.6~1.9s → 默认开
                 "stream": bool((raw_textin.get("tts") or {}).get("stream", True)),
                 # 语速（仅 qwen3-tts 生效）：1 = 默认；0.8 约慢 20%，1.2 约快 20%（实测单调）
-                "speech_rate": _opt_float((raw_textin.get("tts") or {}).get("speech_rate")),
+                "speech_rate": _opt_float((raw_textin.get("tts") or {}).get("speech_rate"), 1.0,
+                                      key="text_input.tts.speech_rate"),
                 # 通联开关音：每句话开头 / 结尾各播一小段音效（只作用于 TTS 出声：
                 # 打字腿 + 语音腿 B 模式；A 模式是实时模型自带音频，不播）。留空 = 不播。
                 "open_sfx": str((raw_textin.get("tts") or {}).get("open_sfx") or ""),

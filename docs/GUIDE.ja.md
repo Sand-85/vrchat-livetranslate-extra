@@ -290,6 +290,8 @@ session:
   voice: Tina                 # ⚠️ 必ず明示。未設定だと Voice 'Chelsie' is not supported で失敗
   turn_detection: null        # 空 = サーバー既定
   final_silence_s: 3.0        # ⚠️ サーバーの増分間隔（実測最大 2.3s）より大きくすること。小さくすると文の途中で確定版が飛びます
+  fast_final_silence_s: 1.1   # 早めの確定：上流も静か（誰も話していない）なら、この文字無音で確定（約 1.8s 短縮）。null = 無効
+  fast_final_user_quiet_s: 0.5  # 「誰も話していない」の判定は**レベル**。環境ノイズが閾値を超え続けると上の 3.0s に退化する
   max_new_sessions_per_minute: 4   # RPM 10 の予算：WS 接続 1 回でリクエスト 1 回と数えます
   reconnect_backoff: [2, 5, 10, 30]
 
@@ -450,6 +452,7 @@ output:
 | `Invalid translation parameter` | `session.update` に `translation` フィールドがありません（コード側では保証済み。改変するときは注意） |
 | `1007 Requests rate limit exceeded` | RPM 10 に到達しました。1 分待ってください。頻繁な再起動は避けてください（**WS 接続 1 回ごとにリクエスト 1 回**と数えます） |
 | 翻訳が文の途中で止まる | 無音フォールバックのしきい値が下がっています。`session.final_silence_s` は 2.3 s より大きく（既定 3.0） |
+| 話し終えてから最終版まで ~3s かかる | 早めの確定が無効（`session.fast_final_silence_s: null`）か効いていない。判定は**レベル**：騒がしい環境では上の 3.0s に退化する（保守的で、途中で確定しない） |
 | `[overlay] ⚠️ SteamVR not running or unavailable` | 正常な縮退動作です。手首オーバーレイが出ないだけで、chatbox には影響しません |
 | 手首オーバーレイが見えない | まず SteamVR が起動しているか確認し、「微調整」で位置／サイズを調整してください。`--overlay-dry-run` で PNG が出るなら描画自体は正常です |
 | しばらくすると手首オーバーレイが消える | 2 段階の自己修復が入っています（3 回連続失敗 → オーバーレイを再構築 → さらに 3 回 → openvr 接続をハード再起動 → 以降は 50 回に 1 回だけ再試行）。ログには 30 秒ごとに `[overlay][diag] heartbeat: …` が出て、「最後の成功からの経過時間／再構築回数」を確認できます |

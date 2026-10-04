@@ -291,6 +291,8 @@ session:
   voice: Tina                 # ⚠️ must be given explicitly — leaving it unset raises Voice 'Chelsie' is not supported
   turn_detection: null        # empty = server default
   final_silence_s: 3.0        # ⚠️ must be > the server's delta interval (measured max 2.3 s); a smaller value makes the final version jump the gun mid-sentence
+  fast_final_silence_s: 1.1   # Fast finalize: when the upstream is quiet too (nobody speaking), seal after this much text silence (~1.8s sooner); null = disable
+  fast_final_user_quiet_s: 0.5  # "Nobody is speaking" is judged by **level**; if ambient noise stays above the threshold the fast path degrades to the 3.0s above
   max_new_sessions_per_minute: 4   # RPM 10 budget: every WS connection counts as one request
   reconnect_backoff: [2, 5, 10, 30]
 
@@ -459,6 +461,7 @@ wrist overlay / desktop subtitles.
 | `Invalid translation parameter` | `session.update` is missing the `translation` field (guaranteed in code; watch out if you modify it) |
 | `1007 Requests rate limit exceeded` | Hit RPM 10. Wait 1 minute; don't restart frequently (**every WS connection counts as one request**) |
 | Translation stuck at half a sentence | The silence-fallback threshold was lowered. `session.final_silence_s` must be > 2.3 s; default 3.0 |
+| Final version arrives ~3s after you stop | The fast finalize is off (`session.fast_final_silence_s: null`) or not effective: the "level" judge never fires — in a noisy room the fast path degrades to the slow one (conservative, never jumps the gun) |
 | `[overlay] ⚠️ SteamVR not running or unavailable` | Normal degradation: only the wrist display won't show; chatbox is unaffected |
 | Wrist display invisible | First confirm SteamVR is running; then adjust position / size in "Fine-tune"; if `--overlay-dry-run` produces PNGs, rendering is fine |
 | Wrist display disappears after a while | Two-level self-healing is built in (3 consecutive failures → rebuild the overlay → 3 more → hard-restart the openvr connection → retry once every 50 attempts after that). The log has an `[overlay][diag] heartbeat: …` line every 30 s showing "how long since last successful upload / rebuild count" |

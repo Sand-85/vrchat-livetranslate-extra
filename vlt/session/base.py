@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import abc
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -40,37 +41,45 @@ class TextDelta:
 # 阈值太小会在句子中间抢跑，把半句当成最终版。
 DEFAULT_FINAL_SILENCE_S = 3.0
 
-# 「麦克风也静了」的快封句（2026-10-01 实测新增，省 ~1.8s）：
+# 「上游也没人说话了」的快封句（真链路实测 2026-10-01：省 ~1.8s）：
 # 实测（真链路 2 句）：服务端在**用户停止说话后 8s 内一条事件都不发**
 # （既无 response.text.done 也无 response.done）→ 没有语义完成信号可用，只能靠定时器；
 # 而累计译文在「说完前 0.74~0.89s」就不再增长 → 之后再等 3s 全是白等。
-# 所以：**麦克风已静音 ≥ fast_mic_quiet_s**（用户确实说完了）时，文字静默只要
-# fast_silence_s 就封句；用户还在说（< fast_mic_quiet_s）则仍用保守的 3.0s —— 那 2.3s 的
-# 大间隔是**句子中间**的停顿，不能拿它当证据。
+# 所以：**上游已无「有人说话」的电平 ≥ fast_user_quiet_s**（用户确实说完了）时，
+# 文字静默只要 fast_silence_s 就封句；还在说（< fast_user_quiet_s）则仍用保守的 3.0s
+# —— 那 2.3s 的大间隔是**句子中间**的停顿，不能拿它当证据。
+#
+# ⚠️ 判据必须是**电平**（`_SessionProxy.send_audio` 里 `peak >= SILENCE_PEAK` → note_voice()），
+#    不能拿「距上次上送音频的间隔」：麦克风腿**没有闸门**（`_SilenceGate` 只挂在环回腿上、
+#    阈值同 silence_gate_after_s 默认 30s），真人说话时静音块照样每 ~0.1s 上送一次
+#    → 那个间隔恒为 ~0.1s，快路径永远不触发（实测脚本 out/check_pr49_mic_signal.py）。
 DEFAULT_FAST_FINAL_SILENCE_S = 1.1
-DEFAULT_FAST_FINAL_MIC_QUIET_S = 0.5
+DEFAULT_FAST_FINAL_USER_QUIET_S = 0.5
 
 
-def should_finalize(*, text_quiet_s: float, mic_quiet_s: float | None,
+def should_finalize(*, text_quiet_s: float, user_quiet_s: float | None,
                     silence_s: float = DEFAULT_FINAL_SILENCE_S,
                     fast_silence_s: float | None = DEFAULT_FAST_FINAL_SILENCE_S,
-                    fast_mic_quiet_s: float = DEFAULT_FAST_FINAL_MIC_QUIET_S) -> bool:
+                    fast_user_quiet_s: float = DEFAULT_FAST_FINAL_USER_QUIET_S) -> bool:
     """该不该把累计文本封成「最终版」（纯函数，便于离线测）。
 
     两条路径：
     - **慢**：文字静默 ≥ `silence_s`（3.0s）。任何时候都成立，但用户说完后要白等 3s。
-    - **快**：`fast_silence_s` 非 None、**麦克风已静音 ≥ `fast_mic_quiet_s`**、
-      且文字静默 ≥ `fast_silence_s`。用户都不说了，服务端的尾巴（实测最后一条分片在
+    - **快**：`fast_silence_s` 非 None、**上游已无人在说话 ≥ `fast_user_quiet_s`**、
+      且文字静默 ≥ `fast_silence_s`。都不说了，服务端的尾巴（实测最后一条分片在
       说完前 0.7~0.9s 就到齐）就不会再长 → 可以早封。
 
-    `mic_quiet_s=None`：从未上送过音频（没有音频在流 = 没人在说话）→ 按「已静」看待。
+    `user_quiet_s=None` = 这条腿**从没收到过**「有人说话」的信号（没声音，或信号没接上）
+    → **走慢路径**（不早封）。⚠️ 这里宁可保守：抢跑会把半句当最终版发出去，而多等 3s 只是慢；
+    且「从没说过话」时 `tick()` 本来就没文本可封。信号来源见 `LiveTranslateSession.note_voice()`
+    （由 `_SessionProxy.send_audio` 按**电平**上报）。
     """
     if text_quiet_s >= silence_s:
         return True
-    if fast_silence_s is None:
+    if fast_silence_s is None or user_quiet_s is None:
         return False
-    if mic_quiet_s is not None and mic_quiet_s < fast_mic_quiet_s:
-        return False                      # 用户还在说：服务端可能只是慢，别抢跑
+    if user_quiet_s < fast_user_quiet_s:
+        return False                      # 上游还在说话：服务端可能只是慢，别抢跑
     return text_quiet_s >= fast_silence_s
 
 
@@ -102,7 +111,7 @@ class SessionConfig:
     # 快封句（麦克风也静了 → 用户确实说完了）：文字静默到这个值就封，省 ~1.8s。
     # None = 关掉快路径（退回纯 final_silence_s）。
     fast_final_silence_s: float | None = DEFAULT_FAST_FINAL_SILENCE_S
-    fast_final_mic_quiet_s: float = DEFAULT_FAST_FINAL_MIC_QUIET_S
+    fast_final_user_quiet_s: float = DEFAULT_FAST_FINAL_USER_QUIET_S
 
     @property
     def url(self) -> str:
@@ -128,6 +137,26 @@ class LiveTranslateSession(abc.ABC):
         self.on_usage: UsageHandler | None = None
         # 原始服务端事件钩子（调试/埋点用）：(event_type, full_event) -> None
         self.on_event = None
+        # 最近一次「上游有人说话」的时刻（`note_voice()` 打点；0.0 = 这条腿全程没声音）
+        self._last_voice_at: float = 0.0
+
+    def note_voice(self) -> None:
+        """上游告诉会话：**刚刚这一块音频是「有人在说话」**（电平过 `SILENCE_PEAK`）。
+
+        只给静默兜底用（`tick()` 的快路径判据）。谁调用：`engine._SessionProxy.send_audio`
+        —— 它本来就在算 `loud = peak >= SILENCE_PEAK`，顺手把「有人在说」上报给会话。
+
+        ⚠️ 判据为什么不能用「距上次上送音频的间隔」：麦克风腿**没有闸门**（静音块照样
+        每 ~0.1s 上送一次，`_SilenceGate` 只挂在环回腿、阈值默认 30s）→ 那个间隔恒为
+        ~0.1s，快路径永不触发（实测脚本 `out/check_pr49_mic_signal.py`）。
+        """
+        self._last_voice_at = time.perf_counter()
+
+    def user_quiet_s(self, now: float | None = None) -> float | None:
+        """距上游最后一次「有人说话」过去多久；这条腿全程没声音 → `None`（按「已静」看待）。"""
+        if not self._last_voice_at:
+            return None
+        return (now if now is not None else time.perf_counter()) - self._last_voice_at
 
     @abc.abstractmethod
     async def start(self, on_text: TextHandler, on_audio: AudioHandler | None = None,
