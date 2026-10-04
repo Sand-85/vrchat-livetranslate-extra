@@ -2834,16 +2834,25 @@ class TranslationGUI:
                     print(f"[gui] 范本样本更新检查失败（不影响功能）："
                           f"{type(exc).__name__}: {exc}", flush=True)
                     changed = []
-                self._q.put(("voice_lab", "sample_check", True, "", changed))
+                if changed:                      # 没更新就**一条消息都不发**（后台动作不该搅队列）
+                    self._q.put(("voice_lab", "sample_check", True, "", changed))
                 return
             elif job == "preset_fetch":
                 got = voice_lab.fetch_preset_sample(kw["app_dir"], kw["preset"])
                 self._q.put(("voice_lab", "preset_fetch", True, "", got))
                 return
             elif job == "tts_list":
-                res = voice_lab.list_voices(api_key=kw["api_key"], base_url=kw["base_url"],
-                                            workspace_id=kw["ws_id"], family="all")
-                self._q.put(("voice_lab", "tts_list", True, "", res))
+                # 与 sample_check 同一纪律：**后台维护动作失败只记日志、不进队列** ——
+                # 否则会塞一条永远没人关心的错误消息，搅乱别处对 _q 的断言（CI 上真红过）。
+                try:
+                    res = voice_lab.list_voices(api_key=kw["api_key"], base_url=kw["base_url"],
+                                                workspace_id=kw["ws_id"], family="all")
+                except Exception as exc:                             # noqa: BLE001
+                    print(f"[gui] 拉自定义音色失败（下拉退化成只有内置，不影响其它功能）："
+                          f"{type(exc).__name__}: {exc}", flush=True)
+                    return
+                if res:                          # 空结果也不发消息
+                    self._q.put(("voice_lab", "tts_list", True, "", res))
                 return
             elif job == "clone":
                 # 素材可能十几兆：读盘 + base64 一律放在守护线程里（别卡界面）

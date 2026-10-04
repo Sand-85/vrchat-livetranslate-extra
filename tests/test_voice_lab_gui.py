@@ -1084,6 +1084,11 @@ def test_sample_check_wiring() -> bool:
             cond = len(calls) == 1
             print(f"  启动挂钩 → 后台调用 {len(calls)} 次  {'OK' if cond else '✗'}")
             ok &= cond
+            # ★ 回归：没更新时**一条消息都不许进队列**（否则会搅乱别处 _q.empty() 的断言，
+            #   CI 上真红过一次：tests/test_voice_settings.py 的「空音色不应起合成」）
+            cond = gui._q.empty()
+            print(f"  没更新 → 队列保持空（不污染别处断言）  {'OK' if cond else '✗'}")
+            ok &= cond
 
             # ④ 查更新炸了 → 不弹状态栏（只在日志里）
             def boom(*_a, **_kw):
