@@ -29,7 +29,7 @@ from .output.merger import Merger
 from .output.overlay import OverlayConfig
 from .output.virtualmic import VirtualMic, pick_output_device, resample_24k_mono_to_48k_stereo
 from .paths import APP_DIR, BUNDLE_DIR
-from .sfx import bound_to_current_voice as sfx_bound_to_voice
+from .sfx import bound_to_current_voice as sfx_bound_to_voice, apply_gain as sfx_apply_gain, gain_of as sfx_gain_of
 from .sfx import load_pair as load_sfx_pair
 from .session.base import SessionConfig, TextDelta, create_session
 from .textin import DEFAULT_MODEL as DEFAULT_TEXT_MODEL
@@ -1350,16 +1350,22 @@ class Engine:
         只在 **TTS 出声**（打字腿 / 语音腿 B）才推 —— A 模式用的是实时模型自带音频，不经过这里。
         相对路径先按 `BUNDLE_DIR`（随程序分发）找，再按 `APP_DIR`（用户可覆盖）找；
         没配就是空字节（不播），配了却读不出来会在 `vlt.sfx` 里留痕（禁静默降级）。
+        音量 = `text_input.tts.sfx_gain`（默认 0.35），**改完即时生效**（缓存的是原始波形）。
         """
         tts_cfg = (self._cfg.text_input or {}).get("tts")
         if self._sfx_cache is None:
             bases = tuple(p for p in (BUNDLE_DIR, APP_DIR) if p)
-            self._sfx_cache = load_sfx_pair(tts_cfg, bases)
+            # 缓存**未加增益**的原始波形 —— 增益每次出声再乘，于是调 `sfx_gain` 不用重启
+            self._sfx_cache = load_sfx_pair(tts_cfg, bases, gain=1.0)
         # 绑定了音色就只在那个音色上播（`sfx_voice` 留空 = 任何音色都播，跟以前一样）。
         # 每次调用都过一次闸 —— 用户在界面上换音色，下一条打字立刻生效，不用重启。
         if not sfx_bound_to_voice(tts_cfg):
             return b"", b""
-        return self._sfx_cache
+        gain = sfx_gain_of(tts_cfg)
+        if gain == 1.0:
+            return self._sfx_cache
+        opener, closer = self._sfx_cache
+        return sfx_apply_gain(opener, gain), sfx_apply_gain(closer, gain)
 
     def _push_sfx_open(self) -> None:
         """句首「开台」音（没配 / 读不出来就是空字节，什么都不做）。"""

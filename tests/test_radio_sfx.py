@@ -225,6 +225,153 @@ def test_voice_binding() -> bool:
     return ok
 
 
+
+def test_apply_gain_is_clip_safe() -> None:
+    """增益必须**削波安全**：int16 直接乘会回绕（听感是爆音/倒相），所以先缩放到 float 再裁。
+
+    0.35 是默认值（素材顶满、语音只有它 1/8 ~ 1/4 的电平）；1.0 走零拷贝路径。
+    """
+    ok = True
+    t = np.arange(2400) / 24000
+    pcm = (0.8 * np.sin(2 * np.pi * 845 * t) * 32767).astype(np.int16).tobytes()
+    x0 = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+
+    same = sfx_mod.apply_gain(pcm, 1.0)
+    cond = same is pcm
+    print(f"    gain=1.0 零拷贝原样返回  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    x1 = np.frombuffer(sfx_mod.apply_gain(pcm, 0.35), dtype=np.int16).astype(np.float32)
+    ratio = float(np.max(np.abs(x1)) / max(float(np.max(np.abs(x0))), 1.0))
+    cond = abs(ratio - 0.35) < 0.02
+    print(f"    gain=0.35 峰值降到 {ratio:.3f} 倍（期望 0.35）  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # 关键：**不裁会回绕**。满幅信号 ×2 → 输出必须仍是非负/非正与原信号同号，且不超过 int16 上限。
+    full = (np.sin(2 * np.pi * 500 * t) * 32767).astype(np.int16)
+    y = np.frombuffer(sfx_mod.apply_gain(full.tobytes(), 2.0), dtype=np.int16).astype(np.int32)
+    no_wrap = int(np.max(y)) <= 32767 and int(np.min(y)) >= -32768
+    sign_safe = not np.any(np.sign(y) * np.sign(full.astype(np.int32)) < 0)
+    cond = no_wrap and sign_safe
+    print(f"    gain=2.0 削波安全（峰值={int(np.max(y))}，无符号翻转）  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    z = np.frombuffer(sfx_mod.apply_gain(pcm, 0.0), dtype=np.int16)
+    cond = len(z) == len(x0) and not np.any(z)
+    print(f"    gain=0.0 = 静音（长度不变）  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # 非有限值/负数不该把整句话静掉 → 原样返回
+    cond = (sfx_mod.apply_gain(pcm, -1.0) is pcm
+            and sfx_mod.apply_gain(pcm, float("nan")) is pcm)
+    print(f"    负数/NaN → 原样返回（不静音）  {'OK' if cond else '✗'}")
+    ok &= cond
+    return ok
+
+
+def test_gain_of_reads_config_and_traces() -> None:
+    """读增益：缺省/空 → 默认；合法值原样；**非法值要留痕再回落**（本仓库既有口径，禁静默降级）。"""
+    import contextlib
+    import io
+
+    ok = True
+    cond = (sfx_mod.gain_of({}) == sfx_mod.DEFAULT_GAIN
+            and sfx_mod.gain_of({"sfx_gain": ""}) == sfx_mod.DEFAULT_GAIN
+            and sfx_mod.gain_of({"sfx_gain": None}) == sfx_mod.DEFAULT_GAIN)
+    print(f"    缺省/空 → 默认 {sfx_mod.DEFAULT_GAIN}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    cond = sfx_mod.gain_of({"sfx_gain": 0.5}) == 0.5 and sfx_mod.gain_of({"sfx_gain": "0.2"}) == 0.2
+    print(f"    合法值原样（0.5 / \"0.2\"）  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    for bad in ("0.5,0.5", "大", -1):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            got = sfx_mod.gain_of({"sfx_gain": bad})
+        logged = "[sfx]" in buf.getvalue() and "⚠️" in buf.getvalue()
+        cond = got == sfx_mod.DEFAULT_GAIN and logged
+        print(f"    非法值 {bad!r} → 回落默认 + 留痕  {'OK' if cond else '✗'}  ({buf.getvalue().strip()[:48]})")
+        ok &= cond
+    return ok
+
+
+def test_load_pair_applies_gain_and_config_normalizes() -> None:
+    """① load_pair 真把增益乘进去了（量峰值）；② 配置归一化要带上 sfx_gain（漏了就永远读不到）。"""
+    import tempfile
+
+    from vlt.config import load_config
+
+    ok = True
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "beep.wav"
+        _write_wav(src, sr=24000, seconds=0.1)
+        base = np.frombuffer(sfx_mod.read_wav_as_24k_mono(src), dtype=np.int16).astype(np.float32)
+        p0 = float(np.max(np.abs(base)))
+
+        for gain, want in ((1.0, 1.0), (0.35, 0.35)):
+            pcm48, _ = sfx_mod.load_pair({"open_sfx": str(src), "sfx_gain": gain}, (Path(d),))
+            got = float(np.max(np.abs(np.frombuffer(pcm48, dtype=np.int16).astype(np.float32))))
+            ratio = got / max(p0, 1.0)
+            cond = abs(ratio - want) < 0.03
+            print(f"    load_pair(sfx_gain={gain}) → 峰值 ×{ratio:.3f}（期望 {want}）  {'OK' if cond else '✗'}")
+            ok &= cond
+
+        # 配置归一化：写一份最小 config.yaml → load_config → 归一化后的 tts 段要带 sfx_gain
+        cfg_path = Path(d) / "config.yaml"
+        cfg_path.write_text("session:\n  base_url: wss://example.invalid/x\n"
+                            "text_input:\n  tts:\n    sfx_gain: 0.5\n    voice: Cherry\n",
+                            encoding="utf-8")
+        cfg = load_config(cfg_path, api_key="sk-test", require_key=False)
+        tts = (cfg.text_input or {}).get("tts") or {}
+        cond = tts.get("sfx_gain") == 0.5
+        print(f"    配置归一化带 sfx_gain（读到 {tts.get('sfx_gain')!r}）  {'OK' if cond else '✗'}")
+        ok &= cond
+    return ok
+
+
+
+def test_gain_is_hot_reloadable() -> None:
+    """★ 音量**不用重启**：引擎缓存的是未加增益的原始波形，`sfx_gain` 每次出声现读。
+
+    为什么专门钉它：用户是按听感调这种值的（「再小一点」），要重启才生效等于没法 A/B。
+    """
+    import tempfile
+
+    import vlt.engine as engine_mod
+
+    ok = True
+    with tempfile.TemporaryDirectory() as d:
+        beep = Path(d) / "beep.wav"
+        _write_wav(beep, sr=24000, seconds=0.1)
+        old_bundle = engine_mod.BUNDLE_DIR
+        try:
+            engine_mod.BUNDLE_DIR = Path(d)
+            tts = {"open_sfx": "beep.wav", "close_sfx": "beep.wav", "sfx_gain": 1.0}
+            eng = engine_mod.Engine.__new__(engine_mod.Engine)
+            eng._cfg = SimpleNamespace(text_input={"tts": dict(tts)})
+            eng._sfx_cache = None
+
+            p1 = int(np.max(np.abs(np.frombuffer(eng._sfx_pcm()[0], dtype=np.int16))))
+            eng._cfg.text_input["tts"]["sfx_gain"] = 0.35       # 运行中改（等价于重载配置）
+            p2 = int(np.max(np.abs(np.frombuffer(eng._sfx_pcm()[0], dtype=np.int16))))
+            ratio = p2 / max(p1, 1)
+            cond = abs(ratio - 0.35) < 0.02
+            print(f"    运行中把 sfx_gain 1.0 → 0.35：峰值 {p1} → {p2}（×{ratio:.3f}）  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+
+            # 回到 1.0 也要立刻回来（说明不是一次性乘进去的）
+            eng._cfg.text_input["tts"]["sfx_gain"] = 1.0
+            p3 = int(np.max(np.abs(np.frombuffer(eng._sfx_pcm()[0], dtype=np.int16))))
+            cond = p3 == p1
+            print(f"    再改回 1.0：峰值 {p3}（应等于 {p1}）  {'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            engine_mod.BUNDLE_DIR = old_bundle
+    return ok
+
+
 def main() -> int:
     results = [
         ("读任意格式 → 24k 单声道", test_read_wav_any_format()),
@@ -232,6 +379,10 @@ def main() -> int:
          test_voice_binding()),
         ("缺文件只影响一侧 + 留痕", test_load_pair_missing_file_traces()),
         ("引擎推入顺序", test_engine_push_order()),
+        ("增益削波安全（0.35/1.0/2.0/0/非法）", test_apply_gain_is_clip_safe()),
+        ("增益读取与留痕", test_gain_of_reads_config_and_traces()),
+        ("load_pair 真应用增益 + 配置归一化", test_load_pair_applies_gain_and_config_normalizes()),
+        ("音量热更（改 sfx_gain 不用重启）", test_gain_is_hot_reloadable()),
     ]
     bad = [n for n, r in results if not r]
     print("ALL PASSED" if not bad else f"FAILED: {', '.join(bad)}")
