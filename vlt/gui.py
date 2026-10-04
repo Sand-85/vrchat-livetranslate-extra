@@ -664,6 +664,8 @@ class TranslationGUI:
         self._gate_preroll_ms = 250
 
         self._cfg = load_config(require_key=False)   # 没填 key 也要能起界面（否则没法填 key）
+        # 本账号的自定义音色（设计族 + 复刻族）：后台拉一次，用于**打字译音下拉**与显示名
+        self._tts_custom: list = []
         # 界面语言解析顺序：用户选过（ui.lang）→ 系统语言 → zh。
         # 必须在 _build_ui 之前定下来：之后所有 t() 都按它取词。
         _saved_lang = (self._cfg.ui or {}).get("lang")
@@ -685,6 +687,7 @@ class TranslationGUI:
 
         if not headless:
             self._build_ui()
+            self._kick_tts_voice_list()   # 后台拉一次本账号自定义音色（只读、免费）
 
     # ================================================================ UI 构建
 
@@ -2156,8 +2159,7 @@ class TranslationGUI:
                  voice_choices(self._effective_speech_voice(), REALTIME_VOICES),
                  "speech", self._on_preview_speech_voice),
                 (t("打字译音:"), self._tts_voice_combo,
-                 [display_name(v, t) for v in voice_choices(
-                     str((self._cfg.text_input.get("tts") or {}).get("voice") or ""), TTS_VOICES)],
+                 self._tts_voice_choices(),
                  "tts", self._on_preview_tts_voice))):
             ttk.Label(vgrid, text=label, style="Dim.TLabel").grid(
                 row=i, column=0, sticky="w", pady=3)
@@ -2558,8 +2560,7 @@ class TranslationGUI:
         # 下拉里跟上（`voice_choices` 会把不在表里的当前值排到最前）
         try:
             self._tts_voice_var.set(display_name(info.voice, t))
-            self._tts_voice_combo.configure(
-                values=[display_name(v, t) for v in voice_choices(info.voice, TTS_VOICES)])
+            self._tts_voice_combo.configure(values=self._tts_voice_choices())
         except Exception:  # noqa: BLE001
             pass
         self._lab_set_status(t("音色已保存：{v}（打字译音与语音腿 B 模式都生效）",
@@ -2804,6 +2805,11 @@ class TranslationGUI:
                     voice_lab.save_preview(APP_DIR, kw["voice"], pcm)
                 self._q.put(("voice_lab", "audition", True, "", {
                     "voice": kw["voice"], "name": kw["name"], "pcm": pcm}))
+            elif job == "tts_list":
+                res = voice_lab.list_voices(api_key=kw["api_key"], base_url=kw["base_url"],
+                                            workspace_id=kw["ws_id"], family="all")
+                self._q.put(("voice_lab", "tts_list", True, "", res))
+                return
             elif job == "clone":
                 # 素材可能十几兆：读盘 + base64 一律放在守护线程里（别卡界面）
                 data_url = voice_lab.audio_data_url(kw["audio_path"])
@@ -2848,6 +2854,13 @@ class TranslationGUI:
                   f"（预览 {len(res.preview_wav)}B）", flush=True)
             self._on_lab_refresh()          # 立刻刷新列表，新音色就在里面（选中它即可保存）
             return
+        if job == "tts_list":
+            self._tts_custom = list(payload or [])
+            print(f"[gui] 本账号自定义音色 {len(self._tts_custom)} 条 → 并入「打字译音」下拉",
+                  flush=True)
+            self._refresh_tts_voice_combo()
+            return
+
         if job == "preset_play":
             self._lab_playing_preset = False
             if ok:
@@ -2858,16 +2871,11 @@ class TranslationGUI:
 
         if job == "list":
             self._lab_voices = list(payload or [])
+            if self._lab_voices:
+                self._tts_custom = list(self._lab_voices)      # 与「打字译音」下拉共用同一批
+                self._refresh_tts_voice_combo()
             local = voice_lab.label_mapper(voice_lab.load_labels(APP_DIR))
-
-            def _label(vid: str, fallback: str) -> str:
-                # ⚠️ `display_name` 对**未登记**的音色会原样回一长串 id（它是给下拉框用的），
-                # 直接拿它会把这行挤成一串 id、名字全看不见（本会话真踩过：用户以为音色丢了）。
-                # 所以只在它**确实给出人话**（≠ 原 id）时才用，否则回落到本地登记 / id 反推的短名。
-                human = display_name(vid, t)
-                if human and human != vid:
-                    return human
-                return local(vid, fallback)
+            _label = lambda vid, fallback: self._voice_label(vid, fallback, local)
 
             if self._lab_list is not None:
                 self._lab_list.delete(0, tk.END)
@@ -4461,6 +4469,121 @@ class TranslationGUI:
         self._set_status("info", t("说话译音音色已保存：{v}", v=voice) + synced + hint)
         print(f"[gui] 说话译音音色 → {voice!r}（已写入 session.voice）", flush=True)
 
+    def _voice_label(self, vid: str, fallback: str, local=None) -> str:
+        """一个音色的**人话名字**：源码登记表（display_name）→ 本地登记表 → id 反推的短名。
+
+        ⚠️ `display_name` 对**未登记**的音色会原样回一长串 id（它是给下拉框用的），直接拿它会把
+        列表行/下拉挤成一串 id、名字全看不见（用户报「我之前做的音色怎么不见了」就是这个）。
+        所以只在它**确实给出人话**（≠ 原 id）时才用。
+        """
+        human = display_name(vid, t)
+        if human and human != vid:
+            return human
+        if local is None:
+            local = voice_lab.label_mapper(voice_lab.load_labels(APP_DIR))
+        return local(vid, fallback)
+
+    def _tts_voice_choices(self) -> list[str]:
+        """**打字译音**下拉候选：内置目录 + 本账号的自定义音色 + 当前值（都显示成人话）。
+
+        为什么要把自定义音色排进来：用户自己炼/复刻的音色（`clear_auto`、`MetroPolice`…）不在
+        内置表里，老实现只有它**正好是当前值**时才显示 —— 一旦切去别的音色就再也选不回来
+        （他报过「clear_auto 不见了」，就是这个）。
+        """
+        cur = str((self._cfg.text_input.get("tts") or {}).get("voice") or "")
+        ids = list(voice_choices(cur, TTS_VOICES))
+        for info in list(getattr(self, "_tts_custom", None) or []):
+            vid = str(getattr(info, "voice", "") or "")
+            if vid and vid not in ids:
+                ids.append(vid)
+        local = voice_lab.label_mapper(voice_lab.load_labels(APP_DIR))
+        out: list[str] = []
+        for vid in ids:
+            short = voice_lab._name_of(vid) or vid          # 未登记时用 id 反推的短名，别甩一串 id
+            label = vid if vid in TTS_VOICES else self._voice_label(vid, short, local)
+            if label not in out:                       # 同名去重（两个 id 反推出同一个短名时别重复）
+                out.append(label)
+        return out
+
+    def _refresh_tts_voice_combo(self) -> None:
+        """把候选重新铺进下拉（保留当前选中项，别让用户的选择被刷掉）。"""
+        combo = getattr(self, "_tts_voice_combo", None)
+        if combo is None:
+            return
+        try:
+            combo.configure(values=self._tts_voice_choices())
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 打字译音下拉刷新失败（不影响其它功能）：{type(exc).__name__}: {exc}",
+                  flush=True)
+        else:
+            print(f"[gui] 打字译音下拉候选 {len(self._tts_voice_choices())} 条（含自定义音色 "
+                  f"{len(getattr(self, '_tts_custom', None) or [])} 条）", flush=True)
+
+    def _kick_tts_voice_list(self) -> None:
+        """启动后台拉一次本账号的自定义音色，好把它们排进「打字译音」下拉。
+
+        只读、免费；没配 key / 网络不通就静默跳过（下拉退化成只有内置音色，不影响其它功能）。
+        """
+        try:
+            api_key, base_url, ws_id = self._lab_ctx()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 拉自定义音色前取配置失败（跳过）：{type(exc).__name__}: {exc}",
+                  flush=True)
+            return
+        if not api_key:
+            return
+        threading.Thread(target=self._lab_worker, args=("tts_list",), kwargs={
+            "api_key": api_key, "base_url": base_url, "ws_id": ws_id},
+            daemon=True).start()
+
+    def _tts_voice_id_from_input(self, text: str) -> str:
+        """把下拉里显示的**名字**（或用户手打的 id）还原成**真 id**。
+
+        下拉里显示的是人话（内置名 / 登记表名 / id 反推的短名），写进配置和发给 API 的必须是真 id。
+        顺序：内置原样 → 源码登记表 `real_id()` → 本账号自定义音色的三种写法（真 id / 短名 / 显示名）。
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+        if raw in TTS_VOICES:
+            return raw
+        got = real_id(raw, t)
+        if got and got != raw:                       # 源码登记表认得这个显示名
+            return got
+        local = voice_lab.label_mapper(voice_lab.load_labels(APP_DIR))
+        for info in list(getattr(self, "_tts_custom", None) or []):
+            vid = str(getattr(info, "voice", "") or "")
+            if not vid:
+                continue
+            short = voice_lab._name_of(vid) or vid
+            if raw in (vid, short, self._voice_label(vid, short, local)):
+                return vid
+        return got or raw
+
+    def _tts_model_for_voice(self, voice: str) -> str:
+        """这条音色该配哪个合成模型：自定义音色用**它自己的** target_model，内置回内置默认。
+
+        ⚠️ 设计族(vd) / 复刻族(vc) / 内置三者模型互不通用，写错在真机上必 `InvalidParameter`
+        （本项目已经踩过两次：保存复刻音色写了设计族模型；这里以前只写 voice 不写 model）。
+        """
+        for info in list(getattr(self, "_tts_custom", None) or []):
+            if str(getattr(info, "voice", "")) == voice:
+                got = str(getattr(info, "target_model", "") or "").strip()
+                if got:
+                    return got
+        # 缓存里没有（例如刚手打的 id）→ 按 id 形态兜底：`-vc-` 是复刻族、`-vd-` 是设计族。
+        # 宁可这样猜，也别回落到内置模型（那在真机上必 InvalidParameter）。
+        low = (voice or "").lower()
+        if "-vc-" in low:
+            return voice_lab.CLONE_TARGET_MODEL
+        if "-vd-" in low:
+            return voice_lab.DEFAULT_TARGET_MODEL
+        return tts.DEFAULT_MODEL
+
+    def _set_tts_model_config(self, model: str) -> None:
+        """把合成模型写回 `text_input.tts.model`（与 voice 同段，老配置可能整段没有 → create）。"""
+        self._write_leaf(["text_input", "tts", "model"], model, "保存打字译音模型", create=True)
+
     def _on_tts_voice_change(self, _event=None) -> None:
         """「打字译音」音色：写 text_input.tts.voice 并同步内存 —— 下一次打字立刻生效。
 
@@ -4469,16 +4592,22 @@ class TranslationGUI:
 
         ⚠️ 下拉里显示的是**本地化名字**（如中文「国民护卫队」），写配置前必须 `real_id()` 还原成真 id。
         """
-        voice = real_id(self._tts_voice_var.get(), t)
+        voice = self._tts_voice_id_from_input(self._tts_voice_var.get())
         if not voice:
             return
         self._tts_voice_var.set(display_name(voice, t))     # 手打中文名/英文名也回显成规范显示名
         self._set_tts_voice_config(voice)
+        model = self._tts_model_for_voice(voice)             # ⚠️ 模型必须跟着音色一起换
         if isinstance(self._cfg.text_input, dict):
             self._cfg.text_input.setdefault("tts", {})["voice"] = voice
+            if model:
+                self._cfg.text_input["tts"]["model"] = model
+        if model:
+            self._set_tts_model_config(model)
         self._set_status("info", t("打字译音音色已保存：{v}（下一条打字即生效）",
                                    v=display_name(voice, t)))
-        print(f"[gui] 打字译音音色 → {voice!r}（已写入 text_input.tts.voice）", flush=True)
+        print(f"[gui] 打字译音音色 → {voice!r}（已写入 text_input.tts.voice）"
+              f"、模型 → {model!r}", flush=True)
 
     def _set_voice_config(self, voice: str) -> None:
         """把说话译音音色写回 config.yaml 的 `session.voice`（就地改，保住注释与顺序）。"""

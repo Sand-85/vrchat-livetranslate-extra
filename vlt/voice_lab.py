@@ -657,7 +657,7 @@ class ClonePreset:
 BUILTIN_CLONE_PRESETS: tuple[ClonePreset, ...] = (
     ClonePreset(
         key="my_clip_4x",
-        label="我的拼接范本",
+        label="MetroPolice",
         spec=(
             "素材：4 条连续朗读，44.1kHz 单声道 16bit\n"
             "顺序：standardloyaltycheck(5.69s) → citizensummoned(5.56s) → "
@@ -670,12 +670,7 @@ BUILTIN_CLONE_PRESETS: tuple[ClonePreset, ...] = (
             "填错会被判 wer_too_high 静默降级。"
         ),
         sample_name="source_sample_v2.wav",
-        labels={
-            "en": "My clip template",
-            "ja": "自分の連結テンプレ",
-            "ko": "내 이어붙이기 템플릿",
-            "ru": "Мой шаблон склейки",
-        },
+        labels={},          # 用户点名就叫 MetroPolice（各语言统一用这个英文名）
     ),
 )
 

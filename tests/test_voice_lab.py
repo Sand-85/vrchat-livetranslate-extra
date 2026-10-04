@@ -504,7 +504,8 @@ def test_clone_presets() -> bool:
     try:
         presets = vl.all_clone_presets(tmp)
         builtin = next((p for p in presets if p.key == "my_clip_4x"), None)
-        cond = builtin is not None and "19.7" in builtin.spec and "standardloyaltycheck" in builtin.spec
+        cond = (builtin is not None and builtin.label == "MetroPolice"
+                and "19.7" in builtin.spec and "standardloyaltycheck" in builtin.spec)
         print(f"  内置范本在（{builtin.label if builtin else '无'}）且含条名/合计  {'OK' if cond else '✗'}")
         ok &= cond
 

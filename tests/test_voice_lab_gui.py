@@ -372,9 +372,10 @@ def test_generate_then_save() -> bool:
             print(f"  保存后 config：model={cfg.get('model')} voice 尾={str(cfg.get('voice'))[-5:]}  "
                   f"{'OK' if cond else '✗'}")
             ok &= cond
+            # 下拉里现在显示**人话**（未登记的用 id 反推的短名），配置里仍是真 id —— 这正是本次要的行为
             cond = (gui._tts_voice_var.get().startswith("qwen-tts-vd-clear_auto")
                     and bool(gui._tts_voice_combo.values)
-                    and gui._tts_voice_combo.values[0].startswith("qwen-tts-vd-clear_auto"))
+                    and gui._tts_voice_combo.values[0] == "clear_auto")
             print(f"  打字译音下拉已跟上：{gui._tts_voice_var.get()[-12:]}"
                   f"（候选首位={None if not gui._tts_voice_combo.values else gui._tts_voice_combo.values[0][-12:]}）"
                   f"  {'OK' if cond else '✗'}")
@@ -816,7 +817,7 @@ def test_clone_preset_wiring() -> bool:
             vl.save_clone_preset(gui_mod.APP_DIR, "my_clip_4x", sample_path=str(sample))
             gui._lab_presets = vl.all_clone_presets(gui_mod.APP_DIR)
             preset = next(p for p in gui._lab_presets if p.key == "my_clip_4x")
-            cond = preset.label == "我的拼接范本"
+            cond = preset.label == "MetroPolice"
             print(f"  预设显示名简短（「{preset.label}」）  {'OK' if cond else '✗'}")
             ok &= cond
 
@@ -880,6 +881,82 @@ def test_clone_preset_wiring() -> bool:
     return ok
 
 
+def test_tts_voice_list_includes_custom() -> bool:
+    """「打字译音」下拉要列出本账号的自定义音色（clear_auto 那种切走就选不回来的问题），
+    并且**切音色时必须把模型一起换对**（设计族/复刻族/内置 三者模型互不通用）。"""
+    import yaml
+
+    ok = True
+    fake = FakeVoiceLab()
+    with _gui() as (gui, cfg_path, tmp):
+        fake.install()
+        try:
+            clear = vl.VoiceInfo(voice="qwen-tts-vd-clear_auto-voice-20260926233229068-247d",
+                                 name="clear_auto", created="2026-09-26 23:32:33",
+                                 target_model=vl.DEFAULT_TARGET_MODEL, kind="design")
+            metro = vl.VoiceInfo(voice="qwen-tts-vc-MetroPolice-voice-20261003201838644-0a4b",
+                                 name="MetroPolice", created="2026-10-03 20:18:40",
+                                 target_model=vl.CLONE_TARGET_MODEL, kind="clone")
+            gui._on_lab_done("tts_list", True, "", [clear, metro])
+            vals = [str(v) for v in gui._tts_voice_combo.values]
+            cond = any("clear_auto" in v for v in vals) and any("国民护卫队" in v for v in vals)
+            print(f"  下拉列出自定义音色：clear_auto / 国民护卫队 都在（共 {len(vals)} 条）  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+            cond = "Cherry" in vals
+            print(f"  内置音色没被挤掉（Cherry 仍在）  {'OK' if cond else '✗'}")
+            ok &= cond
+            cond = not any(v.startswith("qwen-tts-") for v in vals)
+            print(f"  下拉里不出现长 id（未登记的也用短名）  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            def _written() -> dict:
+                data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                return ((data.get("text_input") or {}).get("tts") or {})
+
+            # ① 切到设计族自定义音色 → voice 与 model 一起换成 vd
+            gui._tts_voice_var.set("clear_auto")
+            gui._on_tts_voice_change()
+            got = _written()
+            cond = (got.get("voice") == clear.voice
+                    and got.get("model") == vl.DEFAULT_TARGET_MODEL)
+            print(f"  切 clear_auto → voice={str(got.get('voice'))[-12:]}、"
+                  f"model={got.get('model')}  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ② 切到复刻族 → model 换成 vc（写错就是真机 InvalidParameter）
+            gui._tts_voice_var.set("国民护卫队")
+            gui._on_tts_voice_change()
+            got = _written()
+            cond = (got.get("voice") == metro.voice
+                    and got.get("model") == vl.CLONE_TARGET_MODEL)
+            print(f"  切 国民护卫队 → voice={str(got.get('voice'))[-12:]}、"
+                  f"model={got.get('model')}  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ③ 切回内置 → model 回到内置默认
+            gui._tts_voice_var.set("Cherry")
+            gui._on_tts_voice_change()
+            got = _written()
+            cond = got.get("voice") == "Cherry" and got.get("model") == "qwen3-tts-flash"
+            print(f"  切回内置 Cherry → model={got.get('model')}  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ④ 保存新音色后下拉要立刻跟上（音色页那条路）
+            gui._tts_custom = list(gui._tts_custom) + [
+                vl.VoiceInfo(voice="qwen-tts-vc-新音色-voice-20261004010101-abcd", name="新音色",
+                             target_model=vl.CLONE_TARGET_MODEL, kind="clone")]
+            gui._refresh_tts_voice_combo()
+            vals = [str(v) for v in gui._tts_voice_combo.values]
+            cond = any("新音色" in v for v in vals) and gui._tts_voice_var.get() == "Cherry"
+            print(f"  刷新候选 → 新音色进列表、当前选择没被刷掉（{gui._tts_voice_var.get()}）  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            fake.restore()
+    return ok
+
+
 if __name__ == "__main__":
     print("test_voice_lab_gui:")
     print(" 1) 生成 → 列表 → 保存（model+voice 一起写）")
@@ -910,5 +987,7 @@ if __name__ == "__main__":
     ok &= test_list_rows_are_readable()
     print("14) 克隆预设（试听范本 / 一键克隆 / 缺样本）")
     ok &= test_clone_preset_wiring()
+    print("15) 打字译音下拉含自定义音色 + 切音色连带换模型")
+    ok &= test_tts_voice_list_includes_custom()
     assert ok, "音色页接线用例失败（见上）"
     print("ALL PASSED")
