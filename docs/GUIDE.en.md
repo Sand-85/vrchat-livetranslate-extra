@@ -188,7 +188,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 - **Streaming display**: non-final deltas **redraw the same bubble in place** instead of appending a new one per delta
 - **Both at once**: two translation directions in one window (microphone → right side, game audio → left side); the second **starts with a 300 ms stagger** to avoid fighting over the audio device; if either side fails, the other keeps working
 - **Language mirroring**: one pair covers both directions — pick "Chinese → English" and the others-speak direction automatically becomes "English → Chinese".
-  Source language can be `Auto-detect` / Chinese / English / Japanese / Korean / French / German / Spanish / Russian / Thai (the target list is the same minus "Auto-detect");
+  Source language can be `Auto-detect` / Chinese / English / Japanese / Korean / French / German / Spanish / Russian / Thai / Italian (the target list is the same minus "Auto-detect");
   with `Auto-detect` as source, the other direction's target falls back to Chinese and the status bar says so. Changes **take effect immediately**, are written back to config, and persist across launches
 - **Settings dialog** (`⚙ Settings`): API key entry / clearing, three audio device dropdowns + `Refresh`, log area (`Export log bundle…`)
 - **Fine-tune panel** (`Fine-tune ▸`): wrist-display anchor + 14 sliders, **drag to hot-reload, no restart needed** (see "6. Configuration")
