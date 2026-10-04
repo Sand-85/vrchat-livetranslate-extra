@@ -2358,39 +2358,25 @@ class TranslationGUI:
             style="Dim.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP)
         self._lab_clone_hint.pack(anchor=tk.W, pady=(4, 0))
 
-        # ---- 克隆预设（拼接范本：素材该怎么拼出来）------------------------------
-        ttk.Label(body, text=t("克隆预设（拼接范本）:"),
+        # ---- 克隆预设（拼接范本：一键试听 / 一键克隆）----------------------------
+        ttk.Label(body, text=t("克隆预设:"),
                   style="Dim.TLabel").pack(anchor=tk.W, pady=(8, 0))
         self._lab_presets = voice_lab.all_clone_presets(APP_DIR)
         self._lab_preset_combo = ttk.Combobox(
-            body, state="readonly", width=44, font=FONT_UI,
+            body, state="readonly", width=30, font=FONT_UI,
             values=[voice_lab.preset_label(p, i18n.current_language())
                     for p in self._lab_presets])
         self._lab_preset_combo.pack(anchor=tk.W, pady=(3, 0))
         if self._lab_presets:
             self._lab_preset_combo.current(0)
-        self._lab_preset_combo.bind("<<ComboboxSelected>>",
-                                    lambda _e: self._on_lab_preset_pick())
         prow = ttk.Frame(body)
         prow.pack(anchor=tk.W, pady=(4, 0))
-        self._lab_preset_use_btn = ttk.Button(prow, text=t("用此范本"),
-                                              command=self._on_lab_preset_use)
-        self._lab_preset_use_btn.pack(side=tk.LEFT)
-        self._lab_preset_copy_btn = ttk.Button(prow, text=t("复制范本"),
-                                               command=self._on_lab_preset_copy)
-        self._lab_preset_copy_btn.pack(side=tk.LEFT, padx=(6, 0))
-        self._lab_preset_export_btn = ttk.Button(prow, text=t("导出范本…"),
-                                                 command=self._on_lab_preset_export)
-        self._lab_preset_export_btn.pack(side=tk.LEFT, padx=(6, 0))
-        # 范本正文直接摊在页面上（只读）—— 用户要「看得见范本」，不能只给个下拉
-        self._lab_preset_text = tk.Text(
-            body, height=6, width=54, wrap=tk.WORD,
-            bg=SURFACE, fg=TEXT, insertbackground=TEXT, selectbackground=ACCENT,
-            selectforeground="#ffffff", relief=tk.FLAT, highlightthickness=1,
-            highlightbackground=BORDER, highlightcolor=ACCENT, font=FONT_UI)
-        self._lab_preset_text.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
-        self._lab_preset_text.configure(state=tk.DISABLED)
-        self._on_lab_preset_pick()
+        self._lab_preset_preview_btn = ttk.Button(prow, text=t("试听范本"),
+                                                  command=self._on_lab_preset_preview)
+        self._lab_preset_preview_btn.pack(side=tk.LEFT)
+        self._lab_preset_clone_btn = ttk.Button(prow, text=t("一键克隆"),
+                                                command=self._on_lab_preset_clone)
+        self._lab_preset_clone_btn.pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(body, text=t("过往生成（本账号的自定义音色）:"),
                   style="Dim.TLabel").pack(anchor=tk.W, pady=(10, 0))
@@ -2428,7 +2414,8 @@ class TranslationGUI:
         self._lab_cost_ok = False
         self._lab_clone_ok = False                    # 复刻的费用确认（与设计分开）
         self._lab_audio = None                        # 已选素材的本地探测结果
-        self._lab_autoplay_voice = ""                 # 克隆完自动试听哪条（列表刷新后触发）
+        self._lab_autoplay_voice = ""
+        self._lab_playing_preset = False                 # 克隆完自动试听哪条（列表刷新后触发）
         self._lab_audition_suffix = ""                # 异步试听完成后要拼在状态后面的话
         self._lab_busy = False
         self._lab_last: dict[str, str] = {}          # voice → 生成时的描述（保存时一并写日志）
@@ -2450,8 +2437,7 @@ class TranslationGUI:
         self._lab_busy = on
         for btn in (self._lab_gen_btn, self._lab_recipe_btn, self._lab_recipe_preview_btn,
                     self._lab_pick_btn, self._lab_clone_btn,
-                    self._lab_preset_use_btn, self._lab_preset_copy_btn,
-                    self._lab_preset_export_btn,
+                    self._lab_preset_preview_btn, self._lab_preset_clone_btn,
                     self._lab_refresh_btn, self._lab_del_btn):
             try:
                 if btn is not None and btn.winfo_exists():
@@ -2581,7 +2567,7 @@ class TranslationGUI:
         print(f"[gui] 音色已保存 → text_input.tts.model={voice_lab.DEFAULT_TARGET_MODEL} "
               f"voice={info.voice!r}", flush=True)
 
-    def _lab_apply_audio(self, path, *, suffix: str = "") -> bool:
+    def _lab_apply_audio(self, path) -> bool:
         """把一份素材挂上界面（探测 + 报结论），合格返回 True。
 
         选文件与「用此范本」共用这一处 —— 免得两条路的校验/提示各走一套。
@@ -2598,8 +2584,7 @@ class TranslationGUI:
             "单声道" if probe.channels <= 1 else f"{probe.channels} 声道")
         warn = voice_lab.audio_warnings(probe)
         self._lab_set_status(t("素材合格：{msg}", msg=summary)
-                             + (t("（提示：{msg}）", msg="；".join(warn)) if warn else "")
-                             + suffix)
+                             + (t("（提示：{msg}）", msg="；".join(warn)) if warn else ""))
         print(f"[gui] 复刻素材已选：{summary}（提示 {warn}）", flush=True)
         return True
 
@@ -2613,7 +2598,7 @@ class TranslationGUI:
             return
         self._lab_apply_audio(path)
 
-    # ---- 克隆预设（拼接范本）------------------------------------------------
+    # ---- 克隆预设（拼接范本：只给两件事 —— 试听 / 一键克隆）----------------
 
     def _lab_preset(self):
         """当前选中的预设（下拉没建 / 越界时退回第一条）。"""
@@ -2625,90 +2610,61 @@ class TranslationGUI:
             cur = int(self._lab_preset_combo.current())
             if 0 <= cur < len(presets):
                 idx = cur
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         return presets[idx]
 
-    def _lab_set_preset_text(self, text: str) -> None:
-        """把范本正文写进只读框（控件缺失/是替身时安静跳过，不影响功能）。"""
-        box = getattr(self, "_lab_preset_text", None)
-        if box is None:
-            return
-        try:
-            box.configure(state=tk.NORMAL)
-            box.delete("1.0", tk.END)
-            box.insert("1.0", text)
-            box.configure(state=tk.DISABLED)
-        except Exception as exc:
-            print(f"[gui] 范本正文写不进只读框（不影响功能）：{type(exc).__name__}: {exc}",
-                  flush=True)
-
-    def _on_lab_preset_pick(self) -> None:
-        """换预设：把范本正文摊出来，并说明样本音频在不在。"""
+    def _lab_preset_sample_or_report(self):
+        """范本的样本音频：找不到就报清楚该放哪，并留痕。"""
         p = self._lab_preset()
         if p is None:
-            self._lab_set_preset_text(t("（还没有预设）"))
-            return
-        body = voice_lab.preset_text(p, title=voice_lab.preset_label(p, i18n.current_language()))
-        sample = voice_lab.find_preset_sample(APP_DIR, p)
-        if sample is not None:
-            body += t("样本音频已就位：{p}", p=str(sample))
-        else:
-            body += t("样本音频没找到：把 {n} 放到 {d}（或点「选择音频文件…」手工挑一份）",
-                      n=p.sample_name or t("范本样本"), d=str(voice_lab.preview_dir(APP_DIR)))
-        self._lab_set_preset_text(body)
-
-    def _on_lab_preset_use(self) -> None:
-        """用此范本：把范本的样本音频挂成当前素材（不合格照样拦），并预填名字。"""
-        p = self._lab_preset()
-        if p is None:
-            return
+            return None, None
         sample = voice_lab.find_preset_sample(APP_DIR, p)
         if sample is None:
             self._lab_set_status(t("范本的样本音频没找到：把 {n} 放到 {d}",
                                    n=p.sample_name or t("范本样本"),
                                    d=str(voice_lab.preview_dir(APP_DIR))))
             print(f"[gui] 范本样本没找到：{p.key}（期望 {p.sample_name}）", flush=True)
+        return p, sample
+
+    def _on_lab_preset_preview(self) -> None:
+        """试听范本：本地播这份样本音频（不联网、不花钱、绝不进虚拟声卡）。"""
+        p, sample = self._lab_preset_sample_or_report()
+        if p is None or sample is None:
+            return
+        if self._lab_playing_preset:
+            self._lab_set_status(t("还在试听上一段范本…"))
+            return
+        try:
+            pcm, seconds = voice_lab.sample_pcm_from_file(sample)
+        except Exception as exc:  # noqa: BLE001
+            self._lab_set_status(t("试听失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
+            print(f"[gui] 范本试听解码失败：{sample} → {type(exc).__name__}: {exc}", flush=True)
+            return
+        self._lab_playing_preset = True
+        self._lab_set_status(t("正在试听范本（{s:.1f} 秒，本地播放不花钱）…", s=seconds))
+        print(f"[gui] 试听范本：{sample.name}（{seconds:.1f}s，本地）", flush=True)
+        threading.Thread(target=self._lab_play_preset_worker, args=(pcm, seconds),
+                         daemon=True).start()
+
+    def _lab_play_preset_worker(self, pcm: bytes, seconds: float) -> None:
+        """播完/播挂了都经队列回主线程改状态（播放是阻塞的，绝不能占界面线程）。"""
+        try:
+            _play_pcm_local(pcm)
+            self._q.put(("voice_lab", "preset_play", True, f"{seconds:.1f}", None))
+        except Exception as exc:  # noqa: BLE001
+            self._q.put(("voice_lab", "preset_play", False, f"{type(exc).__name__}: {exc}", None))
+
+    def _on_lab_preset_clone(self) -> None:
+        """一键克隆：范本素材挂上 + 名字预填 → 直接走克隆（费用确认、自动试听都在那条路上）。"""
+        p, sample = self._lab_preset_sample_or_report()
+        if p is None or sample is None:
             return
         self._lab_clone_name_var.set(voice_lab.normalize_name(p.key))
-        if self._lab_apply_audio(sample, suffix=t(" —— 已按范本备好，点「克隆并试听」即可")):
-            print(f"[gui] 已按范本备好素材：{p.key} ← {sample}", flush=True)
-
-    def _on_lab_preset_copy(self) -> None:
-        """复制范本到剪贴板（发给别人照着录同一套）。"""
-        p = self._lab_preset()
-        if p is None:
+        if not self._lab_apply_audio(sample):
             return
-        text = voice_lab.preset_text(p, title=voice_lab.preset_label(p, i18n.current_language()))
-        try:
-            box = getattr(self, "_lab_preset_text", None) or self
-            box.clipboard_clear()
-            box.clipboard_append(text)
-            self._lab_set_status(t("范本已复制到剪贴板"))
-        except Exception as exc:
-            self._lab_set_status(t("复制失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
-
-    def _on_lab_preset_export(self) -> None:
-        """导出范本成 txt。"""
-        from tkinter import filedialog
-
-        p = self._lab_preset()
-        if p is None:
-            return
-        path = filedialog.asksaveasfilename(title=t("导出范本"), defaultextension=".txt",
-                                            initialfile=f"{p.key}.txt",
-                                            filetypes=[(t("文本文件"), "*.txt"),
-                                                       (t("所有文件"), "*.*")])
-        if not path:
-            return
-        try:
-            out = voice_lab.export_preset(
-                APP_DIR, p, path,
-                title=voice_lab.preset_label(p, i18n.current_language()))
-            self._lab_set_status(t("范本已导出：{p}", p=str(out)))
-            print(f"[gui] 范本已导出：{out}", flush=True)
-        except Exception as exc:
-            self._lab_set_status(t("导出失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
+        print(f"[gui] 一键克隆：按范本 {p.key} ← {sample}", flush=True)
+        self._on_lab_clone()
 
     def _on_lab_clone(self) -> None:
         """克隆并试听：本地校验 → 费用确认 → 后台复刻 → 刷新列表 → 自动试听。"""
@@ -2892,6 +2848,14 @@ class TranslationGUI:
                   f"（预览 {len(res.preview_wav)}B）", flush=True)
             self._on_lab_refresh()          # 立刻刷新列表，新音色就在里面（选中它即可保存）
             return
+        if job == "preset_play":
+            self._lab_playing_preset = False
+            if ok:
+                self._lab_set_status(t("范本试听完成（{s} 秒，本地播放）", s=str(payload or "")))
+            else:
+                self._lab_set_status(t("试听失败：{msg}", msg=str(msg)))
+            return
+
         if job == "list":
             self._lab_voices = list(payload or [])
             local = voice_lab.label_mapper(voice_lab.load_labels(APP_DIR))

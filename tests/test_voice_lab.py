@@ -527,17 +527,26 @@ def test_clone_presets() -> bool:
         print(f"  没样本时返回 None（不抛）  {'OK' if cond else '✗'}")
         ok &= cond
 
-        # 导出：强制 .txt + 内容完整
-        out = vl.export_preset(tmp, again, tmp / "out_dir" / "template", title="我的范本（改名后）")
-        cond = (out.suffix == ".txt" and out.is_file()
-                and "19.7" in out.read_text(encoding="utf-8")
-                and "我的范本（改名后）" in out.read_text(encoding="utf-8"))
-        print(f"  导出 → {out.name}（内容含标题与正文）  {'OK' if cond else '✗'}")
+        # 本地试听：任意采样率都能解成 24k 单声道（用户样本就是 44.1kHz）
+        pcm, seconds = vl.sample_pcm_from_file(sample)
+        cond = len(pcm) > 0 and abs(seconds - 12.0) < 0.05
+        print(f"  试听解码：12s 样本 → {len(pcm)} 字节 PCM / {seconds:.2f}s  {'OK' if cond else '✗'}")
         ok &= cond
-
-        # 预设文本：标题 + 正文
-        cond = vl.preset_text(bare, title="T").startswith("T\n") and "什么都没有" in vl.preset_text(bare)
-        print(f"  范本文本 = 标题 + 正文  {'OK' if cond else '✗'}")
+        up = tmp / "up44.wav"
+        _write_wav(up, 3.0, rate=44100)
+        pcm44, sec44 = vl.sample_pcm_from_file(up)
+        cond = len(pcm44) > 0 and abs(sec44 - 3.0) < 0.05
+        print(f"  44.1kHz 也能解（重采样到 24k）→ {sec44:.2f}s  {'OK' if cond else '✗'}")
+        ok &= cond
+        broken = tmp / "broken.wav"
+        broken.write_bytes(b"this is not audio")
+        try:
+            vl.sample_pcm_from_file(broken)
+            cond = False
+        except Exception as exc:                                     # noqa: BLE001
+            cond = True
+            print(f"  坏文件 → 抛出（界面捕获取状态）：{type(exc).__name__}  "
+                  f"{'OK' if cond else '✗'}")
         ok &= cond
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -574,7 +583,7 @@ if __name__ == "__main__":
     ok &= test_audio_probe_and_data_url()
     print(" 14) 克隆音色的显示名登记表")
     ok &= test_labels_registry()
-    print(" 15) 克隆预设（拼接范本：内置/本地覆盖/定位样本/导出）")
+    print(" 15) 克隆预设（内置/本地覆盖/定位样本/本地试听解码）")
     ok &= test_clone_presets()
     assert ok, "voice_lab 用例失败（见上）"
     print("ALL PASSED")

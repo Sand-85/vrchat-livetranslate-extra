@@ -545,4 +545,16 @@ STRINGS: dict[str, str] = {
         "Export failed: {msg}",
     "文本文件":
         "Text file",
+    "克隆预设:":
+        "Clone preset:",
+    "试听范本":
+        "Preview template",
+    "一键克隆":
+        "Clone in one click",
+    "还在试听上一段范本…":
+        "Still playing the previous template…",
+    "正在试听范本（{s:.1f} 秒，本地播放不花钱）…":
+        "Previewing template ({s:.1f}s, played locally, free)…",
+    "范本试听完成（{s} 秒，本地播放）":
+        "Template preview finished ({s}s, local playback)",
 }

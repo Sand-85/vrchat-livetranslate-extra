@@ -657,7 +657,7 @@ class ClonePreset:
 BUILTIN_CLONE_PRESETS: tuple[ClonePreset, ...] = (
     ClonePreset(
         key="my_clip_4x",
-        label="我的拼接范本（4 条朗读 · 19.7s）",
+        label="我的拼接范本",
         spec=(
             "素材：4 条连续朗读，44.1kHz 单声道 16bit\n"
             "顺序：standardloyaltycheck(5.69s) → citizensummoned(5.56s) → "
@@ -671,10 +671,10 @@ BUILTIN_CLONE_PRESETS: tuple[ClonePreset, ...] = (
         ),
         sample_name="source_sample_v2.wav",
         labels={
-            "en": "My clip template (4 clips · 19.7s)",
-            "ja": "自分の連結テンプレ（4本 · 19.7秒）",
-            "ko": "내 이어붙이기 템플릿(4개 · 19.7초)",
-            "ru": "Мой шаблон склейки (4 фрагмента · 19.7 с)",
+            "en": "My clip template",
+            "ja": "自分の連結テンプレ",
+            "ko": "내 이어붙이기 템플릿",
+            "ru": "Мой шаблон склейки",
         },
     ),
 )
@@ -746,12 +746,6 @@ def preset_label(preset: ClonePreset, lang: str = "zh") -> str:
     return str(preset.labels.get(lang) or preset.label)
 
 
-def preset_text(preset: ClonePreset, *, title: str = "") -> str:
-    """范本的导出/复制文本（标题 + 正文），交给别人照着录也看得懂。"""
-    head = f"{title or preset.label}"
-    return f"{head}\n{'=' * max(8, len(head))}\n{preset.spec}\n"
-
-
 def find_preset_sample(app_dir, preset: ClonePreset) -> Path | None:
     """按范本找样本音频：本地登记表里显式指的那份 → 应用数据目录 → 仓库 out/clone（开发机）。"""
     rows = load_clone_presets(app_dir)
@@ -777,15 +771,20 @@ def find_preset_sample(app_dir, preset: ClonePreset) -> Path | None:
     return None
 
 
-def export_preset(app_dir, preset: ClonePreset, path, *, title: str = "") -> Path:
-    """把范本导出成 txt（给用户发给别人照着录）。"""
-    p = Path(str(path))
-    if p.suffix.lower() != ".txt":
-        p = p.with_suffix(".txt")
-    if p.parent and not p.parent.exists():
-        p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(preset_text(preset, title=title), encoding="utf-8")
-    return p
+def sample_pcm_from_file(path) -> tuple[bytes, float]:
+    """把**任意采样率**的样本音频解成 24kHz 单声道 s16le PCM（本地试听用，不联网、不花钱）。
+
+    为什么放库里而不是界面里：解码/重采样是纯逻辑、能离线测；界面只管播。
+    返回 (pcm, 秒数)；解不出来就抛（界面捕获取状态）。
+    """
+    import miniaudio
+
+    dec = miniaudio.decode_file(str(path), output_format=miniaudio.SampleFormat.SIGNED16,
+                                nchannels=1, sample_rate=24000)
+    pcm = dec.samples.tobytes()
+    if not pcm:
+        raise VoiceLabError("样本解出来是空音频")
+    return pcm, len(pcm) / 2.0 / 24000.0
 
 
 # ---------------------------------------------------------------- 配方库

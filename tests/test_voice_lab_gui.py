@@ -252,18 +252,18 @@ def _install_widgets(gui) -> None:
     gui._tts_voice_combo = _Btn()                                   # type: ignore[assignment]
     for name in ("_lab_gen_btn", "_lab_save_btn", "_lab_del_btn", "_lab_recipe_btn",
                  "_lab_recipe_preview_btn", "_lab_pick_btn", "_lab_clone_btn",
-                 "_lab_preset_use_btn", "_lab_preset_copy_btn", "_lab_preset_export_btn",
+                 "_lab_preset_preview_btn", "_lab_preset_clone_btn",
                  "_lab_preview_btn", "_lab_refresh_btn"):
         setattr(gui, name, _Btn())
     gui._lab_clone_name_var = _Var("my_clone")                      # type: ignore[assignment]
     gui._lab_presets = vl.all_clone_presets(gui_mod.APP_DIR)        # type: ignore[assignment]
     gui._lab_preset_combo = _Combo([])                              # type: ignore[assignment]
-    gui._lab_preset_text = _Text()                                  # type: ignore[assignment]
     gui._lab_voices = []
     gui._lab_cost_ok = True
     gui._lab_clone_ok = True          # 费用确认在专门用例里验，其余用例默认已确认
     gui._lab_audio = None
     gui._lab_autoplay_voice = ""
+    gui._lab_playing_preset = False
     gui._lab_audition_suffix = ""
     gui._lab_busy = False
     gui._lab_last = {}
@@ -800,8 +800,8 @@ def test_list_rows_are_readable() -> bool:
 
 
 def test_clone_preset_wiring() -> bool:
-    """克隆预设接线：范本正文上屏、用范本挂素材并预填名字、复制到剪贴板、导出 txt、缺样本时不瞎挂。"""
-    import tkinter.filedialog as _fd
+    """克隆预设只给两件事：**试听范本**（本地播、不花钱、重复点要挡住）与
+    **一键克隆**（挂素材 + 名字 → 直接克隆 → 自动试听）；范本没样本时两件事都不许动。"""
     import wave
 
     ok = True
@@ -812,57 +812,68 @@ def test_clone_preset_wiring() -> bool:
             sample = tmp / "preset_sample.wav"
             with wave.open(str(sample), "wb") as w:
                 w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
-                w.writeframes(bytes(24000 * 12 * 2))
+                w.writeframes(bytes(24000 * 12 * 2))          # 12 秒（够长、能解码）
             vl.save_clone_preset(gui_mod.APP_DIR, "my_clip_4x", sample_path=str(sample))
             gui._lab_presets = vl.all_clone_presets(gui_mod.APP_DIR)
-
-            # ① 换预设 → 范本正文上屏（条名 + 合计 + 样本状态）
-            gui._on_lab_preset_pick()
-            text = gui._lab_preset_text.get()
-            cond = ("standardloyaltycheck" in text and "19.7" in text
-                    and "样本音频已就位" in text)
-            print(f"  范本正文上屏（{len(text)} 字；含条名/合计/样本状态）  {'OK' if cond else '✗'}")
+            preset = next(p for p in gui._lab_presets if p.key == "my_clip_4x")
+            cond = preset.label == "我的拼接范本"
+            print(f"  预设显示名简短（「{preset.label}」）  {'OK' if cond else '✗'}")
             ok &= cond
 
-            # ② 用此范本 → 素材挂上 + 名字预填 + 状态说明
+            # ① 试听范本：解码 → 守护线程本地播 → 队列回报 → 状态收尾；期间挡住重复点
+            played_before = len(PLAYED)
+            gui._on_lab_preset_preview()
+            cond = (gui._lab_playing_preset
+                    and "正在试听范本" in gui._lab_status.cget("text"))
+            print(f"  试听范本 → 状态「{gui._lab_status.cget('text')[:26]}…」  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+            gui._on_lab_preset_preview()                       # 趁在播再点一次
+            cond = "还在试听上一段范本" in gui._lab_status.cget("text")
+            print(f"  重复点 → 挡住、不叠播  {'OK' if cond else '✗'}")
+            ok &= cond
+            for m in _drain(gui, 2.0):
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            cond = (len(PLAYED) == played_before + 1 and not gui._lab_playing_preset
+                    and "范本试听完成" in gui._lab_status.cget("text"))
+            print(f"  播完 → 本地播放 {len(PLAYED) - played_before} 次、状态收尾、占用释放  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+
+            # ② 一键克隆：挂素材 + 名字按范本预填 → 走克隆 → 自动试听
             gui._lab_audio = None
-            gui._on_lab_preset_use()
-            cond = (gui._lab_audio is not None and gui._lab_audio.seconds > 11.0
-                    and gui._lab_clone_name_var.get() == "my_clip_4x"
-                    and "已按范本备好" in gui._lab_status.cget("text"))
-            print(f"  用此范本 → 素材 {getattr(gui._lab_audio, 'seconds', 0):.1f}s、"
-                  f"名字「{gui._lab_clone_name_var.get()}」  {'OK' if cond else '✗'}")
+            gui._on_lab_preset_clone()
+            for _ in range(3):
+                for m in _drain(gui, 1.5):
+                    if m[0] == "voice_lab":
+                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+            got = fake.enrolled[0] if fake.enrolled else ("", "")
+            cond = (len(fake.enrolled) == 1 and got[0] == "my_clip_4x"
+                    and got[1].startswith("data:audio/wav;base64,"))
+            print(f"  一键克隆 → 请求 {len(fake.enrolled)} 次、名字「{got[0]}」、素材 {got[1]}  "
+                  f"{'OK' if cond else '✗'}")
             ok &= cond
-
-            # ③ 复制范本 → 剪贴板里就是那份正文
-            gui._on_lab_preset_copy()
-            cond = ("standardloyaltycheck" in (gui._lab_preset_text.clip or "")
-                    and "已复制" in gui._lab_status.cget("text"))
-            cond = cond and "19.7" in gui._lab_preset_text.clip
-            print(f"  复制范本 → 剪贴板 {len(gui._lab_preset_text.clip or '')} 字  "
+            cond = bool(fake.sampled) and fake.sampled[0][1] == vl.CLONE_TARGET_MODEL
+            print(f"  克隆完自动试听：合成模型 = {fake.sampled[0][1] if fake.sampled else '—'}  "
                   f"{'OK' if cond else '✗'}")
             ok &= cond
 
-            # ④ 导出范本 → 真出 txt（对话框打桩）
-            target = tmp / "exported.txt"
-            real_save = _fd.asksaveasfilename
-            _fd.asksaveasfilename = lambda **_kw: str(target)
-            try:
-                gui._on_lab_preset_export()
-            finally:
-                _fd.asksaveasfilename = real_save
-            cond = (target.is_file() and "standardloyaltycheck" in target.read_text(encoding="utf-8")
-                    and "已导出" in gui._lab_status.cget("text"))
-            print(f"  导出范本 → {target.name}（{target.stat().st_size if target.is_file() else 0} 字节）  "
-                  f"{'OK' if cond else '✗'}")
-            ok &= cond
-
-            # ⑤ 范本样本找不到 → 不挂素材、提示去找（绝不拿旧素材硬上）
+            # ③ 范本没样本 → 试听与一键克隆都不动（一个请求都不发、不挂旧素材）
             gui._lab_presets = [vl.ClonePreset(key="bare", label="光杆范本", spec="没有样本")]
             gui._lab_audio = None
-            gui._on_lab_preset_use()
-            cond = (gui._lab_audio is None and "没找到" in gui._lab_status.cget("text"))
-            print(f"  范本没样本 → 不挂素材、提示去找  {'OK' if cond else '✗'}")
+            played_before, enrolled_before = len(PLAYED), len(fake.enrolled)
+            gui._on_lab_preset_preview()
+            cond = "没找到" in gui._lab_status.cget("text") and len(PLAYED) == played_before
+            print(f"  范本没样本 → 试听不动、提示去找  {'OK' if cond else '✗'}")
+            ok &= cond
+            gui._on_lab_preset_clone()
+            for m in _drain(gui, 1.0):
+                if m[0] == "voice_lab":
+                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            cond = (len(fake.enrolled) == enrolled_before and gui._lab_audio is None
+                    and "没找到" in gui._lab_status.cget("text"))
+            print(f"  范本没样本 → 一键克隆也不发请求  {'OK' if cond else '✗'}")
             ok &= cond
         finally:
             fake.restore()
@@ -897,7 +908,7 @@ if __name__ == "__main__":
     ok &= test_clone_reuse_does_not_pay_again()
     print("13) 列表行可读（短名，不挤成长 id）")
     ok &= test_list_rows_are_readable()
-    print("14) 克隆预设（范本上屏 / 用范本 / 复制 / 导出 / 缺样本）")
+    print("14) 克隆预设（试听范本 / 一键克隆 / 缺样本）")
     ok &= test_clone_preset_wiring()
     assert ok, "音色页接线用例失败（见上）"
     print("ALL PASSED")
