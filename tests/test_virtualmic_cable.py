@@ -33,8 +33,6 @@ sys.path.insert(0, str(ROOT))
 
 from vlt.platform.linux import (  # noqa: E402
     DEFAULT_OUTPUT_CLASSES,
-    VIRTUAL_SINK_PROPS,
-    VIRTUAL_SOURCE_PROPS,
     loopback_argv,
 )
 

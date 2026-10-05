@@ -22,7 +22,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import vlt.engine as engine_mod                                  # noqa: E402
 from vlt.config import AppConfig, Direction                      # noqa: E402
 from vlt.engine import Engine, EngineEvents                      # noqa: E402
 from vlt.engine import voice_segment_from_partial                # noqa: E402

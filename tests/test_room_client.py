@@ -788,6 +788,10 @@ def test_reconnect_leaves_traces_and_recovers() -> None:
                 #   B 还没重连上 → 扇出对象是空的 → B 永远收不到这一句（偶发超时的真凶）。
                 wait_both_ready(r, a, b)
                 wait_until(lambda: a.state().reconnects >= 1, "重连计数应 +1")
+                # ★ 必须等到这一轮重连**真的走完**再看状态串：`reconnects` 是在「掉线留痕」那一刻
+                #   就 +1 的，而 kill_all 之后 state 可能还残留着旧连接（wait_both_ready 会被
+                #   旧状态立刻满足）。直接读 status 就可能只读到「连接中断…」那一行 —— CI 上真红过。
+                wait_until(lambda: "已进房" in rec.status(), "重连后应重新进房（状态串必须留痕）")
                 status = rec.status()
                 assert "连接中断" in status, f"断线必须留痕：{status!r}"
                 assert "重连" in status, f"重连必须留痕：{status!r}"

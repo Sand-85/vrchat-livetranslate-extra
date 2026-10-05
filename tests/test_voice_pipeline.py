@@ -209,7 +209,7 @@ def test_backpressure_keeps_order() -> bool:
     eng = _mk(parallel=2)
     h.install()
     try:
-        deadline = _run(eng, ["1甲。", "2乙。", "3丙。", "4丁。", "5戊。"], wait=8.0)
+        _run(eng, ["1甲。", "2乙。", "3丙。", "4丁。", "5戊。"], wait=8.0)
     finally:
         h.restore()
     g = _grouped(eng._virtualmic)

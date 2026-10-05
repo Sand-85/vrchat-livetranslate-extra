@@ -1,6 +1,7 @@
 name: CI
 
-# 每次推 main / 开 PR 都跑一遍：语法、凭据扫描、全部离线测试，最后确认「还打得出来 exe」。
+# 每次推 main / 开 PR 都跑一遍：语法、静态检查、凭据扫描、全部离线测试（含覆盖率摘要），
+# 最后确认「还打得出来 exe」。
 # 所有测试都必须能在没有 API key、没有麦克风/VRChat/SteamVR 的机器上跑（CI 就是这么台机器），
 # 需要真 key 的 --self-test 不在这里跑（它在 release.yml 里也显式跳过）。
 on:
@@ -32,6 +33,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-windows.txt
+          python -m pip install -r requirements-dev.txt
 
       # ★ 依赖门禁：这几个是 **Windows 独占**依赖，缺了不会报错，只会静默少两条腿
       #   （openvr 没了 → SteamVR 手腕屏 unavailable；pyaudiowpatch 没了 →
@@ -43,13 +45,24 @@ jobs:
       - name: 语法检查（不导入，只编译）
         run: python -m compileall -q vlt scripts tests
 
+      # ★ 静态检查门禁（**阻断**）：只跑 F,E9 这一档，规则固化在 ruff.toml。
+      #   它专抓「真会出问题」的一类：F821（用到未定义名）在本仓库真实造成过
+      #   **静默降级** —— vlt/platform/win.py 的 screen_work_area() 第二条回落分支
+      #   写错常量名、恒抛 NameError 被吞，于是永远返回硬编码 1920x1080，而用例照绿。
+      #   所以必须全仓 0 error 才放行，不能靠人记得跑。
+      - name: 静态检查（ruff：F,E9，阻断）
+        run: python -m ruff check --select F,E9 .
+
       - name: 凭据扫描（仓库自带的钩子脚本，防 key 进历史）
         run: python scripts/check_no_secrets.py --once
 
-      - name: 跑全部离线测试
+      # 覆盖率与测试**同一次跑**里累积（`coverage run -a`）：只测一遍，不重复跑。
+      # 覆盖率数据先 erase 干净，避免混入缓存/上一次的旧数据。
+      - name: 跑全部离线测试（累积覆盖率）
         shell: bash
         run: |
           set -o pipefail
+          python -m coverage erase
           # 不进 CI 的（都写清理由，别让「跳过」变成静默）：
           #   test_engine —— 要真 API key 打真会话，属本机实测项
           SKIP="tests/test_engine.py"
@@ -60,7 +73,7 @@ jobs:
               continue
             fi
             echo "::group::$t"
-            if python "$t"; then
+            if python -m coverage run -a --source=vlt "$t"; then
               echo "PASS $t"
             else
               echo "::error file=$t::测试失败（见本组日志）"
@@ -69,6 +82,13 @@ jobs:
             echo "::endgroup::"
           done
           exit $fail
+
+      # 覆盖率**非阻断**：只出摘要（--show-missing），不设阈值。
+      # `if: always()` 让测试失败时也照样打印，方便看哪段没覆盖到。
+      - name: 覆盖率摘要（非阻断）
+        if: always()
+        continue-on-error: true
+        run: python -m coverage report --show-missing
 
   package:
     # 能过测试还不代表打得出来 —— 打包链路（PyInstaller + 资源 + 图标）单独验一次
@@ -152,9 +172,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-linux.txt
+          python -m pip install -r requirements-dev.txt
 
       - name: 语法检查（不导入，只编译）
         run: python -m compileall -q vlt scripts tests
+
+      # ★ 静态检查门禁（同 Windows job，**阻断**）：规则见 ruff.toml。
+      - name: 静态检查（ruff：F,E9，阻断）
+        run: python -m ruff check --select F,E9 .
 
       - name: 凭据扫描
         run: python scripts/check_no_secrets.py --once
@@ -172,10 +197,12 @@ jobs:
             echo "::warning::当前解释器没有 tkinter → 界面相关测试将跳过（非静默，见本步骤）"
           fi
 
-      - name: 跑离线测试
+      # 覆盖率与测试同一次跑里累积（`coverage run -a`），只测一遍。
+      - name: 跑离线测试（累积覆盖率）
         shell: bash
         run: |
           set -o pipefail
+          python -m coverage erase
 
           # 不进 CI 的（都写清理由，别让「跳过」变成静默）：
           #   test_engine —— 要真 API key 打真会话、还要联网，属本机实测项
@@ -197,7 +224,7 @@ jobs:
               continue
             fi
             echo "::group::$t"
-            if xvfb-run -a python "$t"; then
+            if xvfb-run -a python -m coverage run -a --source=vlt "$t"; then
               echo "PASS $t"
             else
               echo "::error file=$t::测试失败（见本组日志）"
@@ -206,6 +233,12 @@ jobs:
             echo "::endgroup::"
           done
           exit $fail
+
+      # 覆盖率**非阻断**（同 Windows job）：只出摘要，不设阈值。
+      - name: 覆盖率摘要（非阻断）
+        if: always()
+        continue-on-error: true
+        run: python -m coverage report --show-missing
 
   # ------------------------------------------------------------------
   # Linux AppImage：构建 + **独立验收**。

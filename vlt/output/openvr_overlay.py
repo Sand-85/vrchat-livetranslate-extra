@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import ctypes
 import math
-import sys
 import time
 from pathlib import Path
 

@@ -1,0 +1,15 @@
+# Issue 模板配置。
+# 关掉「空白 issue」：引导大家走结构化模板，信息更全、也更好排查。
+blank_issues_enabled: false
+
+# 常见问题先引到文档，不用开 issue。
+contact_links:
+  - name: 📖 安装 / 使用问题（Windows）
+    url: https://github.com/nixi-agent/vrchat-livetranslate/blob/main/docs/GUIDE.md
+    about: Windows 使用指南：安装、API key、用法、配置、排障都在里面。
+  - name: 🐧 Linux 安装与排障
+    url: https://github.com/nixi-agent/vrchat-livetranslate/blob/main/docs/GUIDE.linux.md
+    about: Linux 专用指南：依赖、虚拟声卡、手腕屏、AppImage、排障。
+  - name: 🤝 我能做点什么？
+    url: https://github.com/nixi-agent/vrchat-livetranslate/blob/main/CONTRIBUTING.md
+    about: 贡献说明：怎么跑起来、怎么跑测试、提 PR 要带什么。

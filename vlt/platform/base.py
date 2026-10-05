@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 # PortAudio 的初始化/销毁是**进程级且线程绑定**的资源（WASAPI 走 COM 单元）。
 # 历史教训（都是实测出来的）：

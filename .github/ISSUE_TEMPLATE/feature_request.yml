@@ -1,0 +1,57 @@
+name: 💡 功能建议 / 许愿
+description: 想要的新功能、想改的行为 —— 也欢迎认领 README 许愿列表里的条目
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        有想法就说 🙌 提交前可以先翻一眼 README 的**许愿列表** —— 那是维护者公开挂着、
+        希望别人来认领的事（教程视频、图文教程、母语校对等）。直接认领某一条也很欢迎。
+        也欢迎先看 [CONTRIBUTING](https://github.com/nixi-agent/vrchat-livetranslate/blob/main/CONTRIBUTING.md)
+        了解怎么跑起来、怎么验收。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索过现有 issue，没有重复
+          required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 你想要什么
+      description: 用一两句话描述这个功能 / 改动
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: 为什么 / 使用场景
+      description: 你遇到的具体场景是什么？现在是怎么绕开的？
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 相关平台
+      options:
+        - Windows
+        - Linux
+        - 两端都要
+        - 与平台无关（文档 / 翻译 / 其它）
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充（可选）
+      description: 参考实现、有没有替代方案、你愿意自己动手做吗
+    validations:
+      required: false

@@ -110,7 +110,6 @@ def export_logs(dest_zip: Path, log_dir: Path | None = None,
         zf.writestr(arcname, text.encode("utf-8", errors="replace"))
         n_files += 1
 
-    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in sorted(log_dir.glob("*.log*")):
             if p.is_file():

@@ -27,7 +27,6 @@ asyncio 的回调里，被默认异常处理器吞掉、只打一行——**功�
 from __future__ import annotations
 
 import sys
-import threading
 import time
 from pathlib import Path
 

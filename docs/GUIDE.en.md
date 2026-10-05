@@ -179,7 +179,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 | Area | Contents |
 |---|---|
 | Top row | `Start translation` / `Stop translation`, direction radio (`I speak` / `Others speak` / `Both at once`), language-pair dropdown (source → target), `☕ Sponsor` and `⚙ Settings` on the right |
-| Second row | `Output:` checkboxes for `chatbox` / `wrist display` / `audio output`, plus the `Fine-tune ▸` button; on the far right the API key status (plain text `API key configured` when set, **otherwise a clickable "⚠ No API key · sign up for Qwen Cloud ▸"**) |
+| Second row | `Output:` checkboxes for `chatbox` / `wrist display` / `desktop subtitle` / `audio output`; on the far right the API key status (plain text `API key configured` when set, **otherwise a clickable "⚠ No API key · sign up for Qwen Cloud ▸"**). **Wrist-display fine-tuning / desktop-subtitle adjustment live in `⚙ Settings`** (`Settings → Wrist Overlay` / `Settings → Desktop Subtitles`) |
 | Chat area | Blue bubbles on the right = what I said, gray bubbles on the left = what others said; two lines per bubble — **original in small text on top, translation in large text below**; scrollable history (cap 500 entries) |
 | Status bar | Left: colored dot + latest status message; right: stats (`Running` / `N translated` / `first delta Xms`); the two never overlap |
 | Bottom bar | **Typing input**: `Type:` box + `Send`, **Enter sends** (`Esc` clears). Enabled only when the direction includes "I speak", greyed out otherwise |
@@ -190,8 +190,10 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 - **Language mirroring**: one pair covers both directions — pick "Chinese → English" and the others-speak direction automatically becomes "English → Chinese".
   Source language can be `Auto-detect` / Chinese / English / Japanese / Korean / French / German / Spanish / Russian / Thai / Italian (the target list is the same minus "Auto-detect");
   with `Auto-detect` as source, the other direction's target falls back to Chinese and the status bar says so. Changes **take effect immediately**, are written back to config, and persist across launches
-- **Settings dialog** (`⚙ Settings`): API key entry / clearing, three audio device dropdowns + `Refresh`, log area (`Export log bundle…`)
-- **Fine-tune panel** (`Fine-tune ▸`): wrist-display anchor + 14 sliders, **drag to hot-reload, no restart needed** (see "6. Configuration")
+- **Settings dialog** (`⚙ Settings`, paged): `General` (API key entry / clearing, interface language, VRChat OSC port), `Audio` (three audio device dropdowns + `Refresh`, input gate, voice timbre), `Wrist Overlay` (fine-tune sliders), `Desktop Subtitles` (caption window size / font size / opacity), `Glossary`, `Room`, `About` (version and a log area with `Export log bundle…`)
+- **Settings → Wrist Overlay**: the anchor + 14 sliders of the **wrist display** (the texture in the headset), **drag to hot-reload, no restart needed**. It and "Settings → Desktop Subtitles" **don't affect each other** (two completely independent configs: one is a metre-scale texture in VR, the other a pixel panel on screen)
+- **Settings → Desktop Subtitles**: the translation font size / source font size / panel width / panel height / opacity / unlock & drag of the caption window pinned to the VRChat window
+  (both are **set-once-and-forget** parameters, so they don't take up the main window; changes apply instantly)
 - **Typing input**: use the keyboard instead of the microphone when you don't want to talk — type in the bottom bar, **Enter sends**. The translation goes through the **exact same** downstream as speech (chat bubbles / wrist display / chatbox); with "Audio output" ticked **it also speaks**: the translation is synthesized via TTS and written into the virtual sound card so the other person hears it (see `text_input.tts` in "6. Configuration"). It replaces the **microphone**, so it's only available when the direction includes "I speak" (the box is greyed out otherwise)
 
 #### Automated acceptance (headless, no window)
@@ -342,7 +344,7 @@ output:
     device_name: ""           # manually picked virtual sound card name (when non-empty it wins over the fallback chain)
 ```
 
-### Wrist-display fine-tune panel (14 sliders, live while dragging)
+### Wrist-display fine-tune ("⚙ Settings → Wrist Overlay", 14 sliders, live while dragging)
 
 | Slider | Range / step | Slider | Range / step |
 |---|---|---|---|
@@ -377,14 +379,17 @@ as SteamVR's `setOverlayAlpha` on Windows.
 * **Pinning**: by default it sits at the **bottom centre of the VRChat window** and follows it
   (moves and resolution changes included). If the VRChat window isn't found it falls back to fixed
   coordinates and logs one line.
-* **Position**: `Fine-tune ▸` → the "Desktop subtitle" row → "Unlock drag" → drag it where you want →
+* **Position**: click **its own** adjustment entry `Settings → Desktop Subtitles` → "Unlock drag" → drag it where you want →
   "Lock position" (the drop point is converted back to "which anchor + offset against the game
   window" and written to `config.yaml`, so the caption keeps hugging the same edge when VRChat moves).
   Click-through is on by default (so it never blocks clicks into VRChat); dragging requires unlocking.
-* **Opacity**: the slider in the same row, 0.20–1.00, applied live and persisted on release.
+* **Opacity**: the slider under "Settings → Desktop Subtitles", 0.20–1.00, applied live and persisted on release.
 * **Config**: the `desktop_overlay:` section of `config.yaml` (`mode: latest` turns it into a
-  lyric-style single line). Visual parameters (font / size / colours / lines / show-source)
-  **inherit from `overlay:`** by default; override any of them in `desktop_overlay:`.
+  lyric-style single line). ⚠️ This section carries its **own full set of visual keys**
+  (font / size / colours / line count / show-source / panel dimensions) and is **completely
+  independent of the wrist display's `overlay:` section** — the desktop panel is a pixel panel on
+  screen (px) while the wrist display is a texture in VR (metres), so they were never the same
+  thing. Changing `overlay:` does not touch the desktop subtitles, and vice versa.
 * **Linux**: on a **Wayland session** (niri / sway / Hyprland / KDE — compositors implementing
   layer-shell) the caption runs as a **native overlay window**: per-pixel transparency (real
   rounded corners, translucent plate), topmost, follows the game window, protocol-level
@@ -463,7 +468,7 @@ wrist overlay / desktop subtitles.
 | Translation stuck at half a sentence | The silence-fallback threshold was lowered. `session.final_silence_s` must be > 2.3 s; default 3.0 |
 | Final version arrives ~3s after you stop | The fast finalize is off (`session.fast_final_silence_s: null`) or not effective: the "level" judge never fires — in a noisy room the fast path degrades to the slow one (conservative, never jumps the gun) |
 | `[overlay] ⚠️ SteamVR not running or unavailable` | Normal degradation: only the wrist display won't show; chatbox is unaffected |
-| Wrist display invisible | First confirm SteamVR is running; then adjust position / size in "Fine-tune"; if `--overlay-dry-run` produces PNGs, rendering is fine |
+| Wrist display invisible | First confirm SteamVR is running; then adjust position / size in "Settings → Wrist Overlay"; if `--overlay-dry-run` produces PNGs, rendering is fine |
 | Wrist display disappears after a while | Two-level self-healing is built in (3 consecutive failures → rebuild the overlay → 3 more → hard-restart the openvr connection → retry once every 50 attempts after that). The log has an `[overlay][diag] heartbeat: …` line every 30 s showing "how long since last successful upload / rebuild count" |
 | No sound from audio output | ① both switches must be on (output checkbox + direction-level); ② only works for the "I speak" direction; ③ is a virtual sound card installed? the status bar / log states the reason plainly; ④ **everything else is unaffected** |
 | Clicking "Start translation" in the GUI does nothing | Check the terminal output first — exceptions in asyncio callbacks only print a one-line traceback to the console, not the status bar (with the exe, look at the newest `.log` in `logs/`) |
@@ -496,12 +501,13 @@ vlt/
     ├── overlay.py        **Shared rendering** for both subtitle legs (the wrist overlay and the desktop subtitles both use it)
     ├── openvr_overlay.py Windows: SteamVR wrist-overlay backend (anchor / hot-reload / two-level self-healing)
     ├── openxr_overlay.py Linux: built-in OpenXR wrist-overlay backend
-    ├── desktop_overlay.py Desktop subtitle window (pinned to the VRChat window; draggable, adjustable opacity)
+    ├── desktop_overlay.py Desktop subtitle window (pinned to the VRChat window; config is **independent of** the wrist display, with its own tuning panel)
     └── virtualmic.py     Voice feed-back: 24k→48k resampling + jitter buffer (whole utterances dropped, never cut mid-sentence)
 
 server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
 scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    59 files, 469 test functions (all run offline; CI runs them file by
+                          + run_tests.py (test runner) + verify/ (on-device acceptance scripts, need a real desktop/hardware — not run in CI)
+tests/                    64 files, 492 test functions (all run offline; CI runs them file by
                           file, and does not include tests/test_engine.py, which needs a real API key)
 docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
 testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
@@ -530,6 +536,20 @@ reconnect, log rotation and sanitization, the sponsor popup, wrist-display self-
 The only exception is `tests/test_engine.py`: it opens one real session and **requires a configured API key on the machine**;
 CI skips it explicitly (the workflow prints a `::notice::` explaining why — no silent skip).
 
+To run everything with one command (coverage summary included), the repo's bundled runner works too:
+
+```bat
+.venv\Scripts\python.exe scripts\run_tests.py             :: runs every file, auto-skipping test_engine.py
+.venv\Scripts\python.exe scripts\run_tests.py --coverage  :: also prints a coverage summary (no threshold)
+.venv\Scripts\python.exe scripts\run_tests.py --only i18n  :: only run tests whose name contains i18n
+```
+
+After changing code, run the static check too (a **blocking** gate in CI):
+
+```bat
+.venv\Scripts\python.exe -m ruff check --select F,E9 .
+```
+
 ### Packaging
 
 ```bat
@@ -544,7 +564,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
 ### CI / Release
 
 - **CI** (`.github/workflows/ci.yml`, on push to main / PR / manual):
-  syntax check → credential scan → all offline tests file by file → then a separate **packaging-pipeline** check (artifact exists and is ≥ 20 MB)
+  syntax check → static check (ruff `F,E9` tier, blocking) → credential scan → all offline tests file by file (coverage accumulated along the way, summary printed at the end, no threshold, non-blocking) → then a separate **packaging-pipeline** check (artifact exists and is ≥ 20 MB)
 - **Release** (`.github/workflows/release.yml`, triggered by pushing a `v*` tag):
   first reconciles the tag against `__version__` in `vlt/__init__.py` (mismatch = hard fail) → packages the **exe and the Linux AppImage** →
   creates the Release with the **exe**, **`VRChatLiveTranslate-x86_64.AppImage`** and `SHA256SUMS.txt` attached (GitHub shows a `sha256:…` digest next to every asset; the checksum file is a transition aid for clients up to v0.2.0, which only look for it)
@@ -552,7 +572,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.8.0 "qwencloud,千问云·海外版,小夜"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.9.0 "_on_save_osc_port,user_quiet_s,ui_tk"
   ```
 
 ---

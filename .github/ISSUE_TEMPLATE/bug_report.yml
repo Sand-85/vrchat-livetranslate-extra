@@ -1,0 +1,107 @@
+name: 🐞 Bug 报告
+description: 程序崩溃、功能不对、结果异常 —— 请尽量把日志一起带上
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！先花一分钟确认下面两件事，能让我们快很多。
+
+        **1）日志去哪找**（日志是排障的关键，请务必附上）
+        - Windows · 下载的 exe：`%APPDATA%\vrchat-livetranslate\logs\`
+        - Windows · 源码运行：仓库根目录下的 `logs\`
+        - Linux · AppImage：`~/.local/share/vrchat-livetranslate/logs/`
+        - Linux · 源码运行：仓库根目录下的 `logs/`
+        - 最省事的办法：界面里走 **「⚙ 设置 → 关于 / 日志区 → 导出日志压缩包…」**，
+          导出的 zip 已经**自动脱敏**，直接把压缩包拖进来即可。
+
+        **2）一定要先去敏**：日志和 `config.yaml` 里可能出现你的**设备名、声卡名、Windows 用户名、
+        文件路径**，甚至聊天内容。手动贴之前，请把这些替换成 `<设备>`、`<路径>` 之类的占位符。
+        `config.yaml` 在 `%APPDATA%\vrchat-livetranslate\`（源码运行就是仓库根目录）。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已按上面的提示**去敏**（设备名 / 用户名 / 路径 / 聊天内容）
+          required: true
+        - label: 我已搜索过现有 issue，没有重复
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本号
+      description: 在「⚙ 设置 → 关于」页，或启动日志里能看到
+      placeholder: 例如 0.8.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台与安装方式
+      options:
+        - Windows — 下载的 exe
+        - Windows — 源码运行
+        - Linux — AppImage
+        - Linux — 源码运行
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 一步步写清楚怎么触发；能稳定复现请注明
+      placeholder: |
+        1. 打开 …
+        2. 勾选 …
+        3. 点击「开始翻译」
+        4. 出现 …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+      description: 你本来以为会发生什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 实际发生了什么；有报错就贴原文
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志片段
+      description: 去敏后的日志（见顶部提示）。实在找不到日志就写「无日志」并说明原因。
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: config.yaml 相关段（已去敏）
+      description: 只贴与问题相关的那几段即可；请先去掉设备名 / 路径。
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息（可选）
+      description: 截图 / 录屏、是否偶发、试过别的配置没有等
+    validations:
+      required: false

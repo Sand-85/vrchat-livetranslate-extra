@@ -32,7 +32,7 @@ import time
 import urllib.error
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import endpoints
 from . import tts                       # 试听要复用它的合成口径（同一份解码/端点纪律）

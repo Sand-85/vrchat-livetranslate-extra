@@ -1,0 +1,18 @@
+# ruff 静态检查配置。
+#
+# 只开最保守的一档：F（Pyflakes —— 未定义名 / 未用导入 / 未用变量 / f-string 无占位符……）
+# 与 E9（语法级错误）。这两类都是**真会出问题**的规则，不是风格偏好：
+# F821（用到未定义名）在本仓库真实造成过「静默降级」——`vlt/platform/win.py` 的
+# `screen_work_area()` 第二条回落分支因为写错常量名恒抛 NameError、被 `except` 吞掉，
+# 于是永远返回硬编码的 1920x1080，而全量用例照绿（详见该处修复的 commit）。
+#
+# 用法：
+#   本机   .venv/Scripts/python.exe -m ruff check .        # 读本文件，等价于 --select F,E9
+#   CI     .github/workflows/ci.yml 里显式写 `ruff check --select F,E9`（与本文件一致）
+#
+# 想更严（I/UP/B/…）时改 select 一行即可，但改完要保证 CI 是绿的。
+
+target-version = "py311"
+
+[lint]
+select = ["F", "E9"]

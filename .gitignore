@@ -9,6 +9,11 @@ __pycache__/
 logs/
 out/
 
+# 覆盖率数据（coverage.py；scripts/run_tests.py --coverage 与 CI 会生成，不入库）
+.coverage
+.coverage.*
+htmlcov/
+
 # PyInstaller 打包产物（dist/ 是要发给别人的 exe；build/ 与 .spec 是中间产物）
 dist/
 build/

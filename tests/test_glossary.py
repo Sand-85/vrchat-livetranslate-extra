@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
-import json
 import os
 import sys
 import tempfile

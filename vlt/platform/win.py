@@ -453,7 +453,7 @@ _WS_EX_TOOLWINDOW = 0x00000080        # 不进 alt-tab
 _WS_EX_LAYERED = 0x00080000           # 分层窗口（色键 / 整窗透明度都要它）
 _WS_EX_NOACTIVATE = 0x08000000        # 显示时不抢焦点
 _SPI_GETWORKAREA = 0x0030
-_SM_CXSCREEN, SM_CYSCREEN = 0, 1
+_SM_CXSCREEN, _SM_CYSCREEN = 0, 1
 # 窗口不与任何显示器相交（移出屏幕外/正在销毁）时，`MonitorFromWindow` 仍返回**最近**
 # 的那块屏 —— 比返回 NULL 再回落主屏更贴近用户的直觉（字幕就在那块屏附近）。
 _MONITOR_DEFAULTTONEAREST = 2
@@ -656,8 +656,8 @@ def screen_work_area() -> tuple[int, int, int, int]:
         pass
     try:
         user32 = ctypes.windll.user32
-        w = int(user32.GetSystemMetrics(SM_CXSCREEN))
-        h = int(user32.GetSystemMetrics(SM_CYSCREEN))
+        w = int(user32.GetSystemMetrics(_SM_CXSCREEN))
+        h = int(user32.GetSystemMetrics(_SM_CYSCREEN))
         if w > 0 and h > 0:
             return (0, 0, w, h)
     except Exception:  # noqa: BLE001

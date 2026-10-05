@@ -17,7 +17,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from vlt import sfx as sfx_mod  # noqa: E402
-from vlt.output.virtualmic import resample_24k_mono_to_48k_stereo  # noqa: E402
 
 RATE48_STEREO_BYTES = 4800 * 2 * 2      # 0.1s@24k 单声道 → 48k 立体声 s16le 的字节数
 

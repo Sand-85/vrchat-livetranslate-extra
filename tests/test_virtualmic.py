@@ -153,7 +153,6 @@ def test_buffer_keeps_newest():
 
     with vm._lock:
         chunks = [c for c, _e in vm._buf]
-        bounds = None
     first_chunk = chunks[0]
     assert first_chunk[0:1] == b"\xBB" or first_chunk[0:1] == b"\xCC", \
         f"最旧的整句应被丢弃，实际第一个是 {first_chunk[0:1]!r}"
@@ -416,7 +415,6 @@ def test_engine_marks_sentence_boundaries():
     from vlt.config import AppConfig, Direction
     from vlt.engine import Engine, EngineEvents
     from vlt.session.base import TextDelta
-    import vlt.engine as E
     from vlt.output.virtualmic import VirtualMic as RealVirtualMic
 
     class RecordingVM(RealVirtualMic):

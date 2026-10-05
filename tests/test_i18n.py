@@ -577,7 +577,6 @@ def test_open_log_folder_button() -> None:
     open_path 全程打桩，绝不真开文件管理器。**故意不去打桩 `os.startfile`**：若有人再把
     实现改回直接调 `os.startfile`，Linux 上会真抛 AttributeError（该属性不存在），本用例即红
     —— 这正是本用例要守的回归点（见「打开日志文件夹在 Linux 上必失败」的修复）。"""
-    import vlt.gui as gui_mod
     from vlt import platform as platform_mod
 
     saved_env = _isolate_env(Path(tempfile.mkdtemp(prefix="vlt-i18n-env-")))

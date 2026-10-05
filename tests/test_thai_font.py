@@ -250,8 +250,8 @@ def test_thai_font_resolved_through_platform_facade() -> None:
         assert Path(path).name not in src, \
             f"共享模块 overlay.py 里出现了具体泰文字体文件名 {Path(path).name!r}（平台路径必须留在 vlt/platform/）"
     else:
-        print(f"  ⏭ 本机没有泰文字体 → 跳过「路径有效 / 与门面一致 / 不在共享模块里」三条；"
-              f"降级留痕那半条照跑")
+        print("  ⏭ 本机没有泰文字体 → 跳过「路径有效 / 与门面一致 / 不在共享模块里」三条；"
+              "降级留痕那半条照跑")
 
     saved_flag = overlay._thai_font_warned
     orig_facade = platform_mod.find_thai_font

@@ -79,7 +79,7 @@ def test_same_reason_prints_once() -> None:
     backend.error = OSError("another reason")
     _, printed = _call(backend)
     assert "another reason" in printed, f"换了失败理由却没打：{printed!r}"
-    print(f"  同一理由 5 次调用只留 1 行；理由变化立刻补一行 OK")
+    print("  同一理由 5 次调用只留 1 行；理由变化立刻补一行 OK")
 
 
 def test_recovery_prints_once() -> None:

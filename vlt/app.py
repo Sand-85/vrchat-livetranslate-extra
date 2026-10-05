@@ -23,7 +23,6 @@ from pathlib import Path
 from .config import load_config
 from .engine import (
     Engine, EngineEvents,
-    run_mic, run_loopback, to_16k_mono,
     list_devices,
 )
 

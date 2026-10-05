@@ -12,13 +12,13 @@ from collections import deque
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
 log = logging.getLogger(__name__)
 
-from .config import AppConfig, Direction, load_config
+from .config import AppConfig, Direction
 from .devices import enumerate_mic_devices, resolve_device_name
 from . import endpoints
 from . import platform

@@ -104,8 +104,8 @@ def check_rot_slider_range(scales: list) -> None:
     for i in (0, 1, 2):
         lo, hi = float(scales[i].cget("from")), float(scales[i].cget("to"))
         assert (lo, hi) == (-0.30, 0.30), f"{SPEC_KEYS[i]} 滑块范围被误改：{lo:g} ~ {hi:g}"
-    print(f"  ✓ rot_x/rot_y/rot_z 三个滑块范围均为 −180 ~ 180°，步长仍 1.0；"
-          f"位置滑块未被动过")
+    print("  ✓ rot_x/rot_y/rot_z 三个滑块范围均为 −180 ~ 180°，步长仍 1.0；"
+          "位置滑块未被动过")
 
 
 def check_out_of_range_not_clamped(scales: list) -> None:

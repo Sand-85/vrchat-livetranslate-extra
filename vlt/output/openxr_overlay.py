@@ -42,7 +42,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .overlay import OverlayConfig, render_conversation, render_panel, resolve_font_path
 
@@ -1369,7 +1369,6 @@ class OpenXrOverlay:
 
     def _bring_up(self, *, rebuild_gl: bool) -> None:
         """（重新）建一套 XR 会话，并把当前内容画上去。"""
-        import xr
         if rebuild_gl or self._gl is None:
             if self._gl is not None:
                 self._gl.close()

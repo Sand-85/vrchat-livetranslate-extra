@@ -185,7 +185,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 - **语言镜像**：一个语言对双向对应——选「中文 → 英语」，别人说方向自动变「英语 → 中文」。
   源语言可选 `自动检测` / 中文 / 英语 / 日语 / 韩语 / 法语 / 德语 / 西班牙语 / 俄语 / 泰语 / 意大利语（目标语言是同一张表但没有「自动检测」）；
   源语言选 `自动检测` 时对方方向的目标回落中文并在状态栏说明。改动**立即生效**并写回配置，下次启动保留
-- **设置弹窗**（`⚙ 设置`，分页）：`常规`（API key 输入 / 清除、界面语言）、`音频`（三个音频设备下拉 + `刷新`、门限、说话译音音色）、`手腕屏`（微调滑块）、`桌面字幕`（字幕窗的尺寸 / 字号 / 透明度）、`音色`（一句话炼音色 / **音色克隆** / 克隆预设 —— 见「六、配置」的 `text_input.tts`）、`词库`、`房间`、`关于`（版本与日志区 `导出日志压缩包…`）
+- **设置弹窗**（`⚙ 设置`，分页）：`常规`（API key 输入 / 清除、界面语言、VRChat OSC 端口）、`音频`（三个音频设备下拉 + `刷新`、门限、音色）、`手腕屏`（微调滑块）、`桌面字幕`（字幕窗的尺寸 / 字号 / 透明度）、`音色`（一句话炼音色 / **音色克隆** / 克隆预设 —— 见「六、配置」的 `text_input.tts`）、`词库`、`房间`、`关于`（版本与日志区 `导出日志压缩包…`）
 - **设置 → 手腕屏**：**手腕屏**（头显里那块贴图）的锚点 + 14 个滑块，**拖动即热重载、不用重启**。它和「设置 → 桌面字幕」**互不影响**（两套配置完全独立：一个是 VR 里的米制贴图，一个是屏幕上的像素面板）
 - **设置 → 桌面字幕**：贴在 VRChat 窗口上的那块字幕窗自己的译文字号 / 原文字号 / 面板宽度 / 面板高度 / 透明度 / 解锁拖动
   （这两块都是**设一次就不再动**的参数，所以不占主界面；改完即时生效）
@@ -622,7 +622,8 @@ vlt/
 
 server/                   多人房间的服务端（Cloudflare Worker + Durable Object，独立部署）
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release / room_e2e_local）
-tests/                    59 个文件、469 个测试函数（离线可跑，CI 逐文件执行；
+                          + run_tests.py 测试运行器 + verify/ 真机验收脚本（需真桌面/真硬件，不进 CI）
+tests/                    64 个文件、492 个测试函数（离线可跑，CI 逐文件执行；
                           不含需要真 API key 的 tests/test_engine.py）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
@@ -651,6 +652,20 @@ for %t in (tests\test_*.py) do @.venv\Scripts\python.exe %t
 唯一例外是 `tests/test_engine.py`：它要打一次真实会话，**需要本机已配置 API key**，
 CI 里显式跳过（workflow 里有 `::notice::` 说明原因，不做静默跳过）。
 
+想一条命令跑完（顺带出覆盖率）也可以用仓库自带的运行器：
+
+```bat
+.venv\Scripts\python.exe scripts\run_tests.py             :: 逐文件跑，自动跳过 test_engine.py
+.venv\Scripts\python.exe scripts\run_tests.py --coverage  :: 额外打印覆盖率摘要（不设阈值）
+.venv\Scripts\python.exe scripts\run_tests.py --only i18n  :: 只跑名字含 i18n 的用例
+```
+
+改完代码请顺手跑一次静态检查（CI 里是**阻断**门禁）：
+
+```bat
+.venv\Scripts\python.exe -m ruff check --select F,E9 .
+```
+
 ### 打包
 
 ```bat
@@ -665,7 +680,8 @@ build_exe.bat                                              :: 打包 + 打完自
 ### CI / 发布
 
 - **CI**（`.github/workflows/ci.yml`，push 到 main / PR / 手动）：
-  语法检查 → 凭据扫描 → 逐文件跑全部离线测试 → 再单独验一次**打包链路**（产物存在且 ≥20MB）
+  语法检查 → **静态检查（ruff 的 `F,E9` 档，阻断）** → 凭据扫描 → 逐文件跑全部离线测试
+  （顺带累积覆盖率，末尾打印摘要，**不设阈值、不阻断**）→ 再单独验一次**打包链路**（产物存在且 ≥20MB）
 - **Release**（`.github/workflows/release.yml`，推 `v*` tag 触发）：
   先对账 tag 与 `vlt/__init__.py` 的 `__version__`（不一致直接失败）→ 打包 **exe 与 Linux AppImage** →
   建 Release，附件是 **exe**、**`VRChatLiveTranslate-x86_64.AppImage`** 与 `SHA256SUMS.txt`：校验值 GitHub 会在附件旁直接显示 `sha256:…`，而那份摘要文件是过渡期给 **v0.2.0 及更早客户端**用的（它们只认这个附件，缺了会静默查不到更新）
@@ -673,7 +689,7 @@ build_exe.bat                                              :: 打包 + 打完自
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.8.0 "qwencloud,千问云·海外版,小夜"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.9.0 "_on_save_osc_port,user_quiet_s,ui_tk"
   ```
 
 ---

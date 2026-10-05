@@ -1,0 +1,13 @@
+# VRChat 实时同传 —— **开发期**依赖（不进产品、不随打包走）
+#
+# 只在做静态检查 / 跑覆盖率时需要；运行程序本身与 CI 的测试用例都用不到它们。
+# 单独一份是为了让「跑得起来」和「开发门禁」两套依赖互不牵连。
+#
+# 装法（用仓库自己的 .venv）：
+#   Windows：.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+#   Linux  ：.venv/bin/python        -m pip install -r requirements-dev.txt
+#
+# CI 里同样装这一份（Windows job 与 Linux job 各一次），见 .github/workflows/ci.yml。
+
+ruff>=0.6            # 静态检查。CI 以 `F,E9` 为**阻断**门禁（规则固化在 ruff.toml）
+coverage>=7.0        # 测试覆盖率统计。CI 只出摘要，**不设阈值、不阻断**

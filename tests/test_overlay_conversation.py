@@ -75,7 +75,7 @@ def test_render_conversation_keeps_newest() -> None:
     from vlt.output.overlay import OverlayConfig, render_conversation
 
     cfg = OverlayConfig()
-    entries = [(f"theirs", f"第{i}句原文", f"第{i}句译文，稍微长一点点用来占位置") for i in range(8)]
+    entries = [("theirs", f"第{i}句原文", f"第{i}句译文，稍微长一点点用来占位置") for i in range(8)]
     img = render_conversation(entries, cfg)
     assert img.size == cfg.size_px
     px = img.load()

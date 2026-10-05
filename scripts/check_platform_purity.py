@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import sys
 from pathlib import Path
 from typing import Iterator
 
@@ -122,7 +121,7 @@ def _ok(msg: str) -> None:
 
 def load_names(artifact: Path) -> list[str]:
     """产物里收录的全部名字（含 PYZ 内部模块）。"""
-    from PyInstaller.archive.readers import CArchiveReader, pkg_archive_contents
+    from PyInstaller.archive.readers import pkg_archive_contents
     return list(pkg_archive_contents(str(artifact)))
 
 

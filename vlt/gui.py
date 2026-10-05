@@ -13,16 +13,15 @@ import queue
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import tkinter as tk
 import webbrowser
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
+from typing import Any
 
 import yaml
 
@@ -39,7 +38,6 @@ from .config_io import (
 from .i18n import t
 from .output.overlay import OverlayConfig, resolve_offset
 from .devices import (
-    DeviceInfo,
     enumerate_audio_out_devices,
     enumerate_loopback_devices,
     enumerate_mic_devices,
@@ -66,417 +64,131 @@ from .platform import IS_WINDOWS
 
 ROOT = APP_DIR
 
-# 音色试听：固定样例句 + 打字侧合成模型。两条腿各走各的模型（音色不通用）：
-#   打字侧 qwen3-tts-flash（一次性 HTTP）；说话侧走非实时 Qwen-Omni（见 tts.synthesize_omni，
-#   因为 Tina 等实时音色只有 Omni 认）。VOICE_PREVIEW_MODEL 只用于打字侧。
-VOICE_PREVIEW_TEXT = "你好，这是我的音色试听。"
-VOICE_PREVIEW_MODEL = "qwen3-tts-flash"
-
-# 界面字体族：**不能写死** "Microsoft YaHei UI"。
-# 那个族在 Linux 上不存在，Tk 会静默回落到没有中日韩字形的 `fixed` ——
-#   1) 中文靠逐字 fontconfig 回落渲染，实测**每次 measure() 要 0.3 秒**，
-#      界面构建要把 4 种语言的控件全量一遍测量，慢到看起来像卡死
-#      （tests/test_i18n.py 与 test_update_dialog.py 就是这样超时的）；
-#   2) 观感也不对（字形族不一致）。
-# 所以运行时按「这台机器真的有什么」挑一个（见 _apply_ui_font）。
-_FONT_CANDIDATES = (
-    "Microsoft YaHei UI", "Microsoft YaHei",                  # Windows
-    "Noto Sans CJK SC", "Source Han Sans CN", "Noto Sans SC",  # Linux（Noto / 思源）
-    "WenQuanYi Micro Hei", "Noto Sans", "DejaVu Sans",         # 再兜一层
+# ---------------------------------------------------------------- 界面工具拆分
+# 原先堆在本模块顶部的纯逻辑（配色/字号/尺寸常量、语言标签映射、专有词库文本格式、
+# 字体族解析与字符宽度换算…）已按依赖边界抽到 vlt/ui_theme.py、vlt/ui_text.py、
+# vlt/glossary_text.py、vlt/ui_tk.py。这里**按原名重导入**，好处有两点：
+#   1) 本模块内部（以及 `from vlt.gui import _parse_glossary_lines` 这类外部引用）
+#      继续用原来的裸名字，行为零变化；
+#   2) 后续再拆控件构造层时，这些名字就有稳定的「外部落点」。
+# ⚠️ 新模块**不许** import vlt.gui（防循环引用）。
+from . import ui_tk
+from .glossary_text import (
+    _glossary_line_issues,
+    _glossary_to_lines,
+    _parse_glossary_lines,
 )
-_ui_family: str | None = None
+from .ui_text import (
+    SOURCE_LANGS,
+    TARGET_LANGS,
+    VOICE_PREVIEW_MODEL,
+    VOICE_PREVIEW_TEXT,
+    _Bubble,
+    _DownloadCancelled,
+    _dir_writable,
+    _is_unsupported_voice_err,
+    _lang_key,
+    _lang_label,
+    _persist_provider,
+    _play_pcm_local,
+    _provider_choices,
+    _source_name,
+    _sponsor_qr_specs,
+    _target_name,
+    updater_env,
+)
+from .ui_theme import (
+    ACCENT,
+    ACCENT_HOVER,
+    BG,
+    BORDER,
+    CLOSE_WAIT_STOP_S,
+    COLOR_ERROR,
+    COLOR_META,
+    COLOR_MINE,
+    COLOR_OK,
+    COLOR_SRC_MINE,
+    COLOR_SRC_THEIRS,
+    COLOR_TEXT,
+    COLOR_THEIRS,
+    COLOR_WARN,
+    FONT_MAX,
+    FONT_MIN,
+    MAX_BUBBLES,
+    PANEL,
+    PANEL_H_MAX,
+    PANEL_H_MIN,
+    PANEL_W_MAX,
+    PANEL_W_MIN,
+    # 显式重导出（`X as X` 是 ruff 认可的写法）：`tests/test_api_key_gui.py` 会
+    # `from vlt.gui import QIANWEN_SIGNUP_URL`，所以这个名字必须留在 vlt.gui 的命名空间里。
+    QIANWEN_SIGNUP_URL as QIANWEN_SIGNUP_URL,
+    SETTINGS_CHROME_H,
+    SETTINGS_MAX_H,
+    SETTINGS_MIN_H,
+    SETTINGS_WRAP,
+    SETTINGS_WIDTH,
+    SPONSOR_QR_SIZE,
+    SPONSOR_URL,
+    SPONSORS,
+    SRC_FONT_MIN,
+    STOP_WAIT_S,
+    SURFACE,
+    SURFACE_HOVER,
+    TAB_INSET_X,
+    TEXT,
+    TEXT_DIM,
+    TEXT_MUTED,
+)
+from .ui_tk import (
+    _char_width_for,
+    _combo_width,
+    _int_fmt,
+    apply_theme,
+    combo_values,
+    round_rect,
+)
+from .ui_state import (
+    current_key_slot,
+    provider,
+    refresh_api_key_in_cfg,
+    room_status_text,
+    save_room_cfg,
+)
+from .gui_selftest import run_self_test
 
-# 下面这组是**占位**默认值，`_apply_ui_font()` 会在建 Tk root 之后按平台重绑。
-FONT = ("Microsoft YaHei UI", 11)          # 译文（主）
-FONT_SMALL = ("Microsoft YaHei UI", 9)     # 原文（辅，小一号）
-FONT_META = ("Microsoft YaHei UI", 8)
-FONT_UI = ("Microsoft YaHei UI", 9)        # 控件文字
-FONT_STATUS = ("Microsoft YaHei UI", 8)    # 状态栏
-FONT_BOLD_SM = ("Microsoft YaHei UI", 8, "bold")    # 分区小标题
-FONT_BOLD_MD = ("Microsoft YaHei UI", 12, "bold")   # 弹窗小标题
-FONT_BOLD_LG = ("Microsoft YaHei UI", 13, "bold")   # 弹窗大标题（赞助）
-
-
-def resolve_ui_family(root) -> str:
-    """挑一个这台机器上**真实存在**的界面字体族。
-
-    先按候选表找；都没有就退回 Tk 自己的默认字体族（`TkDefaultFont` 的 actual family），
-    保证至少是一个有字形的真字体，而不是 `fixed`。
-    """
-    global _ui_family
-    if _ui_family:
-        return _ui_family
-    try:
-        available = {str(f).strip().lower() for f in tkfont.families(root)}
-    except Exception:  # noqa: BLE001 — 拿不到列表就退回默认
-        available = set()
-    for cand in _FONT_CANDIDATES:
-        if cand.lower() in available:
-            _ui_family = cand
-            return cand
-    try:
-        _ui_family = str(tkfont.nametofont("TkDefaultFont").actual("family"))
-    except Exception:  # noqa: BLE001
-        _ui_family = "sans-serif"
-    return _ui_family
+# 字体常量在 vlt/ui_tk.py 里按平台解析（apply_ui_font 会重绑那一份）；这里同步一份到本
+# 模块全局，供本模块内部直接使用（Tk 的字体与 `width=` 都读它），也让
+# `from vlt.gui import FONT_UI` 这类外部引用在**建窗之后**取到已应用的字族。
+# ⚠️ 只由 _apply_ui_font 重绑，别在别处直接改（会与 ui_tk 里那份漂移）。
+FONT = ui_tk.FONT
+FONT_SMALL = ui_tk.FONT_SMALL
+FONT_META = ui_tk.FONT_META
+FONT_UI = ui_tk.FONT_UI
+FONT_STATUS = ui_tk.FONT_STATUS
+FONT_BOLD_SM = ui_tk.FONT_BOLD_SM
+FONT_BOLD_MD = ui_tk.FONT_BOLD_MD
+FONT_BOLD_LG = ui_tk.FONT_BOLD_LG
 
 
 def _apply_ui_font(root) -> None:
-    """按当前平台重绑界面字体常量（在建 Tk root 之后、建任何控件之前调用）。"""
+    """按当前平台重绑界面字体常量（在建 Tk root 之后、建任何控件之前调用）。
+
+    两端同步：`vlt.ui_tk` 里那份（供 `_combo_width` / `_char_width_for` 用）与本模块
+    全局（供本模块内部及外部 `from vlt.gui import FONT_UI` 用）。缺一端都会让另一处
+    拿到占位字族（Linux 上会静默回落到没字形的 `fixed`）。
+    """
+    ui_tk.apply_ui_font(root)
     global FONT, FONT_SMALL, FONT_META, FONT_UI, FONT_STATUS
     global FONT_BOLD_SM, FONT_BOLD_MD, FONT_BOLD_LG
-    fam = resolve_ui_family(root)
-    FONT = (fam, 11)
-    FONT_SMALL = (fam, 9)
-    FONT_META = (fam, 8)
-    FONT_UI = (fam, 9)
-    FONT_STATUS = (fam, 8)
-    FONT_BOLD_SM = (fam, 8, "bold")
-    FONT_BOLD_MD = (fam, 12, "bold")
-    FONT_BOLD_LG = (fam, 13, "bold")
-
-
-MAX_BUBBLES = 500
-
-# ---- 统一配色：深灰 + 蓝（明度阶梯：聊天区最暗 → 面板次之 → 控件最亮） ----
-BG            = "#14161c"   # 聊天区背景（最暗）
-PANEL         = "#1b1e26"   # 顶栏 / 状态栏 / 窗口底色
-SURFACE       = "#262a33"   # 按钮 / 下拉框 / 指示器底色（最亮一档）
-SURFACE_HOVER = "#303541"   # 悬停
-BORDER        = "#2e333d"   # 边框 / 分割线
-ACCENT        = "#2f6fd0"   # 主色蓝（与"我说的"气泡同色）
-ACCENT_HOVER  = "#3a7de0"
-ACCENT_ACTIVE = "#2559a8"   # 按下
-# 「反向动作」按钮（房间的「断开连接」）：红棕一档，明显区别于蓝色的「连接房间」。
-# 刻意压暗、不用 COLOR_ERROR 那种亮红 —— 断开不是危险操作，只是"往回走"，
-# 亮红会让人以为点了会出大事；跟着面板的明度体系走才不会在深色界面里跳出来。
-DANGER        = "#a8443f"
-DANGER_HOVER  = "#bf4f49"
-DANGER_ACTIVE = "#8a3733"
-TEXT          = "#e8eaee"   # 主文字
-TEXT_DIM      = "#9aa1ad"   # 次要文字
-TEXT_MUTED    = "#6f7480"   # 时间戳 / 占位
-COLOR_MINE    = ACCENT      # 气泡：我说的
-COLOR_THEIRS  = "#33363f"   # 气泡：别人说的
-COLOR_TEXT    = "#ffffff"
-COLOR_META    = TEXT_MUTED
-COLOR_OK      = "#4a90d9"   # 状态栏 info
-COLOR_WARN    = "#d9904a"
-COLOR_ERROR   = "#e05a5a"
-# 原文小字的颜色：比译文暗一档但仍清晰可读（按气泡底色分别取，保证对比度）
-COLOR_SRC_MINE = "#c3d4ee"
-COLOR_SRC_THEIRS = TEXT_DIM
-
-# ---- 赞助弹窗 ----
-SPONSOR_URL = "https://ko-fi.com/kcmnixi"
-SPONSOR_QR_SIZE = 240          # 收款码等比缩放的目标边长（严禁拉伸：拉变形就扫不出来）
-
-# ---- 赞助者名单（「设置 → 关于」页里展示）----
-# 只是**名字**：专有名词，**不进词表、不翻译** —— 界面语言换成英/日/韩/俄时也照原样显示
-# （`tests/test_i18n.py` 的语言守卫按**控件**显式排除这一行，见那里的说明）。
-# 加人 = 往元组末尾追加一项（顺序即展示顺序）；留空元组 = 整区不显示（宁可没有，也不留空标题）。
-SPONSORS: tuple[str, ...] = ("小夜",)
-
-# ---- 千问云开通页（未配置 API key 时，状态按钮点击跳转）----
-# 链接逐字符照抄，不做任何 URL 解码/重组。
-# ⚠️ 这个常量**必须原样保留**：tests/test_api_key_gui.py 直接断言它的值，
-# 并断言未配置态点按钮时 webbrowser.open() 收到的就是它。千问云线路的实际跳转
-# 走下面的 `_signup_url()`（按当前线路取），在 provider=qianwen 时两者逐字符相同。
-QIANWEN_SIGNUP_URL = "https://www.qianwenai.com/"
-
-
-def _provider_choices() -> tuple[tuple[str, str], ...]:
-    """服务线路下拉的候选：`(显示名, 线路 id)`。
-
-    为什么是**函数**而不是常量表：显示名要走 `t()`，而模块 import 发生在
-    `i18n.set_language()` 之前，常量表会把中文冻在里面（英文界面就漏翻了）。
-
-    ⚠️ 配置里只写 id（`qianwen` / `qwencloud`）：把显示名当 key 写进 config.yaml 的话，
-    用户一换界面语言配置就"失效"了 —— 同一件事存两份迟早漂移（见 endpoints.py 的铁律）。
-    """
-    return ((t("千问云"), endpoints.PROVIDER_QIANWEN),
-            (t("千问云·海外版"), endpoints.PROVIDER_QWENCLOUD))
-
-
-def _persist_provider(cfg_path: "Path", provider: str, base_url: str) -> None:
-    """把线路两项（provider / base_url）就地写回 config.yaml；**先复检、后写盘**。
-
-    为什么要复检：`_yaml_set_in_text` 找不到路径时**原样返回**（不报错、不抛），
-    于是 `_write_config_text` 写出的是同一份文本 —— 表现为「点了保存、界面还说成功、
-    配置其实一点没变」，正是本仓库最忌讳的静默降级。老版本 config.yaml 若没有
-    `session:` 段就会踩这条（room 段有补建逻辑，session 段没有）。
-
-    复检放在**写盘之前**：解析的是即将写入的文本，失败时磁盘上的文件一个字没动，
-    所以调用方那句「配置未改动」是真话。
-    """
-    text = cfg_path.read_text(encoding="utf-8")
-    text = _yaml_set_in_text(text, ["session", "provider"], provider)
-    # base_url **裸写**：与模板口径一致（加引号会让手改配置的人以为它是个字符串常量）
-    text = _yaml_set_in_text(text, ["session", "base_url"], base_url)
-    got = (yaml.safe_load(text) or {}).get("session") or {}
-    if got.get("provider") != provider or got.get("base_url") != base_url:
-        raise RuntimeError(
-            "config.yaml 里没有 session: 段（或键名不符），线路写不进去 —— "
-            "请手工补一段 session: ，或删掉该文件让它按模板重新生成")
-    _write_config_text(cfg_path, text)
-
-
-# 老用户的 config.yaml（旧模板生成）没有 room 段，而 config_io 的就地改文本
-# 「找不到路径就原样返回」→ 表现为静默不保存。勾选房间时若发现缺段，就用这段补建
-# （逐字段对齐 config.example.yaml，含已部署的 server_url，补出来即可用）。
-_ROOM_SECTION_TEMPLATE = (
-    "# ---- 房间：多人各自跑 VLT 时互相看字幕（默认关，不影响现有单机用法）----\n"
-    "room:\n"
-    "  enabled: false\n"
-    '  server_url: "wss://vlt-room.kcm-nixi.cn/ws"\n'
-    '  room_code: ""            # 8 位，两端必须一致（不含 I/L/O/U）\n'
-    '  nickname: ""             # 空 = 用系统用户名\n'
-    '  token: ""                # 服务端开了门禁才需要\n'
-    "  broadcast_source: true   # 把「我」说的话发到房间\n"
-    "  show_remote: true        # 把别人说的话显示在手腕屏\n"
-    "  max_peers: 8\n"
-    "  reconnect_backoff: [2, 5, 10, 30]\n"
-    "  heartbeat_s: 20\n"
-)
-
-
-def _yaml_quote(s) -> str:  # noqa: ANN001, ANN202
-    """把字符串安全地写成 YAML 双引号标量。
-
-    昵称可能含空格 / 冒号 / `#`，裸写会破坏 YAML（`_write_config_text` 会校验并拒写，
-    表现为「保存没生效」）；房间码是 Crockford Base32 但也一并引号化，口径统一。
-    """
-    txt = "" if s is None else str(s)
-    return '"' + txt.replace("\\", "\\\\").replace('"', '\\"') + '"'
-# ---- 设置弹窗（分页）----
-# 宽度**固定**：每页的长说明都按 SETTINGS_WRAP 换行，于是各语言的窗宽一致，
-# 不会因为俄语文案长就忽然变宽（也不再靠「窗口自然撑大 → 超出屏幕」）。
-SETTINGS_WIDTH = 760
-SETTINGS_WRAP = 660            # 长说明的换行宽 = 窗宽 - 左右留白(40) - 滚动条(~12) - 余量
-SETTINGS_MIN_H = 360           # 再小的屏也至少给这么多高（内容靠页面滚动兜底）
-SETTINGS_MAX_H = 900           # 上限：1080p 屏（可用高约 1040）也必须整窗看得见
-# 点「停止翻译」后等引擎收尾的上限（**在后台线程里等**，绝不冻界面）。
-# 实测正常路径：会话关闭 ≤1.8s + chatbox 排空 ≤2s → 单个引擎基本 2s 内收尾完。
-STOP_WAIT_S = 5.0              # 单个引擎；收尾线程**逐个**等，两个引擎最坏 10s（但在后台）
-CLOSE_WAIT_STOP_S = 6.0        # 关窗时**界面最多**等这么久，等不到就直接关
-#                              （上面的收尾线程是 daemon，进程退出会释放麦克风/虚拟声卡）
-
-# ---- 桌面字幕（PC 桌面模式那块屏幕叠加窗）的滑块范围 ----
-# ⚠️ 与上面手腕屏的「微调」参数**各自独立**：桌面字幕是屏幕像素面板，单位/场景都不同，
-#    配置不许共享（2026-10-04 维护者口径）。
-FONT_MIN, FONT_MAX = 12, 96            # 译文字号（px）
-SRC_FONT_MIN = 8                       # 原文字号下限（上限同 FONT_MAX）
-PANEL_W_MIN, PANEL_W_MAX = 320, 2560   # 面板宽（px）
-PANEL_H_MIN, PANEL_H_MAX = 120, 900    # 面板高（px）
-
-SETTINGS_CHROME_H = 66         # tab 条 + 页面上下留白：算窗高时在内容高度上加这一份
-# 每页内容 frame 的左右内边距（内容区位置固定，不随标签条动）
-TAB_INSET_X = 20
-
-
-def _sponsor_qr_specs() -> list[tuple[str, Path]]:
-    """赞助弹窗的两张收款码：(标签, 图片路径)。只读资源一律走 bundle_dir()。"""
-    assets = BUNDLE_DIR / "assets"
-    return [(t("微信"), assets / "sponsor-wechat.png"),
-            (t("支付宝"), assets / "sponsor-alipay.png")]
-
-SOURCE_LANGS = {
-    "自动检测": None,
-    "中文": "zh",
-    "英语": "en",
-    "日语": "ja",
-    "韩语": "ko",
-    "法语": "fr",
-    "德语": "de",
-    "西班牙语": "es",
-    "俄语": "ru",
-    "泰语": "th",
-    "意大利语": "it",
-}
-
-TARGET_LANGS = {
-    "中文": "zh",
-    "英语": "en",
-    "日语": "ja",
-    "韩语": "ko",
-    "法语": "fr",
-    "德语": "de",
-    "西班牙语": "es",
-    "俄语": "ru",
-    "泰语": "th",
-    "意大利语": "it",
-}
-
-
-def updater_env() -> dict[str, str]:
-    """启动更新器（以及它间接拉起的新实例）时用的环境变量。
-
-    ⚠️ 必须剥掉 PyInstaller 的内部变量（`_MEI*` / `_PYI_*`）—— 这是真机流程实测抓到的坑：
-    单文件 exe 的引导器靠 `_PYI_PARENT_PROCESS_LEVEL` / `_PYI_ARCHIVE_FILE` / `_MEIPASS*`
-    判断「我是不是已经被父进程解包好的子进程」。本程序拉起更新器时若原样继承自己的环境，
-    更新器里 `start` 出来的**新版本**就会带着 `_PYI_PARENT_PROCESS_LEVEL=1` 启动 →
-    引导器以为无需自解包 → 直接起不来（不写日志、无窗口、只留一个空转进程）。
-    用户看到的症状是「点完更新、程序自己关了、再没打开」。
-
-    ⚠️ Linux/AppImage 是**同一类坑的另一半**：AppImage 运行时看到 `APPDIR` 已经存在就
-    **不会重新挂载**（它以为自己是「已被解包的子进程」），新进程会去用父进程那个马上要随
-    父进程消失的挂载点 —— 症状一样是「更新完没再打开」。所以 `APPIMAGE` / `APPDIR` /
-    `OWD` / `ARGV0` 也要剥掉，让新 AppImage 干干净净地自己挂载。
-    （`PYTHONPATH` 不清：AppRun 是**追加**而不是覆盖继承值，新挂载的路径排在前面，
-    清掉反而会抹掉用户自己设的东西。）
-
-    ⚠️ 还有第三条（`platform.child_env()`）：PyInstaller 会把包内目录前置进
-    `LD_LIBRARY_PATH`。更新器是宿主程序、新实例自己会重新挂载 —— 都不能带着父进程
-    「旧挂载点」的库搜索路径去启动（那目录马上随父进程消失，路径还排在前面）。
-    """
-    strip = ("_MEI", "_PYI_", "APPIMAGE", "APPDIR", "OWD", "ARGV0")
-    return {k: v for k, v in platform.child_env().items() if not k.startswith(strip)}
-
-
-def _source_name(code: str | None) -> str:
-    return next((k for k, v in SOURCE_LANGS.items() if v == code), "自动检测")
-
-
-def _target_name(code: str) -> str:
-    return next((k for k, v in TARGET_LANGS.items() if v == code), "英语")
-
-
-def _lang_label(name: str) -> str:
-    """界面显示用的语言名：表里的中文名 → 当前界面语言的写法。
-
-    语言表本身（SOURCE_LANGS/TARGET_LANGS）永远用中文名做 key —— 它是配置/引擎的
-    契约（config.yaml 存的是语言码，表只是码↔名的对照），界面才做翻译。
-    词表里没有该条目时 t() 原样返回中文，不会炸。
-    """
-    return t(name)
-
-
-def _lang_key(shown: str, table: dict[str, str | None]) -> str | None:
-    """反查：下拉框里显示的那一项（可能是译名）→ 语言表里的中文 key。"""
-    if shown in table:
-        return shown
-    for key in table:
-        if t(key) == shown:
-            return key
-    return None
-
-
-_char_width_cache: dict[tuple, int] = {}
-
-
-def _font_spec_key(font_spec) -> object:
-    """把字体规格压成可哈希的缓存 key（跨平台容错）。
-
-    `font_spec` 可能是 tuple、字符串（字体名）、`tkfont.Font`，或 —— 在 Linux 上 ——
-    `widget.cget("font")` 返回的 `_tkinter.Tcl_Obj`（不可迭代，直接 `tuple()`
-    会抛 `TypeError: '_tkinter.Tcl_Obj' object is not iterable`）。
-    """
-    if isinstance(font_spec, str):
-        return font_spec
-    try:
-        return tuple(font_spec)
-    except TypeError:
-        return str(font_spec)
-
-
-def _int_fmt(v: float) -> str:
-    """桌面字幕滑块值标签的统一格式（字号 / 像素尺寸都是整数）。"""
-    return f"{int(round(v))}"
-
-
-def _char_width_for(text: str, font_spec, minimum: int = 0) -> int:
-    """把「这段文字需要多宽」换算成 Tk 的**字符宽度单位**（给 width= 用）。
-
-    ⚠️ 坑（实测）：Tk 的 `width=N` 单位是**字体平均字符宽**（本机 ≈7px），而一个汉字/假名
-    约等于 2 倍宽 ⇒ `width=len(text)` 对中日韩文字**必然裁字**：
-    「訳文の文字サイズ」自然宽 100px，按 8 个字符只申请到 67px，屏幕上只剩「訳文の文字」。
-    中文同样中招（「译文字号」需 52px、按 6 字符只给 46px），只是裁得少不容易看出来。
-    这里用字体的真实 measure 换算，并留 1 个字符余量。
-
-    结果**带缓存**：切界面语言会把整套控件重建一遍，同一个词条会被反复测量；
-    而一次 `measure()` 在字体需要 fontconfig 回落的机器上要几百毫秒
-    （见上方 _FONT_CANDIDATES 的说明），不缓存会明显卡顿。
-    """
-    key = (text, _font_spec_key(font_spec), minimum)
-    hit = _char_width_cache.get(key)
-    if hit is not None:
-        return hit
-    try:
-        f = tkfont.Font(font=font_spec)
-        avg = max(1, f.measure("0"))
-        need = -(-f.measure(text) // avg) + 1     # 向上取整 + 1 字符余量
-    except Exception:  # noqa: BLE001 — 量不出来就退回字符数（至少不比改动前差）
-        need = len(text) + 1
-    out = max(minimum, need)
-    _char_width_cache[key] = out
-    return out
-
-
-def _combo_width(names, minimum: int = 9, font_spec=None) -> int:
-    """下拉框宽度（字符单位）：按当前语言里最长的名字算，避免被截断。
-
-    同样受「平均字符宽 ≠ 汉字宽」影响，所以走 `_char_width_for` 换算，不直接数字符。
-    """
-    f = font_spec or FONT_UI
-    return max(minimum, max((_char_width_for(str(n), f) for n in names), default=0))
-
-
-def combo_values(combo) -> list[str]:
-    """读回 ttk.Combobox 的候选值（跨平台安全）。
-
-    ⚠️ 坑（实测）：`combo.cget("values")` 的**返回类型依平台而变** ——
-    Windows 上 Tk 返回 tuple（可直接 `list()`），Linux 上返回
-    `_tkinter.Tcl_Obj`（不可迭代，`list()` 直接抛
-    `TypeError: '_tkinter.Tcl_Obj' object is not iterable`）。
-    这在设备下拉里是**真会走到**的路径（`_on_device_change` 要按下标取回原始设备名），
-    不是只影响测试。
-
-    用 Tk 自己的 `splitlist` 归一化：tuple / 列表 / 空格分隔的字符串 / Tcl_Obj 都能吃。
-    """
-    try:
-        return [str(v) for v in combo.tk.splitlist(combo.cget("values"))]
-    except Exception:  # noqa: BLE001 — 读不到就当空，别让「保存设备选择」这一步炸掉
-        return []
-
-
-def round_rect(cv: tk.Canvas, x1, y1, x2, y2, r, **kw):
-    """圆角矩形：polygon + smooth=True 才有圆角。"""
-    pts = [x1+r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y2-r, x2, y2,
-           x2-r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y1+r, x1, y1]
-    return cv.create_polygon(pts, smooth=True, **kw)
-
-
-@dataclass
-class _Bubble:
-    """一条聊天气泡。items = 这条气泡占用的 Canvas 图元（就地重画时整体删掉）。"""
-    who: str
-    source: str
-    text: str
-    ts: str
-    final: bool = False
-    y: int = 0
-    h: int = 0
-    items: list = field(default_factory=list)
-    label: str = ""   # 远端成员昵称：作为小字显示在气泡上方（本机气泡为空）
-
-
-class _DownloadCancelled(Exception):
-    """用户关窗取消下载：progress 回调在下载线程里抛出它，download_and_verify
-    会在自己的 except 里清掉残留 .new 再原样上抛 —— 取消路径不需要额外清理。"""
-
-
-def _dir_writable(d: Path) -> bool:
-    """目录可写性探测：真的建一个临时文件再删掉（光猜权限位在 Windows 上不可靠）。"""
-    try:
-        fd, name = tempfile.mkstemp(dir=d, prefix=".upd_write_probe_")
-    except OSError:
-        return False
-    try:
-        os.close(fd)
-        Path(name).unlink()
-    except OSError:
-        pass
-    return True
+    FONT = ui_tk.FONT
+    FONT_SMALL = ui_tk.FONT_SMALL
+    FONT_META = ui_tk.FONT_META
+    FONT_UI = ui_tk.FONT_UI
+    FONT_STATUS = ui_tk.FONT_STATUS
+    FONT_BOLD_SM = ui_tk.FONT_BOLD_SM
+    FONT_BOLD_MD = ui_tk.FONT_BOLD_MD
+    FONT_BOLD_LG = ui_tk.FONT_BOLD_LG
 
 
 def _lab_model_of(info) -> str:                                      # noqa: ANN001
@@ -489,95 +201,6 @@ def _lab_model_of(info) -> str:                                      # noqa: ANN
         return got
     kind = str(getattr(info, "kind", "design") or "design")
     return voice_lab.CLONE_TARGET_MODEL if kind == "clone" else voice_lab.DEFAULT_TARGET_MODEL
-
-
-def _play_pcm_local(pcm_24k_mono: bytes) -> None:
-    """在**本地默认输出设备**播放 24kHz 单声道 s16le PCM（阻塞到播完）。
-
-    试听走本地扬声器，绝不进虚拟声卡 —— 否则对面会在 VRChat 里听到你的试听音。
-    离线测试会把它打桩替换（CI 机器没有音频设备，也不该真出声）。
-    """
-    if not pcm_24k_mono:
-        return
-    import numpy as np
-    import sounddevice as sd
-
-    arr = np.frombuffer(pcm_24k_mono, dtype=np.int16)
-    sd.play(arr, samplerate=24000, blocking=True)
-
-
-# 服务端拒收音色的典型报错标记：说话译音用的是实时模型（Qwen-Omni）音色，
-# 像默认的 Tina 根本不在 qwen3-tts-flash 的支持表里，合成会返回 InvalidParameter。
-_UNSUPPORTED_VOICE_MARKERS = ("invalidparameter", "not supported", "is not support",
-                              "engine error")
-
-
-def _is_unsupported_voice_err(msg: str) -> bool:
-    """判断一条 TtsError 是不是「音色不被该模型支持」—— 用来把说话侧的失败
-    说成人话（而不是甩一串服务端原始报文）。"""
-    low = (msg or "").lower()
-    return any(m in low for m in _UNSUPPORTED_VOICE_MARKERS)
-
-
-# ---------------------------------------------------------------- 专有词库的文本格式
-# 界面上一行一条：`原文=译名`。为什么用这个格式而不是 JSON / YAML：
-#   · 用户是主播，不是程序员 —— 敲 `原文=译名` 不需要懂缩进和引号；
-#   · 一行一条，删一条就删一行，改坏了也不影响别人（JSON 少个逗号整段报废）；
-#   · 与 config.yaml 里的映射表一一对应，肉眼能对上。
-# 解析纪律：以 `#` 开头的行是注释、空行忽略；**只按第一个等号切**，
-# 这样译名里带 `=`（或中文全角 `＝`）也不会切错。
-
-def _iter_glossary_lines(text: str):
-    """逐行分类：产出 `(行号, 原文, 译名, 忽略原因, 原样内容)`。
-
-    - 空行 / `#` 注释 = 正常跳过（原因 `""`）
-    - 原文/译名为 `None` 且原因非空 = 用户**写了内容但格式看不懂** —— 以前这类行被静默丢掉，
-      用户写了 `原文：译名` 只会觉得「保存没反应」，所以要能报出来。
-    """
-    for lineno, raw in enumerate((text or "").splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            yield lineno, None, None, "", line
-            continue
-        if "=" in line:
-            src, _, tgt = line.partition("=")
-        elif "＝" in line:
-            # 容忍全角等号（中文输入法下极易打出来），否则用户会以为「保存没反应」
-            src, _, tgt = line.partition("＝")
-        else:
-            yield lineno, None, None, "缺少等号", line
-            continue
-        src, tgt = src.strip(), tgt.strip()
-        if not (src and tgt):
-            yield lineno, None, None, "等号有一侧是空的", line
-            continue
-        yield lineno, src, tgt, "", line
-
-
-def _parse_glossary_lines(text: str) -> dict[str, str]:
-    """把界面文本框的内容解析成 {原文: 译名}（纯函数，离线可测）。
-
-    重复的原文以**后出现的为准**（用户在下面写一条更具体的覆盖上面那条，
-    与「后写覆盖先写」的直觉一致）。
-    """
-    out: dict[str, str] = {}
-    for _lineno, src, tgt, _reason, _raw in _iter_glossary_lines(text):
-        if src:
-            out[src] = tgt
-    return out
-
-
-def _glossary_line_issues(text: str) -> list[tuple[int, str]]:
-    """格式看不懂的行 `[(行号, 原样内容)]`（纯函数，离线可测）。
-
-    界面拿它给用户一句提示：以前这些行是**静默**丢掉的，用户很容易以为「保存没反应」。
-    """
-    return [(n, raw) for n, src, _tgt, reason, raw in _iter_glossary_lines(text) if reason]
-
-
-def _glossary_to_lines(mapping: dict[str, str] | None) -> list[str]:
-    """反向：{原文: 译名} → 界面文本框的行（保持配置里的顺序）。"""
-    return [f"{k}={v}" for k, v in (mapping or {}).items()]
 
 
 class TranslationGUI:
@@ -789,144 +412,8 @@ class TranslationGUI:
                   flush=True)
 
     def _apply_theme(self) -> None:
-        """统一深色主题：深灰 + 蓝。
-
-        ⚠️ Windows 上 ttk 默认主题（vista/xpnative）由系统绘制，
-        style.configure(background=...) 会被**静默忽略**——必须切到 clam。
-        """
-        root = self._root
-        style = ttk.Style(root)
-        style.theme_use("clam")
-
-        style.configure(".", font=FONT_UI, background=PANEL, foreground=TEXT,
-                        bordercolor=BORDER, focuscolor=PANEL)
-        style.configure("TFrame", background=PANEL)
-        style.configure("TLabel", background=PANEL, foreground=TEXT)
-        style.configure("Dim.TLabel", foreground=TEXT_DIM)
-        style.configure("Muted.TLabel", foreground=TEXT_DIM, font=FONT_STATUS)
-        style.configure("Status.TLabel", font=FONT_STATUS)
-        # 分区小标题（设置弹窗里的「API KEY / 音频设备」）：小一号、暗色、加粗
-        style.configure("Section.TLabel", foreground=TEXT_DIM,
-                        font=FONT_BOLD_SM)
-        # API key 状态槽位里的两个控件：**已配置 → 纯展示标签**（「⚙ 设置」是改 key 的入口，
-        # 标签不可点）；**未配置 → 可点按钮**，点击用默认浏览器打开千问云开通页（QIANWEN_SIGNUP_URL）。
-        style.configure("Chip.TLabel", font=FONT_STATUS, foreground=TEXT_DIM)
-        style.configure("ChipWarn.TLabel", font=FONT_STATUS, foreground=COLOR_WARN)
-        # 设置弹窗里「保存失败」这类就地提示：警示色，但只是文字（不抢按钮的视觉重量）
-        style.configure("Warn.TLabel", font=FONT_STATUS, foreground=COLOR_WARN)
-        # 「保存被拒 · 什么都没写」的就地红字：警示橙只表达"注意一下"，而这种情况下
-        # 配置**一点没变**（用户以为切了线路、其实还在老线路上）—— 必须比橙更重一档。
-        style.configure("Error.TLabel", font=FONT_STATUS, foreground=COLOR_ERROR)
-        # 未配置按钮：暗橙底 + 警示橙字，悬停/按下亮一档 —— 警示色系但不刺眼。
-        style.configure("ChipWarn.TButton", font=FONT_STATUS, foreground=COLOR_WARN,
-                        background="#33291c", borderwidth=0, focusthickness=0,
-                        focuscolor="#33291c", padding=(8, 2))
-        style.map("ChipWarn.TButton",
-                  background=[("pressed", "#453723"), ("active", "#453723")],
-                  foreground=[("active", "#e8a85c")])
-        # 分割线/分组竖线：用 1px 明度差表达层次，不用 3D 边框
-        style.configure("TSeparator", background=BORDER)
-
-        # 按钮：扁平、无边框（clam 的按钮边框会带亮色 bevel，直接不要边框），
-        # 悬停/按下有反馈；focuscolor 设成与背景同色，去掉点状焦点框
-        style.configure("TButton", background=SURFACE, foreground=TEXT,
-                        borderwidth=0, focusthickness=0, focuscolor=PANEL,
-                        padding=(12, 7))
-        style.map("TButton",
-                  background=[("pressed", SURFACE_HOVER), ("active", SURFACE_HOVER),
-                              ("disabled", "#20242d")],
-                  foreground=[("disabled", TEXT_MUTED)])
-        # 主按钮（开始翻译）：蓝色强调
-        style.configure("Accent.TButton", background=ACCENT, foreground="#ffffff",
-                        borderwidth=0, focusthickness=0, focuscolor=ACCENT,
-                        padding=(14, 6))
-        style.map("Accent.TButton",
-                  background=[("pressed", ACCENT_ACTIVE), ("active", ACCENT_HOVER),
-                              ("disabled", "#22374f")],
-                  foreground=[("disabled", "#6b87ab")])
-        # 反向动作按钮（房间的「断开连接」）：与「连接房间」同形状、**不同颜色** ——
-        # 同一个位置在不同连接态下写着相反的动作，只靠文字区分容易点错，
-        # 颜色是比文字快得多的提示（用户明确要求「断开用个别的颜色」）。
-        style.configure("Danger.TButton", background=DANGER, foreground="#ffffff",
-                        borderwidth=0, focusthickness=0, focuscolor=DANGER,
-                        padding=(14, 6))
-        style.map("Danger.TButton",
-                  background=[("pressed", DANGER_ACTIVE), ("active", DANGER_HOVER),
-                              ("disabled", "#3a2726")],
-                  foreground=[("disabled", "#9c7a78")])
-
-        # API key 输入行：不加这条会沿用 clam 的浅色默认底 —— 深色界面里出现一块白，很扎眼
-        # （截图复核时发现的）。字段底/文字/插入符/边框全部对齐 SURFACE/TEXT/BORDER 体系。
-        style.configure("Key.TEntry", fieldbackground=SURFACE, background=SURFACE,
-                        foreground=TEXT, insertcolor=TEXT, bordercolor=BORDER,
-                        lightcolor=SURFACE, darkcolor=SURFACE, padding=(8, 4))
-        style.map("Key.TEntry",
-                  bordercolor=[("focus", ACCENT), ("active", SURFACE_HOVER)],
-                  fieldbackground=[("disabled", BG), ("readonly", SURFACE)],
-                  foreground=[("disabled", TEXT_DIM)])
-
-        # 下拉框：字段、箭头、边框都变深；readonly 下保持深色
-        style.configure("TCombobox", fieldbackground=SURFACE, background=SURFACE,
-                        foreground=TEXT, arrowcolor=TEXT_DIM, bordercolor=BORDER,
-                        lightcolor=SURFACE, darkcolor=SURFACE, insertcolor=TEXT,
-                        padding=(8, 4))
-        style.map("TCombobox",
-                  fieldbackground=[("readonly", SURFACE)],
-                  foreground=[("readonly", TEXT)],
-                  selectbackground=[("readonly", SURFACE)],   # 去掉选中文字的高亮白块
-                  selectforeground=[("readonly", TEXT)],
-                  bordercolor=[("focus", ACCENT), ("active", SURFACE_HOVER)],
-                  arrowcolor=[("active", TEXT)])
-        # 下拉弹出的列表是独立 Listbox，必须单独配色（否则弹出来是白的）
-        root.option_add("*TCombobox*Listbox.background", SURFACE)
-        root.option_add("*TCombobox*Listbox.foreground", TEXT)
-        root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
-        root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
-        root.option_add("*TCombobox*Listbox.font", FONT_UI)
-
-        # 滚动条：细、暗、无箭头，跟聊天区融合
-        style.layout("Vertical.TScrollbar",
-                     [("Vertical.Scrollbar.trough",
-                       {"children": [("Vertical.Scrollbar.thumb",
-                                      {"expand": "1", "sticky": "nswe"})],
-                        "sticky": "ns"})])
-        style.configure("Vertical.TScrollbar", background=SURFACE, troughcolor=BG,
-                        bordercolor=BG, darkcolor=BG, lightcolor=BG,
-                        arrowcolor=TEXT_DIM, gripcount=0)
-        style.map("Vertical.TScrollbar",
-                  background=[("pressed", ACCENT_ACTIVE), ("active", SURFACE_HOVER)])
-
-        # 设置弹窗的分页标签（Notebook）：clam 的默认 tab 是浅灰渐变，
-        # 深色界面里就是一块亮斑（和「ttk.Entry 默认白底」同一类坑），必须逐状态配色。
-        # tabmargins 左侧必须是 **0**：标签条的基准是 Notebook **外框**左边 ——
-        # 也就是内容区那条左边框竖线（贯穿整窗、也是用户会拿来对的那条线）。
-        # ⚠️ 别把它对齐到「页内分隔线的左端」：那条线本身被页面 20px 内边距缩进过，
-        #    拿它当基准会让整排标签比内容区左边框右缩 22px（截图实测过，正是用户说的「没对齐」）。
-        style.configure("TNotebook", background=PANEL, bordercolor=BORDER,
-                        darkcolor=PANEL, lightcolor=PANEL, tabmargins=(0, 6, 10, 0))
-        tab_pad = (16, 7)
-        style.configure("TNotebook.Tab", font=FONT_UI, padding=tab_pad,
-                        background=PANEL, foreground=TEXT_DIM, bordercolor=BORDER,
-                        lightcolor=PANEL, darkcolor=PANEL, focuscolor=PANEL)
-        # padding 必须逐状态映射成同一个值：只写 configure 的默认值时，selected/active
-        # 会回落成 clam 自己的 tab 布局尺寸，选中标签的外框就比未选中的矮一截。
-        # lightcolor/darkcolor/bordercolor 同理——任一状态回落成空值都会画出亮边。
-        # 于是选中态**只靠背景色 + 前景色**区分，三态尺寸完全一致。
-        # 注意两点实测坑：① ttk 取「第一个匹配的状态规格」，所以默认态必须排在最后；
-        # ② 默认态**不能**写成 ("", …)——Tk 8.6 里空规格匹配任意状态，会把 selected 盖掉。
-        style.map("TNotebook.Tab",
-                  padding=[("selected", tab_pad), ("active", tab_pad),
-                           ("!selected !active", tab_pad)],
-                  background=[("selected", SURFACE), ("active", SURFACE_HOVER),
-                              ("!selected !active", PANEL)],
-                  foreground=[("selected", TEXT), ("active", TEXT),
-                              ("!selected !active", TEXT_DIM)],
-                  lightcolor=[("selected", SURFACE), ("active", SURFACE_HOVER),
-                              ("!selected !active", PANEL)],
-                  darkcolor=[("selected", SURFACE), ("active", SURFACE_HOVER),
-                             ("!selected !active", PANEL)],
-                  bordercolor=[("selected", BORDER), ("active", BORDER),
-                               ("!selected !active", BORDER)])
+        """统一深色主题（实现见 `vlt.ui_tk.apply_theme`；这里只做接线）。"""
+        apply_theme(self._root)
 
     def _set_window_icon(self) -> None:
         """窗口 / 任务栏图标。资源走 bundle_dir()（源码 = 仓库根，打包后 = _MEIPASS）。
@@ -1159,23 +646,8 @@ class TranslationGUI:
         self._refresh_room_btn()          # 首屏就把按钮文案/可用态定对
 
     def _room_status_text(self) -> str:
-        """房间行右侧的状态文案：连接态 + 在线人数，全部走 t()（界面禁技术词）。"""
-        room = self._room
-        if room is None:
-            return t("状态：{state} · {n} 人", state=t("未连接"), n=0)
-        try:
-            st = room.state()
-        except Exception:                       # noqa: BLE001  取快照失败就退回「未连接」
-            return t("状态：{state} · {n} 人", state=t("未连接"), n=0)
-        state_zh = {
-            ConnectionState.IDLE: "未连接",
-            ConnectionState.CONNECTING: "连接中",
-            ConnectionState.ONLINE: "已连接",
-            ConnectionState.RECONNECTING: "重连中",
-            ConnectionState.STOPPED: "已停止",
-            ConnectionState.ERROR: "错误",
-        }.get(st.conn, "未连接")
-        return t("状态：{state} · {n} 人", state=t(state_zh), n=st.peer_count)
+        """房间行右侧的状态文案（实现见 `vlt.ui_state.room_status_text`；这里只做接线）。"""
+        return room_status_text(self._room)
 
     def _refresh_room_status_label(self) -> None:
         """刷新房间行状态文案（**只在主线程调用**；无头/控件未建时静默跳过）。"""
@@ -1283,50 +755,8 @@ class TranslationGUI:
             enabled=enabled, room_code=code, nickname=nick)
 
     def _save_room_cfg(self) -> None:
-        """把房间三项（enabled/room_code/nickname）就地写回 config.yaml 的 room 段。
-
-        ⚠️ room 段不存在时**补建**：老用户的 config.yaml（旧模板生成）没有这个段，
-        而就地改文本「找不到路径就原样返回」→ 不补建就表现为静默不保存。
-        """
-        p = DEFAULT_CONFIG
-        if not p.exists():
-            return
-        try:
-            text = p.read_text(encoding="utf-8")
-            if not re.search(r"^room:", text, re.M):
-                text = text.rstrip("\n") + "\n\n" + _ROOM_SECTION_TEMPLATE
-            text = _yaml_set_in_text(text, ["room", "enabled"],
-                                     _fmt_scalar(bool(self._room_cfg.enabled)))
-            text = _yaml_set_in_text(text, ["room", "room_code"],
-                                     _yaml_quote(self._room_cfg.room_code))
-            text = _yaml_set_in_text(text, ["room", "nickname"],
-                                     _yaml_quote(self._room_cfg.nickname))
-            _write_config_text(p, text)
-            # ⚠️ 上面补建的只是**文件**。内存里的 `self._room_cfg` 还是「配置里根本没有 room 段」
-            # 时的默认值（`server_url` 为空）→ 紧接着勾选启用时，`RoomClient` 的启动校验会直接拒：
-            #     [room] ❌ 房间链路没启动：没填 server_url（config.yaml 的 room.server_url）
-            # 而用户打开 config.yaml 一看，明明有 —— 于是表现为「勾了房间没反应，
-            # 重启一次才好」。所以写完把新段回读回来，让**本轮**勾选就能连上。
-            self._room_cfg = self._room_cfg_from_text(text)
-            print(f"[gui] 房间设置已保存：enabled={_fmt_scalar(bool(self._room_cfg.enabled))} "
-                  f"room_code={self._room_cfg.room_code!r} nickname={self._room_cfg.nickname!r}",
-                  flush=True)
-        except Exception as exc:                # noqa: BLE001  存盘失败只留痕，不影响使用
-            print(f"[gui] 保存房间设置失败：{exc}", flush=True)
-
-    def _room_cfg_from_text(self, text: str) -> RoomConfig:
-        """从配置**文本**里读 `room:` 段成 RoomConfig（补建段之后立刻回读用）。
-
-        解析失败就沿用内存里的现有设置（宁可用旧设置，也别把用户刚填的选项清掉）。
-        """
-        try:
-            raw = (yaml.safe_load(text) or {}).get("room")
-        except Exception as exc:                # noqa: BLE001
-            print(f"[gui] 房间段回读失败（沿用内存里的设置）：{exc}", flush=True)
-            return self._room_cfg
-        if not isinstance(raw, dict):
-            return self._room_cfg
-        return RoomConfig.from_dict(raw)
+        """把房间三项就地写回 config.yaml（实现见 `vlt.ui_state.save_room_cfg`）。"""
+        self._room_cfg = save_room_cfg(DEFAULT_CONFIG, self._room_cfg)
 
     def _start_room(self) -> None:
         """建 RoomClient 并启动（**幂等**）。任何异常只留痕 + 状态栏，绝不影响翻译。"""
@@ -2168,8 +1598,8 @@ class TranslationGUI:
 
     # ---------------------------------------------------------------- 线路取值助手
     def _provider(self) -> str:
-        """当前线路 id（脏值由 endpoints 归一化 + 留痕，这里绝不自己判第二遍）。"""
-        return endpoints.normalize_provider(self._cfg.session_base.get("provider"))
+        """当前线路 id（实现见 `vlt.ui_state.provider`）。"""
+        return provider(self._cfg)
 
     def _provider_label(self) -> str:
         """当前线路的**界面显示名**（按界面语言取词）。给用户看的文案一律走这里，
@@ -2180,13 +1610,13 @@ class TranslationGUI:
         return t("千问云")          # 走不到：_provider() 已归一化成合法 id
 
     def _current_key_slot(self) -> str:
-        """当前线路的密钥槽名。千问云与千问云·海外版的 key 不通用 → 分槽各存一份，切线路不用重填。
+        """当前线路的密钥槽名（实现见 `vlt.ui_state.current_key_slot`）。
 
-        ⚠️ 名字里必须带 `current`：`self._key_slot` 已经被主界面第二行的**控件容器**
+        ⚠️ 方法名里必须带 `current`：`self._key_slot` 已经被主界面第二行的**控件容器**
         （一个 ttk.Frame）占了，方法同名会被那个实例属性盖掉 → 调用即
         `TypeError: 'Frame' object is not callable`（i18n 那批真窗口用例当场就红）。
         """
-        return endpoints.key_slot(self._provider())
+        return current_key_slot(self._cfg)
 
     def _signup_url(self) -> str:
         """当前线路的开通页地址。qianwen 时与 `QIANWEN_SIGNUP_URL` 逐字符相同
@@ -4357,31 +3787,8 @@ class TranslationGUI:
             self._set_status("warn", t("打不开浏览器，请手动复制访问：{url}", url=url))
 
     def _refresh_api_key_in_cfg(self) -> None:
-        """按既有优先级链重新解析 API key 并写回 self._cfg.session_base["api_key"]。
-
-        启动时 load_config() 解析出的 key 只是那一刻的快照；界面上保存/清除之后
-        必须重解，否则「开始翻译」读的还是启动时那份（干净机器：保存了却报"还没配置"；
-        有旧来源的机器：贴了新 key 却继续用旧的）。解析只走 config.load_api_key()，
-        不自写第二套优先级；一个来源都没有时它会抛 SystemExit —— 这里置空串，
-        绝不让异常冒到界面/主循环。留痕：来源 + 打码值，绝不打明文。
-        """
-        from .config import load_api_key
-        from .credentials import key_source, mask_key
-
-        slot = self._current_key_slot()
-        try:
-            key = load_api_key(slot=slot)
-        except SystemExit:
-            key = ""
-        self._cfg.session_base["api_key"] = key
-        if key:
-            source, _ = key_source(slot=slot)
-            print(f"[gui] API key 已刷新：线路={endpoints.provider_name(self._provider())} "
-                  f"来源={source}（{mask_key(key)}）", flush=True)
-        else:
-            print(f"[gui] API key 已刷新：线路="
-                  f"{endpoints.provider_name(self._provider())} 没有任何来源（尚未配置）",
-                  flush=True)
+        """按既有优先级链重解 API key 并写回内存（实现见 `vlt.ui_state.refresh_api_key_in_cfg`）。"""
+        refresh_api_key_in_cfg(self._cfg)
 
     def _on_save_key(self) -> None:
         from .credentials import load_saved_key, mask_key, save_api_key
@@ -6378,42 +5785,8 @@ class TranslationGUI:
     # ================================================================ 自检
 
     def run_self_test(self) -> int:
-        pcm_path = BUNDLE_DIR / "testdata" / "zh_test_16k.pcm"
-        if not pcm_path.exists():
-            print(f"GUI_SELFTEST_FAIL: 测试音频不存在 {pcm_path}", file=sys.stderr)
-            return 1
-
-        results: list[tuple] = []
-
-        def on_text(src, txt, final):
-            results.append((src, txt, final))
-
-        def on_status(level, msg):
-            print(f"[selftest][{level}] {msg}")
-
-        cfg = load_config()
-        cfg.directions["mine"].source_lang = "zh"
-        cfg.directions["mine"].target_lang = "en"
-        # 自检只验链路，**不碰真实音频设备**（否则用户的虚拟声卡被写进测试音频）。
-        cfg.output.setdefault("audio", {})["enabled"] = False
-
-        events = EngineEvents(on_text=on_text, on_status=on_status)
-        engine = Engine(
-            cfg=cfg, direction="mine", source=f"pcm:{pcm_path}",
-            sinks={"chatbox"}, events=events, dry_run=True,
-        )
-        engine.start()
-        engine.join(timeout=60)
-        engine.stop(timeout=5)
-
-        has_source = any(r[0].strip() for r in results)
-        has_target = any(r[1].strip() for r in results)
-        if has_source and has_target:
-            print("GUI_SELFTEST_OK")
-            return 0
-        print(f"GUI_SELFTEST_FAIL: source={has_source} target={has_target} rows={len(results)}",
-              file=sys.stderr)
-        return 1
+        """单方向自动化验收（实现见 `vlt.gui_selftest.run_self_test`；这里只做接线）。"""
+        return run_self_test()
 
     def run_self_test_dual(self) -> int:
         """双向同时验收：两个测试 PCM 同时驱动两个引擎，左右两侧都必须出气泡。"""

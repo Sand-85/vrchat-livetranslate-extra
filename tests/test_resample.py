@@ -8,7 +8,6 @@
 本测试拿「原始 16kHz 信号」当参照物（不是拿实现互相比），所以它验的是
 「重采样后还是不是原来那段话」，而不是「有没有跑通」。
 """
-import math
 import pathlib
 import sys
 
