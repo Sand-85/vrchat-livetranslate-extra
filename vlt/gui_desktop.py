@@ -88,6 +88,16 @@ class DesktopCtx:
     # ── 回调 ──
     set_status_fn: Optional[Callable] = None           # (level, msg) -> None
 
+    # ── 回调（由 gui.py 注入） ──
+    # 落盘 / 交互。桌面字幕的**唯一**保存在 gui_engine（那里有 Tk root、活的
+    # DesktopOverlay 实例、以及与引擎 ctx 的同步）；本模块只管「控件长什么样、用户动了
+    # 哪个键」，持久化一律回调出去 —— 早先这里留了一份同名的 schedule/save/toggle 副本，
+    # root 没接上就成了死路（设置页滑块改了不落盘、热重载无从谈起）。
+    schedule_overlay_save_fn: Optional[Callable] = None   # () -> None（手腕屏防抖落盘）
+    schedule_desktop_save_fn: Optional[Callable] = None   # () -> None（桌面字幕防抖落盘）
+    toggle_desktop_drag_fn: Optional[Callable] = None     # () -> None（解锁/锁定拖动）
+    desktop_out_fn: Optional[Callable] = None             # () -> DesktopOverlay | None
+
 
 # ================================================================ 手腕屏调音台页面
 
@@ -221,7 +231,9 @@ def make_tune_handler(key: str, var, lbl, unit: str,  # noqa: ANN001
     def _on_move(_v: str) -> None:
         ctx.tune_values[key] = round(float(var.get()), 4)
         lbl.configure(text=f"{ctx.tune_values[key]:g}{unit}")
-        schedule_overlay_save(ctx, overlay_fn=overlay_fn)
+        # 落盘走注入的回调（防抖在 gui 侧；那里才有 Tk root 与活实例）
+        if ctx.schedule_overlay_save_fn:
+            ctx.schedule_overlay_save_fn()
     return _on_move
 
 
@@ -412,7 +424,8 @@ def build_desktop_tune_page(parent: ttk.Frame, ctx: DesktopCtx,
         r3, text=t("解锁拖动"),
         width=max(_char_width_for(t("解锁拖动"), ui_tk.FONT_UI, 6),
                   _char_width_for(t("锁定位置"), ui_tk.FONT_UI, 6)),
-        command=lambda: toggle_desktop_drag(ctx))
+        command=lambda: (ctx.toggle_desktop_drag_fn()
+                         if ctx.toggle_desktop_drag_fn else None))
     ctx.desktop_drag_btn.pack(side=tk.LEFT, padx=(16, 0))
     ttk.Label(parent, text=t("（字幕窗默认可穿透，先解锁再拖；改动即时生效）"),
               font=ui_tk.FONT_STATUS, foreground=TEXT_MUTED).pack(anchor="w", pady=(0, 2))
@@ -433,7 +446,8 @@ def apply_desktop_slider(key: str, var, lbl, fmt: Callable,  # noqa: ANN001
     """桌面字幕滑块的公共动作：记「动过」+ 刷新值标签 + 防抖落盘。"""
     ctx.desktop_tuned.add(key)
     lbl.configure(text=fmt(float(var.get())))
-    schedule_desktop_save(ctx, desktop_out_fn=desktop_out_fn)
+    if ctx.schedule_desktop_save_fn:
+        ctx.schedule_desktop_save_fn()
 
 
 def on_desktop_font(ctx: DesktopCtx) -> None:
@@ -458,120 +472,15 @@ def on_desktop_height(ctx: DesktopCtx) -> None:
 
 def on_desktop_alpha(ctx: DesktopCtx, *,
                      desktop_out: Any = None) -> None:
-    """透明度滑块：先改窗口（立刻见效），停手 300ms 再落盘。"""
+    """透明度滑块：先改窗口（立刻见效），停手 300ms 再落盘（落盘实现在 gui_engine）。"""
     ctx.desktop_alpha_touched = True
     a = float(ctx.desktop_alpha_var.get())
     lbl = ctx.desktop_alpha_lbl
     if lbl is not None:
         lbl.configure(text=f"{a:.2f}")
-    if desktop_out is not None:
-        desktop_out.set_alpha(a)
-    schedule_desktop_save(ctx)
-
-
-# ================================================================ 桌面字幕配置保存
-
-def schedule_desktop_save(ctx: DesktopCtx, root: tk.Misc | None = None, *,
-                          desktop_out_fn: Callable[[], Any] | None = None) -> None:
-    """防抖落盘：300ms 内不再触发。"""
-    if ctx.desktop_save_job is not None and root is not None:
-        try:
-            root.after_cancel(ctx.desktop_save_job)
-        except Exception:
-            pass
-    if root is not None:
-        ctx.desktop_save_job = root.after(
-            300, lambda: save_desktop_cfg(
-                ctx, desktop_out=desktop_out_fn() if desktop_out_fn else None))
-
-
-def save_desktop_cfg(ctx: DesktopCtx, cfg: Any = None, *,
-                     desktop_out: Any = None) -> None:
-    """把桌面字幕的参数写回 config.yaml 的 `desktop_overlay:` 段。
-
-    只写用户**真动过**的滑块值 + 拖动折算出的锚点/偏移。
-    """
-    ctx.desktop_save_job = None
-    p = _cfg_mod.DEFAULT_CONFIG
-    if not p.exists():
-        return
-    try:
-        text = p.read_text(encoding="utf-8")
-        updates: list[tuple[list[str], str]] = []
-        mem: dict[str, Any] = {}
-        tuned = ctx.desktop_tuned
-        if ctx.desktop_alpha_touched:
-            a = float(ctx.desktop_alpha_var.get())
-            updates.append((["desktop_overlay", "alpha"], _fmt_scalar(a)))
-            mem["alpha"] = a
-        if "font_size" in tuned:
-            v = int(float(ctx.desktop_font_var.get()))
-            updates.append((["desktop_overlay", "font_size"], str(v)))
-            mem["font_size"] = v
-        if "source_font_size" in tuned:
-            v = int(float(ctx.desktop_srcfont_var.get()))
-            updates.append((["desktop_overlay", "source_font_size"], str(v)))
-            mem["source_font_size"] = v
-        if tuned & {"panel_width", "panel_height"}:
-            w = int(float(ctx.desktop_w_var.get()))
-            h = int(float(ctx.desktop_h_var.get()))
-            updates.append((["desktop_overlay", "size_px"], f"[{w}, {h}]"))
-            mem["size_px"] = [w, h]
-        if desktop_out is not None:
-            for key, val in (desktop_out.snap_to_config() or {}).items():
-                if key in ("offset", "pos"):
-                    updates.append((["desktop_overlay", key],
-                                    f"[{val[0]}, {val[1]}]"))
-                else:
-                    updates.append((["desktop_overlay", key], str(val)))
-        if not updates:
-            return
-        for key_path, value in updates:
-            text = _yaml_set_or_create(text, key_path, value)
-        _write_config_text(p, text)
-        # 同步内存快照
-        if mem and cfg is not None:
-            if not isinstance(cfg.desktop_overlay, dict):
-                cfg.desktop_overlay = {}
-            cfg.desktop_overlay.update(mem)
-        print("[gui] 桌面字幕参数已写入 config.yaml："
-              + " ".join(f"{'/'.join(k)}={v}" for k, v in updates), flush=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[gui] 保存桌面字幕参数失败：{exc}", flush=True)
-
-
-# ================================================================ 拖动解锁
-
-def toggle_desktop_drag(ctx: DesktopCtx, *,
-                        desktop_out: Any = None,
-                        set_status: Callable | None = None) -> None:
-    """解锁/锁定拖动。
-
-    字幕窗默认鼠标穿透，穿透开着时窗口收不到鼠标事件，
-    所以要拖必须先解锁；锁定 = 把落点折算成锚点+偏移写回配置并恢复穿透。
-    """
-    _status = set_status or ctx.set_status_fn
-    if desktop_out is None:
-        ctx.desktop_dragging = False
-        if _status:
-            _status("warn", t("桌面字幕还没开启，先勾上「桌面字幕」再解锁拖动"))
-        return
-    ctx.desktop_dragging = not ctx.desktop_dragging
-    try:
-        desktop_out.set_draggable(ctx.desktop_dragging)
-    except Exception as exc:  # noqa: BLE001
-        ctx.desktop_dragging = False
-        print(f"[gui] 切换桌面字幕拖动失败：{type(exc).__name__}: {exc}",
-              flush=True)
-        return
-    btn = ctx.desktop_drag_btn
-    if btn is not None:
-        btn.configure(
-            text=t("锁定位置") if ctx.desktop_dragging else t("解锁拖动"))
-    if ctx.desktop_dragging:
-        if _status:
-            _status("info", t("桌面字幕已解锁：拖动字幕窗到想要的位置，放好后点「锁定位置」"))
-    else:
-        save_desktop_cfg(ctx, desktop_out=desktop_out)
-        if _status:
-            _status("info", t("桌面字幕位置已记住"))
+    out = desktop_out if desktop_out is not None else (
+        ctx.desktop_out_fn() if ctx.desktop_out_fn else None)
+    if out is not None:
+        out.set_alpha(a)
+    if ctx.schedule_desktop_save_fn:
+        ctx.schedule_desktop_save_fn()# ================================================================ 拖动解锁

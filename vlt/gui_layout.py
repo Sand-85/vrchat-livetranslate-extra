@@ -32,12 +32,60 @@ def apply_ui_font(root) -> None:
         setattr(_g, attr, getattr(ui_tk, attr))
 
 
+def _enable_windows_dpi_awareness() -> None:
+    """Windows 上声明 Per-Monitor DPI 感知（必须在创建 Tk root **之前**调用）。
+
+    不声明的话 Tk 被系统做位图拉伸渲染：高缩放屏（如 150%）上整个窗文字发虚。
+    只影响渲染清晰度，不影响音频/网络路径。失败静默（老系统没有 shcore 就退
+    回 user32，再不行就保持原样）。
+    """
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        # Per-Monitor v2（Win 10 1703+）
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:  # noqa: BLE001 — 老系统没有 shcore
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:  # noqa: BLE001 — 两个都失败就保持系统默认，界面照常起
+            pass
+
+
+def _windows_dpi_scale(gui) -> float:
+    """取 Tk 自己算出的 DPI 缩放（1.0 = 100%）。非 Windows 恒返回 1.0。
+
+    声明 DPI 感知后 Tk 会把 `tk scaling` 按真实屏幕 DPI 重算（点→像素换算），
+    字号因此自动变大变清晰；但窗口/弹窗的几何尺寸是**像素**，不按同比例放大就会
+    显得整窗变小、文案挤在一起。这里按同一比例放大基准尺寸，两者口径才一致。
+
+    ⚠️ 只在 Windows 生效：Linux 上 Tk scaling 反映的是 Xft.dpi（HiDPI 下也可能
+    >1.333），跟着缩放就等于**改变了 Linux 既有的窗口几何口径** —— 那不是本改动的
+    目的，也会让两岸行为分叉。非 Windows 一律返回 1.0，几何逐字保持原样。
+    """
+    if not IS_WINDOWS:
+        return 1.0
+    try:
+        s = float(gui._root.tk.call("tk", "scaling")) / (96.0 / 72.0)
+    except Exception:  # noqa: BLE001
+        return 1.0
+    return max(1.0, min(3.0, s))
+
+
 def build_ui(gui) -> None:
     """构建完整界面。"""
+    _enable_windows_dpi_awareness()
     gui._root = tk.Tk()
     gui._root.title(t("VRChat 实时同传"))
-    gui._root.geometry("940x600")
-    gui._root.minsize(928, 460)
+    gui._dpi_scale = _windows_dpi_scale(gui)
+    if gui._dpi_scale > 1.0:
+        gui._root.geometry(f"{int(940 * gui._dpi_scale)}x{int(600 * gui._dpi_scale)}")
+    else:
+        gui._root.geometry("940x600")
+    gui._root.minsize(int(928 * gui._dpi_scale), int(460 * gui._dpi_scale))
     gui._root.configure(bg=PANEL)
     apply_ui_font(gui._root)
     set_window_icon(gui)
@@ -73,19 +121,21 @@ def build_ui(gui) -> None:
 def fit_window_width(gui) -> None:
     """按当前界面语言定窗口宽度。"""
     from . import i18n as _i18n_mod
+    s = max(1.0, float(getattr(gui, "_dpi_scale", 1.0)))
+    base_w = int(940 * s)
     try:
         gui._root.update_idletasks()
         need = gui._root.winfo_reqwidth() + 8
-        want = max(940, need)
+        want = max(base_w, need)
         screen = int(gui._root.winfo_screenwidth() or 0)
         if screen:
-            want = min(want, max(760, screen - 16))
-        height = max(600, gui._root.winfo_reqheight())
+            want = min(want, max(int(760 * s), screen - 16))
+        height = max(int(600 * s), gui._root.winfo_reqheight())
         gui._root.geometry(f"{want}x{height}")
-        gui._root.minsize(min(want, need), 460)
-        if want > 940:
+        gui._root.minsize(min(want, need), int(460 * s))
+        if want > base_w:
             print(f"[ui] 界面语言 {_i18n_mod.current_language()}：文案较宽，"
-                  f"窗口按需求开到 {want}px（基准 940 / 需求 {need}）", flush=True)
+                  f"窗口按需求开到 {want}px（基准 {base_w} / 需求 {need}）", flush=True)
         if need > want:
             print(f"[ui] ⚠️ 屏幕只有 {screen}px，内容需要 {need}px 装不下，"
                   f"窗口开到 {want}px", flush=True)
@@ -179,7 +229,7 @@ def build_controls(gui) -> None:
     gui._sponsor_btn = ttk.Button(ctrl, text=t("☕ 赞助"),
                                    command=gui._open_sponsor)
     gui._sponsor_btn.pack(side=tk.RIGHT, padx=(0, 8))
-    gui._start_btn = ttk.Button(ctrl, text=t("开始翻译"), style="Accent.TButton",
+    gui._start_btn = ttk.Button(ctrl, text=t("开始翻译"), style="Primary.TButton",
                                  command=gui._start)
     gui._start_btn.pack(side=tk.LEFT, padx=(0, 8))
     gui._stop_btn = ttk.Button(ctrl, text=t("停止翻译"), command=gui._stop,

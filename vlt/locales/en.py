@@ -36,6 +36,9 @@ STRINGS: dict[str, str] = {
     "气泡改为显示译文": "Bubble now shows the translation",
     "气泡改为显示原文": "Bubble now shows the source text",
     "就绪": "Ready",
+    # ---- 空聊天区占位提示 ----
+    "译文会显示在这里": "Translations will appear here",
+    "点「开始翻译」后开始说话": "Hit Start, then just talk",
     "状态：{msg}": "Status: {msg}",
 
     # ---- 房间文本中继 ----

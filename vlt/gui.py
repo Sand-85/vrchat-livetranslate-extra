@@ -289,6 +289,7 @@ class TranslationGUI(VoicelabMixin):
             "level_hold": self._gate_level_hold, "hold_ms": self._gate_hold_ms,
             "preroll_ms": self._gate_preroll_ms, "engines": []}
         self._desktop_ctx = DesktopCtx(); self._chat_ctx = ChatCtx(); self._engine_ctx = EngineCtx()
+        self._wire_desktop_ctx()
         # 本账号的自定义音色（设计族 + 复刻族）：后台拉一次，用于**打字译音下拉**与显示名
         self._tts_custom: list = []
         self._cfg = load_config(require_key=False)
@@ -556,12 +557,30 @@ class TranslationGUI(VoicelabMixin):
         self._sync_engine_ctx(); gui_engine.stop_desktop(self._engine_ctx); self._desktop_out = self._engine_ctx.desktop_out; self._desktop_dragging = False; self._unsync_engine_ctx()
     def _push_desktop(self, force=False): self._engine_ctx.desktop_out = self._desktop_out; self._engine_ctx.bubbles = self._bubbles; gui_engine.push_desktop(self._engine_ctx, force=force)
     def _on_desktop_alpha(self, _v=""):
-        self._desktop_alpha_touched = True; a = float(self._desktop_alpha_var.get())
-        lbl = getattr(self, "_desktop_alpha_lbl", None)
-        if lbl is not None: lbl.configure(text=f"{a:.2f}")
-        if self._desktop_out is not None: self._desktop_out.set_alpha(a); self._schedule_desktop_save()
+        # 透明度：立刻贴到活窗口 + 防抖落盘。实现只有 gui_desktop 一份（它读 DesktopCtx），
+        # 落盘再回调到 _schedule_desktop_save；改完后把「动过」标志镜像回本类（供同步/测试读）。
+        gui_desktop.on_desktop_alpha(self._desktop_ctx)
+        self._desktop_alpha_touched = self._desktop_ctx.desktop_alpha_touched
+    def _wire_desktop_ctx(self) -> None:
+        """把设置页的「落盘 / 拖动」回调接到本类的薄壳上。
+
+        ⚠️ 桌面字幕的**唯一**保存在 gui_engine（root / 活实例 / 引擎 ctx 同步都在那边）。
+        设置页的滑块只认自己那份 DesktopCtx，持久化必须回调进来 —— 早先 gui_desktop 里
+        另留了一整套同名实现且 `root` 没接上，于是滑块改了既不落盘也不热重载（回归）。
+        """
+        c = self._desktop_ctx
+        c.schedule_overlay_save_fn = self._schedule_overlay_save
+        c.schedule_desktop_save_fn = self._schedule_desktop_save
+        c.toggle_desktop_drag_fn = self._toggle_desktop_drag
+        c.desktop_out_fn = lambda: self._desktop_out
+
     def _schedule_desktop_save(self):
-        self._engine_ctx.desktop_out = self._desktop_out; self._engine_ctx.desktop_save_job = self._desktop_save_job; self._engine_ctx.root = self._root
+        # 设置页的滑块状态记在 DesktopCtx 上，这里先汇入本类属性再同步给引擎 ctx
+        # （gui_engine.save_desktop_cfg 读的是引擎 ctx，二者必须同源）。
+        self._desktop_tuned = self._desktop_ctx.desktop_tuned
+        self._desktop_alpha_touched = self._desktop_ctx.desktop_alpha_touched
+        self._sync_engine_ctx()
+        self._engine_ctx.desktop_out = self._desktop_out
         gui_engine.schedule_desktop_save(self._engine_ctx); self._desktop_save_job = self._engine_ctx.desktop_save_job
     def _save_desktop_cfg(self):
         self._sync_engine_ctx(); gui_engine.save_desktop_cfg(self._engine_ctx, config_path=DEFAULT_CONFIG); self._desktop_save_job = self._engine_ctx.desktop_save_job

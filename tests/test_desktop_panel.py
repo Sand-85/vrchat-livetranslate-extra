@@ -44,6 +44,7 @@ WRIST_SIZE = [1024, 440]   # overlay.size_px
 # 用户拖动后的值
 NEW_FONT, NEW_SRC_FONT = 62, 34
 NEW_W, NEW_H = 1280, 420
+NEW_WRIST_FONT = 58        # 手腕屏段拖动后的字号
 
 
 def _make_gui_sandbox() -> None:
@@ -314,9 +315,86 @@ def test_wrist_page_falls_back_to_fewer_columns_when_narrow() -> None:
     print("  内容区变窄时手腕屏页自动降列（420px → 1 列，不越界）OK")
 
 
+def test_settings_sliders_really_schedule_save() -> None:
+    """★ 回归 6083052：设置页的滑块必须真的把「落盘」排上 —— 只改内存/只改标签不算。
+
+    症状（用户实测）：拖手腕屏或桌面字幕的滑块，config.yaml 一个字节都不变 →
+    后端没得热重载，看着就是「设置不生效」。根因：拆分时 gui_desktop 里另留了一份
+    schedule_*_save，Tk root 从没传进去（`if root is not None` 直接空转）→ 全是死路。
+
+    ⚠️ 本用例**不绕过防抖**（同文件 test_desktop_sliders_save_own_keys_only_when_touched
+    是直接调 _save_*_cfg()，所以抓不到这个）：调真实滑块处理器，再推 Tk 事件循环让
+    after(300) 到期，最后验配置文件真的变了。
+    """
+    import time as _time
+
+    import vlt.config as _cfg_mod
+    import vlt.gui as _gui_mod
+    import vlt.i18n as _i18n
+    from vlt import gui_desktop
+
+    _make_gui_sandbox()
+    before = GUI_SANDBOX.read_text(encoding="utf-8")
+    saved = (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG, _i18n.detect_system_language)
+    _cfg_mod.DEFAULT_CONFIG = GUI_SANDBOX
+    _gui_mod.DEFAULT_CONFIG = GUI_SANDBOX
+    _i18n.detect_system_language = lambda: "zh"
+
+    from vlt.gui import TranslationGUI
+
+    def _pump(root, seconds: float) -> None:      # noqa: ANN001
+        end = _time.monotonic() + seconds
+        while _time.monotonic() < end:
+            root.update()
+            _time.sleep(0.01)
+
+    gui = None
+    try:
+        gui = TranslationGUI()
+        gui._root.withdraw()          # 本仓库测试口径：不弹可见窗口
+        if gui._update_check_job is not None:
+            gui._root.after_cancel(gui._update_check_job)
+            gui._update_check_job = None
+        gui._root.update()
+
+        ctx = gui._desktop_ctx
+        assert ctx.schedule_desktop_save_fn is not None and ctx.schedule_overlay_save_fn is not None, \
+            "设置页没拿到落盘回调 → 滑块永远不落盘（本 bug 的直接判据）"
+
+        # ① 桌面字幕：动一次字号 → 等 after(300) 到期 → 配置必须变
+        gui._desktop_font_var.set(NEW_FONT)
+        gui._on_desktop_font()
+        _pump(gui._root, 0.6)
+        assert int(_read()["desktop_overlay"]["font_size"]) == NEW_FONT, \
+            f"桌面字幕滑块没落盘：{_read()['desktop_overlay'].get('font_size')}"
+        assert _read()["overlay"]["font_size"] == WRIST_FONT, "桌面滑块串改了手腕屏段"
+
+        # ② 手腕屏：动一次字号（走设置页真实用的那个 handler）→ 同样必须落盘
+        ctx.tune_values["font_size"] = float(NEW_WRIST_FONT)
+        ctx.tune_vars["font_size"].set(NEW_WRIST_FONT)
+        gui_desktop.make_tune_handler(
+            "font_size", ctx.tune_vars["font_size"], ctx.tune_lbls["font_size"], "",
+            ctx)(str(NEW_WRIST_FONT))
+        _pump(gui._root, 0.6)
+        assert int(_read()["overlay"]["font_size"]) == NEW_WRIST_FONT, \
+            f"手腕屏滑块没落盘：{_read()['overlay'].get('font_size')}"
+        assert int(_read()["desktop_overlay"]["font_size"]) == NEW_FONT, "手腕屏滑块串改了桌面段"
+    finally:
+        GUI_SANDBOX.write_text(before, encoding="utf-8")
+        if gui is not None:
+            try:
+                gui._root.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+        (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG,
+         _i18n.detect_system_language) = saved
+    print("  设置页滑块走真实防抖链路：桌面 + 手腕屏都真的写进了 config.yaml OK")
+
+
 if __name__ == "__main__":
     print("test_desktop_panel:")
     test_adjust_panels_live_in_settings_pages()
     test_wrist_page_falls_back_to_fewer_columns_when_narrow()
     test_desktop_sliders_save_own_keys_only_when_touched()
+    test_settings_sliders_really_schedule_save()
     print("ALL PASSED")

@@ -72,6 +72,7 @@ class ChatCtx:
     auto_scroll: bool = True
     canvas_w: int = 1
     relayout_job: Any = None              # root.after 句柄
+    placeholder_drawn: bool = False       # 空聊天区占位提示是否已画（避免重复画）
 
     # ── 轮询队列 ──
     q: Any = None                         # queue.Queue
@@ -142,9 +143,57 @@ def build_chat(parent, ctx: ChatCtx, on_mousewheel_fn) -> Any:
     ctx.vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(8, 0))
 
     ctx.canvas.bind("<Configure>",
-                    lambda e: on_canvas_configure(ctx, parent.winfo_toplevel(), e))
+                    lambda e: _on_canvas_configure(ctx, parent.winfo_toplevel(), e))
     ctx.canvas.bind("<MouseWheel>", on_mousewheel_fn)
+    _draw_placeholder(ctx)
     return chat_frame
+
+
+def _on_canvas_configure(ctx: ChatCtx, root: tk.Misc, event=None) -> None:
+    """Configure 回调：先让占位提示跟上尺寸，再走原有的重排逻辑。
+
+    ⚠️ 占位提示**只能**在这里补画：窗口首次布局时 canvas 尺寸才从 1 变成真值。
+    绝不能用 `after_idle` 自旋等待尺寸 —— 窗口没被映射时它会无限重排（测试里
+    就是这种场景），把事件循环占死。
+    """
+    if not ctx.bubbles and not ctx.placeholder_drawn:
+        _draw_placeholder(ctx)
+    on_canvas_configure(ctx, root, event)
+
+
+def _draw_placeholder(ctx: ChatCtx) -> None:
+    """空聊天区的居中占位提示：第一条消息到来时自动消失。
+
+    纯 Canvas 图元（tag="placeholder"），零轮询、零定时器 —— 消失时机靠
+    add_text 里的 _clear_placeholder 主动删除。
+    """
+    cv = ctx.canvas
+    if cv is None or ctx.placeholder_drawn:
+        return
+    try:
+        w, h = cv.winfo_width(), cv.winfo_height()
+        if w <= 1 or h <= 1:
+            return                     # 尺寸还没算出来：等下一次 Configure
+        # 字体常量按仓库口径**运行时取** ui_tk.FONT_*，不在 import 期捕获快照（issue #61）
+        cv.create_text(w // 2, h // 2 - 10, text=t("译文会显示在这里"),
+                       tag="placeholder", font=ui_tk.FONT, fill=TEXT_MUTED,
+                       justify=tk.CENTER)
+        cv.create_text(w // 2, h // 2 + 18, text=t("点「开始翻译」后开始说话"),
+                       tag="placeholder", font=ui_tk.FONT_SMALL, fill=TEXT_MUTED,
+                       justify=tk.CENTER)
+        ctx.placeholder_drawn = True
+    except Exception:  # noqa: BLE001 — 占位符画不出来绝不影响聊天区
+        pass
+
+
+def _clear_placeholder(ctx: ChatCtx) -> None:
+    """删掉占位提示（幂等：删过一次后再删无副作用）。"""
+    ctx.placeholder_drawn = False
+    try:
+        if ctx.canvas is not None:
+            ctx.canvas.delete("placeholder")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def build_input_row(parent, ctx: ChatCtx, cfg,
@@ -311,6 +360,7 @@ def add_text(ctx: ChatCtx, source: str, text: str, is_final: bool,
     b.y = (ctx.bubbles[-1].y + ctx.bubbles[-1].h + 8) if ctx.bubbles else 8
     ctx.bubbles.append(b)
     if ctx.canvas is not None:
+        _clear_placeholder(ctx)
         draw_bubble(ctx, b)
         trim(ctx)
         update_scrollregion(ctx)
@@ -433,6 +483,9 @@ def redraw_all(ctx: ChatCtx) -> None:
     if ctx.canvas is None:
         return
     ctx.canvas.delete("all")
+    ctx.placeholder_drawn = False          # delete("all") 连占位提示一起删了
+    if not ctx.bubbles:
+        _draw_placeholder(ctx)             # 空聊天区：按新尺寸重新居中
     y = 8
     for b in ctx.bubbles:
         b.y = y

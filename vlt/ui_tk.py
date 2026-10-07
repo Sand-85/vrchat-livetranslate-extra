@@ -235,6 +235,17 @@ def apply_theme(root) -> None:
                   background=[("pressed", ACCENT_ACTIVE), ("active", ACCENT_HOVER),
                               ("disabled", "#22374f")],
                   foreground=[("disabled", "#6b87ab")])
+        # 主操作按钮（主窗「开始翻译」）：在 Accent 之上再重一档 —— 加粗 + 更大内边距。
+        # 同一行里「开始翻译」是当前唯一该被点的按钮、「停止翻译」是普通灰按钮，
+        # 两者尺寸一致时主次分不出来（用户反馈层级不够）。只在主窗用，弹窗继续用
+        # Accent.TButton，免得每个确认框的主按钮都变粗体大字。
+        style.configure("Primary.TButton", background=ACCENT, foreground="#ffffff",
+                        font=FONT_BOLD_MD, borderwidth=0, focusthickness=0,
+                        focuscolor=ACCENT, padding=(20, 9))
+        style.map("Primary.TButton",
+                  background=[("pressed", ACCENT_ACTIVE), ("active", ACCENT_HOVER),
+                              ("disabled", "#22374f")],
+                  foreground=[("disabled", "#6b87ab")])
         # 反向动作按钮（房间的「断开连接」）：与「连接房间」同形状、**不同颜色** ——
         # 同一个位置在不同连接态下写着相反的动作，只靠文字区分容易点错，
         # 颜色是比文字快得多的提示（用户明确要求「断开用个别的颜色」）。
