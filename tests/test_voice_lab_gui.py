@@ -318,6 +318,11 @@ def _gui():
                         encoding="utf-8")
     old = (cfg_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG, gui_mod.APP_DIR,
            gui_mod._play_pcm_local, vl_mod.APP_DIR, vl_mod._play_pcm_local)
+    # 启动钩子 `gui_layout` 会用假 root 的 after 立刻跑一次「查范本样本更新」→ 在无网络的 CI 上
+    # 它会往临时 APP_DIR 里写东西，与本用例「范本没样本」的断言抢跑（2026-10-07 CI 假红）。
+    # 这里确定性地停掉它；专门测它的用例（test_preset_fetch_on_demand）自己会再打桩一次。
+    _real_upd = vl.check_sample_updates
+    vl.check_sample_updates = lambda *a, **k: False        # type: ignore[assignment]
     cfg_mod.DEFAULT_CONFIG = cfg_path
     gui_mod.DEFAULT_CONFIG = cfg_path
     gui_mod.APP_DIR = tmp / "app"
@@ -341,6 +346,7 @@ def _gui():
                 pass
         cfg_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG, gui_mod.APP_DIR, \
             gui_mod._play_pcm_local, vl_mod.APP_DIR, vl_mod._play_pcm_local = old
+        vl.check_sample_updates = _real_upd                  # type: ignore[assignment]
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
