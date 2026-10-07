@@ -387,14 +387,17 @@ class TranslationGUI:
     def _preview_busy(self, value) -> None: self._voice_ctx.preview_busy = value
     def _preview_voice(self, kind) -> None:
         gui_voice.preview_voice(self._voice_ctx, self._cfg, kind, q=self._q, set_status=self._set_status,
-            provider_fn=self._provider, resolve_api_key=self._resolve_api_key_safe, play_fn=_play_pcm_local)
+            provider_fn=self._provider, resolve_api_key=self._resolve_api_key_safe, play_fn=_play_pcm_local,
+            gui=self)
     def _preview_worker(self, kind, voice, api_key, **kw) -> None: gui_voice.preview_worker(self._q, kind, voice, api_key, play_fn=_play_pcm_local, **kw)
     def _on_preview_speech_voice(self) -> None:
         gui_voice.on_preview_speech_voice(self._voice_ctx, self._cfg, q=self._q, set_status=self._set_status,
-            provider_fn=self._provider, resolve_api_key=self._resolve_api_key_safe, play_fn=_play_pcm_local)
+            provider_fn=self._provider, resolve_api_key=self._resolve_api_key_safe, play_fn=_play_pcm_local,
+            gui=self)
     def _on_preview_tts_voice(self) -> None:
         gui_voice.on_preview_tts_voice(self._voice_ctx, self._cfg, q=self._q, set_status=self._set_status,
-            provider_fn=self._provider, resolve_api_key=self._resolve_api_key_safe, play_fn=_play_pcm_local)
+            provider_fn=self._provider, resolve_api_key=self._resolve_api_key_safe, play_fn=_play_pcm_local,
+            gui=self)
     def _apply_theme(self) -> None: apply_theme(self._root)
     # ── 房间 ──
     def _build_room_row(self) -> None:
@@ -465,7 +468,11 @@ class TranslationGUI:
         ctx = self._chat_ctx; gui_chat.build_chat(self._root, ctx, self._on_mousewheel)
         self._canvas = ctx.canvas; self._vsb = ctx.vsb
     def _build_input_row(self):
-        ctx = self._chat_ctx; gui_chat.build_input_row(self._root, ctx, self._cfg, self._attach_edit_menu)
+        ctx = self._chat_ctx; gui_chat.build_input_row(
+            self._root, ctx, self._cfg, self._attach_edit_menu,
+            # ⚠️ 必须传我们自己的包装：默认兜底调用 `send_typed(ctx)` / `on_text_enter(ctx)`，
+            #    缺 engines / engine_dirs / set_status → 点「发送」或回车必 TypeError。
+            send_fn=self._send_typed, enter_fn=self._on_text_enter)
         self._text_var = ctx.text_var; self._text_entry = ctx.text_entry; self._send_btn = ctx.send_btn
     def _set_text_input_enabled(self, on): gui_chat.set_text_input_enabled(self._chat_ctx, on)
     def _on_text_enter(self, _event=None): return gui_chat.on_text_enter(self._chat_ctx, self._engines, self._engine_dirs, self._set_status)
@@ -1153,9 +1160,9 @@ class TranslationGUI:
             tts_cfg = self._cfg.text_input.setdefault("tts", {})
             tts_cfg["model"] = _lab_model_of(info)
             tts_cfg["voice"] = info.voice
-        # 下拉里跟上（`voice_choices` 会把不在表里的当前值排到最前）
+        # 下拉里跟上（`voice_choices` 会把不在表里的当前值排到最前）；回显**下拉里那一项**的人话名字
         try:
-            self._tts_voice_var.set(display_name(info.voice, t))
+            self._tts_voice_var.set(self._tts_voice_display(info.voice))
             self._tts_voice_combo.configure(values=self._tts_voice_choices())
         except Exception:  # noqa: BLE001
             pass
@@ -1289,6 +1296,29 @@ class TranslationGUI:
             self._q.put(("voice_lab", "preset_play", False, f"{type(exc).__name__}: {exc}", None))
 
 
+    def _lab_play_async(self, pcm: bytes, *, voice: str = "",
+                        done: str = "", suffix: str = "") -> None:
+        """把试听播放挪到守护线程（`_play_pcm_local` 会**阻塞整段音频**，最长 60s）。
+
+        为什么必须挪：以前这三次试听都在**主线程**里等着播完 —— 用户点一下「试听」，音色页
+        整个界面就卡住不动（与「卡死」是同一个体感）。播完/播挂都走队列回主线程改状态。
+
+        `done` 为空 = **不动状态栏**（例如「生成」那条路，横幅另有结论）；失败一律只留日志。
+        """
+        threading.Thread(target=self._lab_play_worker,
+                         args=(pcm, voice, suffix, done),
+                         daemon=True, name="vlt-voice-lab-play").start()
+
+    def _lab_play_worker(self, pcm, voice, suffix, done) -> None:
+        info = {"voice": voice, "suffix": suffix, "done": done}
+        try:
+            _play_pcm_local(pcm)
+            self._q.put(("voice_lab", "preview_play", True, "", info))
+        except Exception as exc:  # noqa: BLE001
+            self._q.put(("voice_lab", "preview_play", False,
+                         f"{type(exc).__name__}: {exc}", info))
+
+
     def _on_lab_clone(self) -> None:
         """克隆并试听：本地校验 → 费用确认 → 后台复刻 → 刷新列表 → 自动试听。"""
         if self._lab_busy:
@@ -1358,11 +1388,16 @@ class TranslationGUI:
         label = info.name or info.voice[-12:]
         wav = voice_lab.load_preview(APP_DIR, info.voice)
         if wav:
+            # 缓存里**混着两种格式**（create 的 WAV 容器 / sample_pcm 的裸 PCM）→ 按头分派，
+            # 统一成 24k 单声道再播；播放是阻塞的（最长 60s），必须挪出主线程，否则界面卡住。
             try:
-                _play_pcm_local(tts._decode_to_24k_mono(wav))
-                self._lab_set_status(t("试听完成：{v}", v=label) + suffix)
+                pcm = voice_lab.preview_pcm(wav)
             except Exception as exc:  # noqa: BLE001
                 self._lab_set_status(t("试听失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
+                return
+            self._lab_set_status(t("正在试听「{v}」…", v=label))
+            self._lab_play_async(pcm, voice=label,
+                                 done=t("试听完成：{v}", v=label), suffix=suffix)
             return
         if self._lab_busy:
             return
@@ -1493,10 +1528,14 @@ class TranslationGUI:
             self._lab_last[res.voice] = ""
             if res.preview_wav:
                 try:
-                    _play_pcm_local(tts._decode_to_24k_mono(res.preview_wav))
+                    pcm = voice_lab.preview_pcm(res.preview_wav)
                 except Exception as exc:  # noqa: BLE001
-                    print(f"[gui] ⚠️ 预览音频回放失败（已存盘，可点「试听所选」重放）：{exc}",
+                    print(f"[gui] ⚠️ 预览音频解码失败（已存盘，可点「试听所选」重放）：{exc}",
                           flush=True)
+                    pcm = b""
+                if pcm:
+                    # 播放挪出主线程；`done=""` = 不动状态栏（下面的横幅才是这条路的结论）
+                    self._lab_play_async(pcm, voice=res.name or "")
             self._lab_banner = (t("账号里已有同名音色，直接复用：{v}（没有再花钱）", v=res.name)
                                 if res.reused else t("音色已生成：{v}", v=res.name))
             self._lab_set_status(self._lab_banner)
@@ -1524,6 +1563,18 @@ class TranslationGUI:
             print(f"[gui] 本账号自定义音色 {len(self._tts_custom)} 条 → 并入「打字译音」下拉",
                   flush=True)
             self._refresh_tts_voice_combo()
+            return
+
+        if job == "preview_play":
+            info = payload or {}
+            done = str(info.get("done") or "")
+            if ok:
+                if done:
+                    self._lab_set_status(done + str(info.get("suffix") or ""))
+                return
+            print(f"[gui] 试听播放失败：{msg}", flush=True)
+            if done:
+                self._lab_set_status(t("试听失败：{msg}", msg=msg))
             return
 
         if job == "preset_play":
@@ -1600,10 +1651,15 @@ class TranslationGUI:
             suffix = self._lab_audition_suffix
             self._lab_audition_suffix = ""
             try:
-                _play_pcm_local(tts._decode_to_24k_mono(pcm))
-                self._lab_set_status(t("试听完成：{v}（已存本地，下次直接放）", v=label) + suffix)
+                pcm = voice_lab.preview_pcm(pcm)
             except Exception as exc:  # noqa: BLE001
                 self._lab_set_status(t("试听失败：{msg}", msg=f"{type(exc).__name__}: {exc}"))
+                print(f"[gui] 试听合成完成 → {label!r}（{len(payload.get('pcm') or b'')}B，解码失败）",
+                      flush=True)
+                return
+            self._lab_play_async(
+                pcm, voice=label, suffix=suffix,
+                done=t("试听完成：{v}（已存本地，下次直接放）", v=label))
             print(f"[gui] 试听合成完成 → {label!r}（{len(pcm)}B）", flush=True)
 
 
@@ -1686,11 +1742,24 @@ class TranslationGUI:
         local = voice_lab.label_mapper(voice_lab.load_labels(APP_DIR))
         out: list[str] = []
         for vid in ids:
-            short = voice_lab._name_of(vid) or vid          # 未登记时用 id 反推的短名，别甩一串 id
-            label = vid if vid in TTS_VOICES else self._voice_label(vid, short, local)
+            label = self._tts_voice_display(vid, local)
             if label not in out:                       # 同名去重（两个 id 反推出同一个短名时别重复）
                 out.append(label)
         return out
+
+
+    def _tts_voice_display(self, voice: str, local=None) -> str:
+        """「打字译音」下拉/输入框里该显示的**人话名字**（与 `_tts_voice_choices` 同一口径）。
+
+        为什么要单独一处：保存/切换音色后要把下拉回显成**候选里那一项**，否则用户看到的是
+        一长串 id（与下拉里显示的名字对不上，看起来像"没选上"）。配置里存的仍是真 id。
+        """
+        if voice in TTS_VOICES:
+            return voice
+        short = voice_lab._name_of(voice) or voice     # 未登记时用 id 反推的短名，别甩一串 id
+        if local is None:
+            local = voice_lab.label_mapper(voice_lab.load_labels(APP_DIR))
+        return self._voice_label(voice, short, local)
 
 
     def _refresh_tts_voice_combo(self) -> None:

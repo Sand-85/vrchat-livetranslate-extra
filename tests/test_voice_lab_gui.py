@@ -52,6 +52,29 @@ class _Root:
         return None
 
 
+class _CapturingRoot(_Root):
+    """占位 root 2：**记下 after 排的回调**，供用例手动「跑主循环的下一跳」。
+
+    为什么需要它：`poll` 是自排的（`root.after(50, …)`），真实主循环里
+    `gui._poll()` 只被调用一次，之后每一跳都是这个回调。要验「自排那一跳还认不认
+    ("voice_lab", …)」，就必须拿到并执行它 —— 这正是原 bug 躲过测试的地方。
+    """
+
+    def __init__(self) -> None:
+        self.jobs: list = []
+
+    def after(self, _ms, cb) -> str:                      # noqa: ANN001
+        self.jobs.append(cb)
+        return f"job{len(self.jobs)}"
+
+    def run_scheduled(self) -> int:
+        """执行当前已排队的 after 回调（= 让主循环「跳一下」），返回执行个数。"""
+        cbs, self.jobs = list(self.jobs), []
+        for cb in cbs:
+            cb()
+        return len(cbs)
+
+
 class FakeVoiceLab:
     """替身：把 voice_lab 的网络调用换掉，并记下调用参数。"""
 
@@ -87,7 +110,10 @@ class FakeVoiceLab:
 
         def sample_pcm(voice, model="", **kw):                      # noqa: ANN001
             self.sampled.append((voice, model))
-            return _tiny_wav()
+            # ⚠️ 必须与**真数据同形**：`voice_lab.sample_pcm` 走 `tts.synthesize`，回来的是
+            #    **裸 24k 单声道 PCM**（没有 RIFF 头）。以前这里回的是 WAV 容器，正好把
+            #    「试听把裸 PCM 当容器解码 → 一点声音都没有」的真 bug 整个盖住了。
+            return _tiny_raw()
 
         vl.sample_pcm = sample_pcm                                  # type: ignore[assignment]
 
@@ -115,7 +141,7 @@ PLAYED: list[bytes] = []
 
 
 def _tiny_wav() -> bytes:
-    """一段合法的最简 WAV（24k 单声道 10ms 静音）——用来验「能解码并播放」这条路。"""
+    """一段合法的最简 WAV（24k 单声道 10ms 静音）——用来验「容器能解码并播放」这条路。"""
     import io
     import wave
 
@@ -126,6 +152,11 @@ def _tiny_wav() -> bytes:
         w.setframerate(24000)
         w.writeframes(b"\x00\x00" * 240)
     return buf.getvalue()
+
+
+def _tiny_raw() -> bytes:
+    """**裸 24k 单声道 s16le PCM**（10ms 静音，无 RIFF 头）—— 与真 `sample_pcm` 的返回同形。"""
+    return b"\x00\x00" * 240
 
 
 # ---- 假控件（headless 下 `_build_settings_voice` 不会跑，所以这里注入替身）----
@@ -313,16 +344,28 @@ def _gui():
                 os.environ[k] = v
 
 
-def _drain(gui, timeout: float = 5.0) -> list[tuple]:   # timeout 可调：等待那个守护线程
-    """等守护线程把结果塞进队列（无头下不跑 Tk 循环，所以自己收）。"""
+def _drain(gui, timeout: float = 5.0, quiet: float = 0.35, only=None) -> list[tuple]:   # timeout 可调：等待那个守护线程
+    """收队列并**就地派发** `voice_lab` 消息（`only` 给定时只派发这些 job），
+    直到连续 `quiet` 秒没有新消息；返回收到的原始消息（供断言）。
+
+    为什么必须"就地派发 + 等到安静"：
+      · 试听播放已挪到后台线程，**播放回报是处理上一条消息时才被触发的**（处理
+        `audition` 结果才会起播放线程）→ 先收完再统一派发，这条回报会漏给下一个 `_drain`；
+      · 以前"收到一条后 0.1s 就返回"也一样会漏，表现为下一步的状态栏被上一步的结论覆盖
+        （本文件踩过：范本用例里上一步的「试听完成」盖掉了「没找到」）。
+    """
     out: list[tuple] = []
     deadline = time.time() + timeout
-    while time.time() < deadline:
+    last = time.time()
+    while time.time() < deadline and (time.time() - last) < quiet:
         try:
-            out.append(gui._q.get(timeout=0.1))
+            m = gui._q.get(timeout=0.05)
         except Exception:                                            # noqa: BLE001
-            if out:
-                break
+            continue
+        last = time.time()
+        out.append(m)
+        if m[0] == "voice_lab" and (only is None or m[1] in only):
+            gui._on_lab_done(m[1], m[2], m[3], m[4])
     return out
 
 
@@ -350,7 +393,7 @@ def test_generate_then_save() -> bool:
             gui._lab_name_var.set("My Voice")            # 故意带空格 → 应被规范化成 My_Voice
             gui._lab_prompt_text.insert("1.0", "年轻女性，音色干净偏薄，语速平稳略慢")
             gui._on_lab_generate()
-            msgs = _drain(gui)
+            msgs = _drain(gui, only=())
             kinds = [m for m in msgs if m[0] == "voice_lab"]
             created_ok = fake.created and fake.created[0][0] == "My_Voice"
             print(f"  生成：worker 入队 {len(kinds)} 条，规范化后的名字={fake.created[0][0] if fake.created else '无'}  "
@@ -359,10 +402,7 @@ def test_generate_then_save() -> bool:
             for m in kinds:
                 gui._on_lab_done(m[1], m[2], m[3], m[4])
             # 生成后自动刷新列表 → 列表里应有那条
-            msgs2 = _drain(gui)
-            for m in msgs2:
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             listed = gui._lab_list.size()
             print(f"  列表条数={listed}（应有 1 条）  {'OK' if listed == 1 else '✗'}")
             ok &= listed == 1
@@ -376,12 +416,16 @@ def test_generate_then_save() -> bool:
             print(f"  保存后 config：model={cfg.get('model')} voice 尾={str(cfg.get('voice'))[-5:]}  "
                   f"{'OK' if cond else '✗'}")
             ok &= cond
-            # 下拉里现在显示**人话**（未登记的用 id 反推的短名），配置里仍是真 id —— 这正是本次要的行为
-            cond = (gui._tts_voice_var.get().startswith("qwen-tts-vd-clear_auto")
+            # 回显成**下拉里那一项**的人话短名（配置里仍是真 id）；短名必须能还原回真 id ——
+            # 「输入框甩一长串 id」正是本次要修的（此前 `display_name` 对未登记音色直接回 id）。
+            written = str(cfg.get("voice"))
+            cond = (gui._tts_voice_var.get() == "clear_auto"
+                    and gui._tts_voice_id_from_input("clear_auto") == written
                     and bool(gui._tts_voice_combo.values)
                     and gui._tts_voice_combo.values[0] == "clear_auto")
-            print(f"  打字译音下拉已跟上：{gui._tts_voice_var.get()[-12:]}"
-                  f"（候选首位={None if not gui._tts_voice_combo.values else gui._tts_voice_combo.values[0][-12:]}）"
+            print(f"  打字译音回显：{gui._tts_voice_var.get()!r}"
+                  f"（候选首位={None if not gui._tts_voice_combo.values else gui._tts_voice_combo.values[0]!r}，"
+                  f"短名→真 id 还原 {'OK' if gui._tts_voice_id_from_input('clear_auto') == written else '✗'}）"
                   f"  {'OK' if cond else '✗'}")
             ok &= cond
         finally:
@@ -399,9 +443,7 @@ def test_reuse_message_and_no_extra_cost() -> bool:
             gui._lab_name_var.set("clear_auto")
             gui._lab_prompt_text.insert("1.0", "随便写点描述")
             gui._on_lab_generate()
-            for m in _drain(gui):
-                if m[0] == "voice_lab" and m[1] == "create":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui, only=("create",))
             text = _status(gui)
             cond = "没有再花钱" in text
             print(f"  复用文案：{text[:34]}…  {'OK' if cond else '✗'}")
@@ -450,28 +492,29 @@ def test_preview_uses_local_cache() -> bool:
         fake.install()
         try:
             gui._on_lab_refresh()
-            for m in _drain(gui):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             gui._lab_list.selection_clear(0, "end")
             gui._lab_list.selection_set(0)
             gui._on_lab_select()
             PLAYED.clear()
             # ① 没缓存 → 合成一句（对应用户「预设的那几条音色」：它们没有创建时的预览音频）
             gui._on_lab_preview()
-            for m in _drain(gui):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             voice = fake._voices[0].voice
+            # 播放的是**裸 PCM 原样**（不是解码失败后的空字节）——这是「试听没声音」的回归锁
             cond = (len(fake.sampled) == 1 and fake.sampled[0][0] == voice
-                    and bool(PLAYED) and bool(vl.load_preview(gui_mod.APP_DIR, voice)))
+                    and PLAYED == [_tiny_raw()]
+                    and bool(vl.load_preview(gui_mod.APP_DIR, voice)))
             print(f"  无缓存 → 合成 {len(fake.sampled)} 次（音色 {fake.sampled[0][0][-12:] if fake.sampled else '—'}）"
-                  f"、播放 {len(PLAYED)} 次、已落盘  {'OK' if cond else '✗'}")
+                  f"、播放 {len(PLAYED)} 次（裸 PCM 原样 {PLAYED[0][:4] if PLAYED else b''!r}）"
+                  f"、已落盘  {'OK' if cond else '✗'}")
             ok &= cond
-            # ② 有缓存 → 直接回放，**不再调合成**（这是省钱的那条不变量）
+            # ② 有缓存 → 直接回放，**不再调合成**（这是省钱的那条不变量）；播放已挪到后台线程 → 等队列
             PLAYED.clear()
             gui._on_lab_preview()
-            cond = len(fake.sampled) == 1 and bool(PLAYED)
+            _drain(gui)
+            cond = (len(fake.sampled) == 1
+                    and PLAYED == [_tiny_raw()])
             print(f"  有缓存 → 合成仍 {len(fake.sampled)} 次、播放 {len(PLAYED)} 次  {'OK' if cond else '✗'}")
             ok &= cond
         finally:
@@ -490,9 +533,7 @@ def test_recipe_audition_never_creates() -> bool:
         fake.install()
         try:
             gui._on_lab_refresh()
-            for m in _drain(gui):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             gui._lab_recipe_combo.current(0)
             recipe = vl.recipe_labels()[0]
             gui._on_lab_recipe_preview()
@@ -506,14 +547,10 @@ def test_recipe_audition_never_creates() -> bool:
                                          name=key, created="2026-09-26 23:32:29",
                                          target_model="qwen3-tts-vd-2026-01-26")]
             gui._on_lab_refresh()
-            for m in _drain(gui):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             PLAYED.clear()
             gui._on_lab_recipe_preview()
-            for m in _drain(gui):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             cond = (len(fake.sampled) == 1 and not fake.created
                     and fake.sampled[0][1] == "qwen3-tts-vd-2026-01-26" and bool(PLAYED))
             print(f"  账号里有 → 合成 {len(fake.sampled)} 次（模型 {fake.sampled[0][1] if fake.sampled else '—'}）"
@@ -558,9 +595,7 @@ def test_delete_and_guards() -> bool:
             print(f"  未选中就保存 → 提示：{_status(gui)}  {'OK' if cond else '✗'}")
             ok &= cond
             gui._on_lab_refresh()
-            for m in _drain(gui):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             gui._lab_list.selection_clear(0, "end")
             gui._lab_list.selection_set(0)
             gui._on_lab_select()
@@ -571,9 +606,7 @@ def test_delete_and_guards() -> bool:
             ok &= cond
             gui_mod.messagebox.askokcancel = lambda *a, **k: True
             gui._on_lab_delete()
-            for m in _drain(gui):
-                if m[0] == "voice_lab" and m[1] == "delete":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui, only=("delete",))
             cond = bool(fake.deleted)
             print(f"  确认删除 → 删除请求数={len(fake.deleted)}  {'OK' if cond else '✗'}")
             ok &= cond
@@ -630,6 +663,89 @@ def test_poll_dispatch_wired() -> bool:
     return ok
 
 
+def test_poll_reschedule_keeps_dispatching() -> bool:
+    """回归（真机卡死根因）：`poll` 每 50ms **自排的那一跳**必须还认识 `("voice_lab", …)`。
+
+    真机表现：点「刷新列表 / 生成 / 复刻 / 试听」后按钮一直灰、状态停在「正在……」——
+    因为 `poll` 自排时不转发 `on_voice_lab`，第二跳起恒为 `None`，所有结果被静默丢弃。
+    ⚠️ 所以本用例**必须走自排那一跳**，不能像 `test_poll_dispatch_wired` 那样直调 `_poll()`。
+    """
+    ok = True
+    fake = FakeVoiceLab()
+    with _gui() as (gui, _cfg_path, _tmp):
+        fake.install()
+        try:
+            root = _CapturingRoot()
+            gui._root = root                                    # type: ignore[assignment]
+            gui._lab_set_status("")
+            gui._poll()                    # 真实启动只有这一次带 on_voice_lab（gui_layout 里那次）
+
+            gui._q.put(("voice_lab", "list", True, "",
+                        [vl.VoiceInfo(voice="qwen-tts-vd-x-voice-20261002120000-9999",
+                                      name="x")]))
+            root.run_scheduled()           # ← 只跑自排回调（= 主循环的下一跳）
+            cond = gui._lab_list.size() == 1
+            print(f"  自排一跳后列表条数={gui._lab_list.size()}（期望 1）  {'OK' if cond else '✗'}")
+            ok &= cond
+
+            # 再来两跳：确认不是「只第一跳好使」，而是长久自排
+            for _ in range(2):
+                gui._q.put(("voice_lab", "create", False, "网络不可达：模拟", None))
+                root.run_scheduled()
+            cond = "生成失败" in _status(gui)
+            print(f"  后续自排仍把失败消息上屏：{_status(gui)[:26]}…  {'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            fake.restore()
+    return ok
+
+
+def test_poll_survives_handler_exception() -> bool:
+    """回归：handler 抛异常**不许把轮询打死**（否则状态栏/聊天/房间一起静默冻结）。
+
+    以前自排写在异常路径之后：一处 handler 抛异常就永久断掉 after 链，整机看起来「卡死」。
+    """
+    ok = True
+    fake = FakeVoiceLab()
+    with _gui() as (gui, _cfg_path, _tmp):
+        fake.install()
+        try:
+            root = _CapturingRoot()
+            gui._root = root                                    # type: ignore[assignment]
+            real_done = gui._on_lab_done
+            calls = {"n": 0}
+
+            def boom(*a, **k):                                  # noqa: ANN001
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("模拟 handler 崩")
+                return real_done(*a, **k)
+
+            gui._on_lab_done = boom                             # type: ignore[assignment]
+            gui._lab_set_status("")
+            gui._poll()
+            gui._q.put(("voice_lab", "list", True, "",
+                        [vl.VoiceInfo(voice="qwen-tts-vd-x-voice-20261002120000-9999",
+                                      name="x")]))
+            root.run_scheduled()                                # 第 1 跳：handler 抛异常
+            cond = len(root.jobs) >= 1
+            print(f"  handler 抛异常后轮询仍自排下一轮={len(root.jobs) >= 1}（期望 True）  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+
+            gui._q.put(("voice_lab", "list", True, "",
+                        [vl.VoiceInfo(voice="qwen-tts-vd-y-voice-20261002120000-8888",
+                                      name="y")]))
+            root.run_scheduled()                                # 下一跳照常派发
+            cond = gui._lab_list.size() == 1
+            print(f"  下一轮照常派发：列表条数={gui._lab_list.size()}（期望 1）  "
+                  f"{'OK' if cond else '✗'}")
+            ok &= cond
+        finally:
+            fake.restore()
+    return ok
+
+
 def test_clone_requires_valid_sample() -> bool:
     """克隆的本地闸门：没选素材 / 素材不合格（太短）→ **一个请求都不发**（别白花 0.01 元）。"""
     import wave
@@ -659,9 +775,7 @@ def test_clone_requires_valid_sample() -> bool:
                 gui._on_lab_clone()
                 # ⚠️ 必须等线程：否则「还没发出去」会冒充「被拦住了」（本用例最初就是这么假绿的，
                 #    变异验证——去掉素材校验——当场把它抓出来）
-                for m in _drain(gui, 1.5):
-                    if m[0] == "voice_lab":
-                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+                _drain(gui)
                 cond = not fake.enrolled
                 print(f"  短素材点克隆 → 请求仍 {len(fake.enrolled)} 个（必须 0）  "
                       f"{'OK' if cond else '✗'}")
@@ -695,13 +809,7 @@ def test_clone_then_autoplay_and_save() -> bool:
                 ok &= cond
                 PLAYED.clear()
                 gui._on_lab_clone()
-                for _ in range(3):                    # 克隆 → 刷新列表 → 自动试听
-                    got = _drain(gui)
-                    for m in got:
-                        if m[0] == "voice_lab":
-                            gui._on_lab_done(m[1], m[2], m[3], m[4])
-                    if not got:
-                        break
+                _drain(gui)                           # 克隆 → 刷新列表 → 自动试听（_drain 就地派发）
             finally:
                 fd.askopenfilename = orig
 
@@ -751,13 +859,7 @@ def test_clone_reuse_does_not_pay_again() -> bool:
                 w.writeframes(bytes(24000 * 12 * 2))     # 12s silence (bytes())
             gui._lab_audio = vl.probe_audio(sample)
             gui._on_lab_clone()
-            for _ in range(2):
-                got = _drain(gui)
-                for m in got:
-                    if m[0] == "voice_lab":
-                        gui._on_lab_done(m[1], m[2], m[3], m[4])
-                if not got:
-                    break
+            _drain(gui)
             cond = "没有再花钱" in _status(gui)
             print(f"  复用文案：{_status(gui)[:44]}…  {'OK' if cond else '✗'}")
             ok &= cond
@@ -837,9 +939,7 @@ def test_clone_preset_wiring() -> bool:
             cond = "还在试听上一段范本" in gui._lab_status.cget("text")
             print(f"  重复点 → 挡住、不叠播  {'OK' if cond else '✗'}")
             ok &= cond
-            for m in _drain(gui, 2.0):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             cond = (len(PLAYED) == played_before + 1 and not gui._lab_playing_preset
                     and "范本试听完成" in gui._lab_status.cget("text"))
             print(f"  播完 → 本地播放 {len(PLAYED) - played_before} 次、状态收尾、占用释放  "
@@ -849,10 +949,7 @@ def test_clone_preset_wiring() -> bool:
             # ② 一键克隆：挂素材 + 名字按范本预填 → 走克隆 → 自动试听
             gui._lab_audio = None
             gui._on_lab_preset_clone()
-            for _ in range(3):
-                for m in _drain(gui, 1.5):
-                    if m[0] == "voice_lab":
-                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             got = fake.enrolled[0] if fake.enrolled else ("", "")
             cond = (len(fake.enrolled) == 1 and got[0] == "my_clip_4x"
                     and got[1].startswith("data:audio/wav;base64,"))
@@ -873,9 +970,7 @@ def test_clone_preset_wiring() -> bool:
             print(f"  范本没样本 → 试听不动、提示去找  {'OK' if cond else '✗'}")
             ok &= cond
             gui._on_lab_preset_clone()
-            for m in _drain(gui, 1.0):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             cond = (len(fake.enrolled) == enrolled_before and gui._lab_audio is None
                     and "没找到" in gui._lab_status.cget("text"))
             print(f"  范本没样本 → 一键克隆也不发请求  {'OK' if cond else '✗'}")
@@ -997,12 +1092,8 @@ def test_preset_fetch_on_demand() -> bool:
             print(f"  试听 → 先发起拉取（状态：「{gui._lab_status.cget('text')[:22]}…」）  "
                   f"{'OK' if cond else '✗'}")
             ok &= cond
-            for m in _drain(gui, 2.0):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
-            for m in _drain(gui, 2.0):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
+            _drain(gui)
             cond = len(PLAYED) == played_before + 1
             print(f"  拉到后自动继续播放（本地播 {len(PLAYED) - played_before} 次）  "
                   f"{'OK' if cond else '✗'}")
@@ -1012,10 +1103,7 @@ def test_preset_fetch_on_demand() -> bool:
             fetched.clear()
             gui._lab_audio = None
             gui._on_lab_preset_clone()
-            for _ in range(3):
-                for m in _drain(gui, 1.5):
-                    if m[0] == "voice_lab":
-                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             cond = (len(fetched) == 1 and len(fake.enrolled) == 1
                     and fake.enrolled[0][0] == "my_clip_4x")
             print(f"  一键克隆 → 先拉再克隆（请求 {len(fake.enrolled)} 次、"
@@ -1027,22 +1115,16 @@ def test_preset_fetch_on_demand() -> bool:
                 raise vl.VoiceLabError("两个地址都不通")
 
             vl.fetch_preset_sample = fetch_dead                 # type: ignore[assignment]
-            for m in _drain(gui, 0.6):              # 先清掉上一段残留的「播放完成」消息
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)                             # 先清掉上一段残留的「播放完成」消息
             played_before, enrolled_before = len(PLAYED), len(fake.enrolled)
             gui._on_lab_preset_preview()
-            for m in _drain(gui, 1.5):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             cond = (len(PLAYED) == played_before
                     and "拉取范本音频失败" in gui._lab_status.cget("text"))
             print(f"  拉取失败 → 只提示不硬播  {'OK' if cond else '✗'}")
             ok &= cond
             gui._on_lab_preset_clone()
-            for m in _drain(gui, 1.5):
-                if m[0] == "voice_lab":
-                    gui._on_lab_done(m[1], m[2], m[3], m[4])
+            _drain(gui)
             cond = len(fake.enrolled) == enrolled_before
             print(f"  拉取失败 → 一条克隆请求都不发  {'OK' if cond else '✗'}")
             ok &= cond
@@ -1082,9 +1164,7 @@ def test_sample_check_wiring() -> bool:
             # ③ 启动挂钩：真起线程、真调用（失败也在内部兜住）
             gui._kick_sample_check()
             for _ in range(2):
-                for m in _drain(gui, 1.5):
-                    if m[0] == "voice_lab":
-                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+                _drain(gui)
             cond = len(calls) == 1
             print(f"  启动挂钩 → 后台调用 {len(calls)} 次  {'OK' if cond else '✗'}")
             ok &= cond
@@ -1102,9 +1182,7 @@ def test_sample_check_wiring() -> bool:
             gui._lab_set_status("原始状态")
             gui._kick_sample_check()
             for _ in range(2):
-                for m in _drain(gui, 1.5):
-                    if m[0] == "voice_lab":
-                        gui._on_lab_done(m[1], m[2], m[3], m[4])
+                _drain(gui)
             cond = gui._lab_status.cget("text") == "原始状态"
             print(f"  检查失败 → 不打扰（状态仍是「{gui._lab_status.cget('text')}」）  "
                   f"{'OK' if cond else '✗'}")
@@ -1135,6 +1213,10 @@ if __name__ == "__main__":
     ok &= test_empty_prompt_and_no_key()
     print(" 9) _poll 接线")
     ok &= test_poll_dispatch_wired()
+    print(" 9b) _poll 自排那一跳仍派发音色页消息（真机卡死回归）")
+    ok &= test_poll_reschedule_keeps_dispatching()
+    print(" 9c) handler 抛异常不打死轮询")
+    ok &= test_poll_survives_handler_exception()
     print("10) 克隆的本地闸门（没素材/素材不合格 → 零请求）")
     ok &= test_clone_requires_valid_sample()
     print("11) 克隆 → 自动试听（vc 模型）→ 保存进配置")

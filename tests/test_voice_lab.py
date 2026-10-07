@@ -286,6 +286,53 @@ def test_preview_cache() -> bool:
     return ok
 
 
+def test_preview_pcm() -> bool:
+    """★ 试听音频统一解码：**裸 PCM 原样放行、WAV 容器解成 24k 单声道**。
+
+    为什么单列：本地 `voices/*.wav` 缓存里其实混着两种格式 —— `create_or_reuse` 存的是
+    服务端回的 **WAV 容器**，`sample_pcm` 存的是 `tts.synthesize` 的**裸 24k PCM**。
+    以前两者都被塞进只认容器的解码器（`tts._decode_to_24k_mono`）→ 裸 PCM 必解码失败，
+    真机表现就是「点试听一点声音都没有」。这个用例把两种格式都钉住。
+    """
+    import io
+    import wave
+
+    ok = True
+    cond = vl.preview_pcm(b"") == b""
+    print(f"  空输入 → 空输出  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    raw = b"\x01\x00\x02\x00" * 480                    # 裸 24k 单声道 20ms
+    cond = vl.preview_pcm(raw) == raw
+    print(f"  裸 PCM → 原样放行（{len(raw)}B）  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(b"\x00\x00" * 240)
+    dec = vl.preview_pcm(buf.getvalue())
+    cond = len(dec) == 240 * 2
+    print(f"  WAV 容器（24k 单声道 10ms）→ 解出 {len(dec)}B / 期望 {240 * 2}B  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # 非 24k 的容器（44.1k 立体声 100ms）也要被**重采样**成 24k 单声道
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(b"\x00\x00\x00\x00" * 4410)
+    dec = vl.preview_pcm(buf.getvalue())
+    cond = abs(len(dec) - 2400 * 2) <= 8
+    print(f"  WAV 容器（44.1k 立体声 100ms）→ 重采样后 {len(dec)}B / 期望约 {2400 * 2}B  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+    return ok
+
+
 def test_recipes() -> bool:
     ok = True
     cond = len(vl.RECIPES) == 5
@@ -772,6 +819,8 @@ if __name__ == "__main__":
     ok &= test_reuse_avoids_spending()
     print(" 8) 试听缓存（本地存储）")
     ok &= test_preview_cache()
+    print(" 8b) 试听音频统一解码（裸 PCM 原样 / WAV 容器解成 24k 单声道）")
+    ok &= test_preview_pcm()
     print(" 9) 配方库")
     ok &= test_recipes()
     print(" 10) 展示行")

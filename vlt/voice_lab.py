@@ -978,6 +978,28 @@ def sample_pcm_from_file(path) -> tuple[bytes, float]:
     return pcm, len(pcm) / 2.0 / 24000.0
 
 
+def preview_pcm(data: bytes) -> bytes:
+    """把一份「试听音频」统一成 24kHz 单声道 s16le PCM（可**直接**丢给播放器）。
+
+    为什么需要它：本地 `voices/*.wav` 缓存里其实**混着两种格式**——
+    · `create_or_reuse` 存的是服务端回的 `preview_audio`（**WAV 容器**，带 RIFF 头）；
+    · `sample_pcm` 存的是 `tts.synthesize` 的返回值（**裸 24k 单声道 PCM**，没有头）。
+    以前两者都被塞进 `tts._decode_to_24k_mono()`（只认容器）→ 裸 PCM 必然解码失败，
+    表现就是**点试听一点声音都没有**（异常被吞成一句状态文字）。这里按头分派，两种都能放。
+
+    存量缓存无需清理：判据只看头四字节，不看文件名/后缀。
+    """
+    if not data:
+        return b""
+    if data[:4] == b"RIFF":                    # 容器 → 解出来（顺带重采样成 24k 单声道）
+        import miniaudio
+
+        dec = miniaudio.decode(data, output_format=miniaudio.SampleFormat.SIGNED16,
+                               nchannels=1, sample_rate=24000)
+        return dec.samples.tobytes()
+    return data                                # 裸 24k 单声道 s16le → 原样（播放器就吃这个）
+
+
 # ---------------------------------------------------------------- 配方库
 
 

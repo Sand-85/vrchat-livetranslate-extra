@@ -162,10 +162,13 @@ def on_tts_voice_change(ctx: VoiceCtx, cfg: Any, _event=None, *,
         cfg.text_input.setdefault("tts", {})["voice"] = voice
         if model:
             cfg.text_input["tts"]["model"] = model
-    ctx.tts_voice_var.set(display_name(voice, t))     # 手打中文名/英文名也回显成规范显示名
+    # 回显成**下拉里那一项**的人话名字（以前用 `display_name`，未登记的音色会回一长串 id，
+    # 与下拉里显示的名字对不上，看着像"没选上"）；配置里写进去的仍是真 id。
+    label = gui._tts_voice_display(voice) if gui is not None else display_name(voice, t)
+    ctx.tts_voice_var.set(label)
     if gui is not None and model:
         gui._set_tts_model_config(model)
-    set_status("info", t("打字译音音色已保存：{v}（下一条打字即生效）", v=display_name(voice, t)))
+    set_status("info", t("打字译音音色已保存：{v}（下一条打字即生效）", v=label))
     print(f"[gui] 打字译音音色 → {voice!r}、模型 → {model!r}（已写入 text_input.tts）", flush=True)
 
 
@@ -368,11 +371,12 @@ def on_preview_speech_voice(ctx: VoiceCtx, cfg: Any, *,
                             set_status: Callable,
                             provider_fn: Callable[[], str],
                             resolve_api_key: Callable[[], str],
-                            play_fn: Callable = None) -> None:
+                            play_fn: Callable = None,
+                            gui: Any = None) -> None:
     """试听说话译音音色。"""
     preview_voice(ctx, cfg, "speech",
                   q=q, set_status=set_status, provider_fn=provider_fn,
-                  resolve_api_key=resolve_api_key, play_fn=play_fn)
+                  resolve_api_key=resolve_api_key, play_fn=play_fn, gui=gui)
 
 
 def on_preview_tts_voice(ctx: VoiceCtx, cfg: Any, *,
@@ -380,11 +384,12 @@ def on_preview_tts_voice(ctx: VoiceCtx, cfg: Any, *,
                          set_status: Callable,
                          provider_fn: Callable[[], str],
                          resolve_api_key: Callable[[], str],
-                         play_fn: Callable = None) -> None:
+                         play_fn: Callable = None,
+                         gui: Any = None) -> None:
     """试听打字译音音色。"""
     preview_voice(ctx, cfg, "tts",
                   q=q, set_status=set_status, provider_fn=provider_fn,
-                  resolve_api_key=resolve_api_key, play_fn=play_fn)
+                  resolve_api_key=resolve_api_key, play_fn=play_fn, gui=gui)
 
 
 def preview_voice(ctx: VoiceCtx, cfg: Any, kind: str, *,
@@ -392,16 +397,24 @@ def preview_voice(ctx: VoiceCtx, cfg: Any, kind: str, *,
                   set_status: Callable,
                   provider_fn: Callable[[], str],
                   resolve_api_key: Callable[[], str],
-                  play_fn: Callable = None) -> None:
+                  play_fn: Callable = None,
+                  gui: Any = None) -> None:
     """合成一句固定样例并在本地扬声器播放。"""
     if ctx.preview_busy:
         return
     btn = ctx.speech_preview_btn if kind == "speech" else ctx.tts_preview_btn
     var = ctx.speech_voice_var if kind == "speech" else ctx.tts_voice_var
-    voice = (var.get() or "").strip()
-    if not voice:
+    raw = (var.get() or "").strip()
+    if not raw:
         set_status("warn", t("请先选择或填写音色"))
         return
+    # ⚠️ 打字腿下拉里显示的是**人话名字**（内置名/本地登记名/id 反推的短名），发给 API 的必须是真 id；
+    # ⚠️ 模型也必须跟着**这条音色自己**走 —— 以前写死 `qwen3-tts-flash`，账号里的设计/复刻音色
+    #    必 400 `InvalidParameter: Invalid voice specified`，用户看到的是「点试听没声音」。
+    voice, model = raw, VOICE_PREVIEW_MODEL
+    if kind == "tts" and gui is not None:
+        voice = gui._tts_voice_id_from_input(raw) or raw
+        model = gui._tts_model_for_voice(voice) or VOICE_PREVIEW_MODEL
     api_key = resolve_api_key()
     if not api_key:
         set_status("warn", t("还没配置 API key，无法试听（见右上角「设置」）"))
@@ -417,14 +430,15 @@ def preview_voice(ctx: VoiceCtx, cfg: Any, kind: str, *,
     ctx.preview_busy = True
     if btn is not None:
         btn.configure(state=tk.DISABLED, text=t("试听中…"))
-    set_status("info", t("正在试听「{v}」…", v=voice))
+    set_status("info", t("正在试听「{v}」…", v=raw))     # 状态栏用用户看到的那个名字（真 id 只进日志）
     line = endpoints.describe(provider_fn(), base_url)
-    print(f"[gui] 试听音色 → {voice!r}（{kind}，模型 {VOICE_PREVIEW_MODEL}）| {line}",
+    print(f"[gui] 试听音色 → {voice!r}（{kind}，模型 {model}）| {line}",
           flush=True)
     threading.Thread(target=preview_worker,
                      args=(q, kind, voice, api_key),
                      kwargs={"omni_endpoint": omni_endpoint,
                              "tts_endpoint": tts_endpoint,
+                             "model": model,
                              "play_fn": play_fn or _play_pcm_local},
                      daemon=True, name="vlt-voice-preview").start()
 
@@ -432,8 +446,13 @@ def preview_voice(ctx: VoiceCtx, cfg: Any, kind: str, *,
 def preview_worker(q: Any, kind: str, voice: str, api_key: str, *,
                    omni_endpoint: str | None = None,
                    tts_endpoint: str | None = None,
+                   model: str = "",
                    play_fn: Callable = None) -> None:
-    """守护线程体：合成 + 播放，结果回主线程。"""
+    """守护线程体：合成 + 播放，结果回主线程。
+
+    `voice` 必须是**真 id**、`model` 必须是**这条音色自己的合成模型**（调用方解析好再传进来）：
+    内置音色走 `qwen3-tts-flash`，账号里的设计族(vd)/复刻族(vc)各走各的 —— 三者模型不通用。
+    """
     _play = play_fn or _play_pcm_local
     err = ""
     try:
@@ -442,7 +461,7 @@ def preview_worker(q: Any, kind: str, voice: str, api_key: str, *,
                                       endpoint=omni_endpoint)
         else:
             pcm = tts.synthesize(VOICE_PREVIEW_TEXT, voice=voice,
-                                 model=VOICE_PREVIEW_MODEL, api_key=api_key,
+                                 model=model or VOICE_PREVIEW_MODEL, api_key=api_key,
                                  endpoint=tts_endpoint)
         _play(pcm)
     except tts.TtsError as exc:

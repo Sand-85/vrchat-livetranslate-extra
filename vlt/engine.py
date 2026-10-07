@@ -69,6 +69,8 @@ VOICE_SEGMENT_MIN_CHARS = 4                 # 太短的片段先攒着（别念�
 TTS_PARALLEL_DEFAULT = 2
 TTS_PARALLEL_MAX = 4
 VOICE_SLOT_POLL_S = 0.01        # 写入线程取分片的轮询间隔（合成侧是流式到达的）
+# 「译音档没开」的警告节流：打字连发时别刷屏（只说一次/30s）；口径见 `_voice_push`。
+VOICE_MUTED_WARN_S = 30.0
 
 
 def _common_prefix_len(a: str, b: str) -> int:
@@ -657,6 +659,7 @@ class Engine:
         self._silent_chunks = 0        # 其中判为静音的块数
         self._last_loud_ts = 0.0       # 最近一次"有声音"的时刻
         self._audio_chunks = 0         # 收到的 TTS 音频块数
+        self._voice_muted_warn_at = 0.0  # 上次提示「译音档没开」的时刻（节流用）
         self._text_deltas = 0          # 收到的译文本条数
         self._text_hist: deque[tuple[float, str]] = deque(maxlen=40)
         self._session_started_at = 0.0
@@ -1457,17 +1460,46 @@ class Engine:
         opener, closer = self._sfx_cache
         return sfx_apply_gain(opener, gain), sfx_apply_gain(closer, gain)
 
+    def _voice_push(self, pcm: bytes) -> bool:
+        """往虚拟麦推一帧译音；返回**这一帧是否真的进了麦**。
+
+        `self._virtualmic` 是麦克风代理的 `TranslatedSink` 时，它带 `active`：
+        代理停在「原声」档 → 推进去的译音**不会出声**（只滞留在缓冲里，超限还被整句丢）。
+        那种情况下不推、给一次明确提示，并让调用方**不要把它算进「已出声」** ——
+        否则状态栏报「已出声 1.4s」而用户一个字都听不到（本仓库踩过：日志只有
+        「缓冲超限：丢弃最旧的一整句」，引擎却报已出声）。
+
+        引擎自建的 `VirtualMic` 没有 `active` → 视为恒开（行为与以前完全一致）。
+        """
+        vm = self._virtualmic
+        if vm is None or not pcm:
+            return False
+        if not getattr(vm, "active", True):
+            self._warn_voice_muted()
+            return False
+        vm.push(pcm)
+        return True
+
+    def _warn_voice_muted(self) -> None:
+        """「译音档没开」按 `VOICE_MUTED_WARN_S` 节流提示一次（打字连发不刷屏）。"""
+        now = time.monotonic()
+        if now - self._voice_muted_warn_at < VOICE_MUTED_WARN_S:
+            return
+        self._voice_muted_warn_at = now
+        self._events.on_status(
+            "warn", "译音档没开（当前是原声档），这句译音不会进虚拟麦 —— 在主界面切到「译音」档再试")
+
     def _push_sfx_open(self) -> None:
         """句首「开台」音（没配 / 读不出来就是空字节，什么都不做）。"""
         pcm, _ = self._sfx_pcm()
-        if pcm and self._virtualmic is not None:
-            self._virtualmic.push(pcm)
+        if pcm:
+            self._voice_push(pcm)
 
     def _push_sfx_close(self) -> None:
         """句尾「收台」音。必须在 `end_sentence()` **之前**推，否则会被当成下一句的开头。"""
         _, pcm = self._sfx_pcm()
-        if pcm and self._virtualmic is not None:
-            self._virtualmic.push(pcm)
+        if pcm:
+            self._voice_push(pcm)
 
     def _maybe_speak_final(self, text: str) -> None:
         """B 模式：语音腿的译音改由**本地 TTS**合成（音色与打字腿完全一致）。
@@ -1598,7 +1630,7 @@ class Engine:
         while True:
             chunk, finished = slot.take(sent)
             if chunk is not None:
-                self._virtualmic.push(resample_24k_mono_to_48k_stereo(chunk))
+                self._voice_push(resample_24k_mono_to_48k_stereo(chunk))
                 sent += 1
             if finished and chunk is None:
                 break
@@ -1690,7 +1722,7 @@ class Engine:
             self._virtualmic.end_sentence()
         self._pending_seal = False
         self._last_audio_ts = now
-        self._virtualmic.push(stereo)
+        self._voice_push(stereo)
 
     def _on_usage(self, u: dict) -> None:
         self._events.on_stats({k: v for k, v in u.items() if isinstance(v, int)})
@@ -1774,10 +1806,10 @@ class Engine:
                 else:
                     pcm24 = await asyncio.to_thread(synthesize, translated, **kw)
                     self._push_sfx_open()
-                    self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
+                    if self._voice_push(resample_24k_mono_to_48k_stereo(pcm24)):
+                        spoke_s = len(pcm24) / 2 / 24000
                     self._push_sfx_close()
                     self._virtualmic.end_sentence()
-                    spoke_s = len(pcm24) / 2 / 24000
             except TtsError as exc:
                 self._events.on_status("warn", f"打字译音失败：{exc}（文字输出不受影响）")
             except Exception as exc:  # noqa: BLE001
@@ -1823,8 +1855,8 @@ class Engine:
         try:
             self._push_sfx_open()
             for pcm24 in synthesize_stream(text, **kw):
-                self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
-                total += len(pcm24)
+                if self._voice_push(resample_24k_mono_to_48k_stereo(pcm24)):
+                    total += len(pcm24)
         except TtsStreamTruncated:
             truncated = True
         finally:

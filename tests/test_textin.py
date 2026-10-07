@@ -411,6 +411,49 @@ def test_gui_wiring() -> bool:
     return ok
 
 
+def test_send_button_and_return_are_wired() -> bool:
+    """回归：主界面的「发送」按钮与回车**必须**绑到带 engines/dirs/status 的包装上。
+
+    曾经的 bug：`gui_chat.build_input_row` 把按钮绑成 `send_typed(ctx)`、回车绑成
+    `on_text_enter(ctx)` —— 都缺 engines / engine_dirs / set_status，点一下必 TypeError
+    （真机日志里就是两条 `Tk 回调异常`）。`gui._send_typed()` 直接调用是好的，
+    所以上面只测方法调用**抓不到**这个 bug —— 必须真的 invoke 按钮 / 触发回车。
+    """
+    try:
+        from vlt.gui import TranslationGUI
+    except Exception as exc:  # noqa: BLE001
+        print(f"  （跳过：Tk 不可用 {exc}）")
+        return True
+    ok = True
+    gui = TranslationGUI()
+    try:
+        fake = FakeEngine("mine")
+        gui._engines, gui._engine_dirs = [fake], ["mine"]
+        gui._set_text_input_enabled(True)          # 置灰的按钮 invoke() 不会触发 command
+
+        gui._text_var.set("按钮发的")
+        gui._send_btn.invoke()                     # ← 真的点按钮（走真实绑定）
+        cond = fake.got == ["按钮发的"] and gui._text_var.get() == ""
+        print(f"  点「发送」按钮：引擎收到={fake.got} 输入框已清空={gui._text_var.get() == ''}  "
+              f"{'OK' if cond else '✗'}")
+        ok &= cond
+
+        fake.got.clear()
+        gui._text_var.set("回车发的")
+        gui._text_entry.focus_force()               # 无头/未聚焦的窗口里，键事件要先给焦点
+        gui._text_entry.event_generate("<Return>")  # ← 真的触发回车（走真实绑定）
+        gui._root.update()
+        cond = fake.got == ["回车发的"]
+        print(f"  回车触发：引擎收到={fake.got}  {'OK' if cond else '✗'}")
+        ok &= cond
+    finally:
+        try:
+            gui._root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+    return ok
+
+
 # ---------------------------------------------------------------- 5) 打字也要出声（TTS）
 
 
@@ -749,6 +792,53 @@ def test_engine_tts() -> bool:
     return ok
 
 
+def test_engine_tts_muted_when_proxy_passthrough() -> bool:
+    """★ sink 报 `active=False`（代理停在「原声」档）→ **不推、不报「已出声」**，只给一次提示。
+
+    真机证据：代理没切到译音档时，译音进了从不被消费的缓冲；日志里只有「缓冲超限：丢弃整句」，
+    引擎却报「打字已送出（… 已出声 1.4s）」——用户一个字都听不到。
+
+    `active` 由麦克风代理的 `TranslatedSink` 提供（原声档 = False）；引擎**自建**的虚拟麦没有
+    这个属性 → `_voice_push` 视为恒开（行为与以前完全一致，见本文件 ①② 两条）。
+    """
+    ok = True
+    real_t, real_ss = engine_mod.translate_text, engine_mod.synthesize_stream
+    pcm24 = b"\x01\x00" * 2400                       # 0.1s @24k 单声道
+    engine_mod.translate_text = lambda text, **kw: "Hello from typing"
+    engine_mod.synthesize_stream = lambda text, **kw: iter([pcm24])
+    try:
+        class _MutedVM(FakeVirtualMic):
+            active = False                           # ← 代理在「原声」档
+
+        eng = _mk_engine()
+        vm, cb, st = _MutedVM(), FakeChatbox(), []
+        eng._virtualmic, eng._chatbox = vm, cb
+        eng._events = EngineEvents(on_status=lambda l, m: st.append((l, m)))
+        asyncio.run(eng._async_send_text("你好"))
+        cond = (vm.pushed == []                       # 一句都不许推进去（推了也不会出声）
+                and not any("已出声" in m for _l, m in st)
+                and any(l == "warn" and "译音档" in m for l, m in st)
+                and bool(cb.sent))                    # 文字输出不受影响
+        print(f"  原声档（active=False）：推入 {len(vm.pushed)} 段、"
+              f"「已出声」={'有' if any('已出声' in m for _l, m in st) else '无'}、"
+              f"明确警告={'有' if any('译音档' in m for _l, m in st) else '无'}  "
+              f"{'OK' if cond else '✗'}")
+        ok &= cond
+
+        # 节流：同一次静音期连打第二条不再刷屏（30s 内只提示一次）
+        cb2, st2 = FakeChatbox(), []
+        eng._chatbox = cb2
+        eng._events = EngineEvents(on_status=lambda l, m: st2.append((l, m)))
+        asyncio.run(eng._async_send_text("再来一条"))
+        second = [m for _l, m in st2 if "译音档" in m]
+        cond = bool(st2) and not second
+        print(f"  连打第二条：再提示 {len(second)} 次（应 0，30s 节流）  {'OK' if cond else '✗'}")
+        ok &= cond
+    finally:
+        engine_mod.translate_text, engine_mod.synthesize_stream = real_t, real_ss
+    return ok
+
+
 def _capture(fn):
     """跑 fn() 并把 stdout 收下来 —— 用来断言「降级必须留痕」这类日志。"""
     import contextlib
@@ -973,11 +1063,13 @@ def main() -> int:
         ("超长切分", test_split()),
         ("引擎下游", test_engine_downstream()),
         ("界面接线", test_gui_wiring()),
+        ("发送按钮/回车绑定", test_send_button_and_return_are_wired()),
         ("TTS 请求体/解码", test_tts_payload_and_decode()),
         ("TTS cosyvoice 后端", test_tts_cosyvoice_backend()),
         ("TTS 流式合成", test_tts_streaming()),
         ("TTS 错误路径", test_tts_errors()),
         ("引擎出声路由", test_engine_tts()),
+        ("原声档不谎报已出声", test_engine_tts_muted_when_proxy_passthrough()),
         ("引擎流式出声", test_engine_tts_stream()),
     ]
     bad = [name for name, ok in results if not ok]
