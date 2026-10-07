@@ -7,6 +7,7 @@ from __future__ import annotations
 
 STRINGS: dict[str, str] = {
     # ---- 语言名（源/目标语言下拉里显示；表本身仍以中文名为 key）----
+    '本项只作用于「我说」那条腿（你说话 → 译音进虚拟声卡）；VRC 音频捕捉（别人说话 → 手腕屏）恒用 A 实时音源，不额外合成。': 'This applies only to the “me speaking” leg (your voice → translated audio into the virtual mic); VRChat audio capture (what others say → wrist screen) always uses the A realtime audio path, with no extra synthesis.',
     "中文": "Chinese",
     "英语": "English",
     "日语": "Japanese",

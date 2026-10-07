@@ -829,11 +829,22 @@ class Engine:
             return True                       # A：模型的译音；B：本地 TTS 的译音（同一开关）
         return self._typed_leg_wants_audio()   # 打字腿出声
 
+    def _voice_mode_for_leg(self) -> str:
+        """本引擎该走哪个音源：**音源 A/B 只作用于「我说」那条腿**。
+
+        「VRC 音频捕捉」那条腿（别人说 → 手腕屏）恒为 **A**（实时模型自带的音频）：
+        它的产物是屏幕上的字，不需要声音，所以既不该因为选了 B 就关掉实时模型的音频输出，
+        更不该去走本地 TTS 合成（白花钱、还可能和别的腿抢着说）。这样也把效率拉满。
+        """
+        if self._direction != "mine":
+            return "realtime"
+        return self._voice_mode()
+
     def _session_cfg(self):
         """按当前音源模式构造会话配置：B 模式不再向实时模型要音频输出
         （音源是本地 TTS，要了只是白付音频 token，还会与 TTS 抢着说）。"""
         scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
-        if self._voice_mode() == "tts":
+        if self._voice_mode_for_leg() == "tts":
             scfg.output_audio = False
         return scfg
 
@@ -1483,9 +1494,10 @@ class Engine:
     def _voice_leg_speaking_ready(self) -> bool:
         """B 模式语音腿出声的前置条件（`_maybe_speak_final` / `_maybe_speak_partial` 共用一份）。
 
-        四道：音源是 B、虚拟麦在、译音输出总开关开、该方向勾了 output_audio。
+        四道：音源是 B（且只对「我说」那条腿生效 —— 见 `_voice_mode_for_leg`）、
+        虚拟麦在、译音输出总开关开、该方向勾了 output_audio。
         """
-        if self._voice_mode() != "tts" or self._virtualmic is None:
+        if self._voice_mode_for_leg() != "tts" or self._virtualmic is None:
             return False
         if not self._audio_out_enabled():
             return False

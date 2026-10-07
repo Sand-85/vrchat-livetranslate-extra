@@ -606,6 +606,10 @@ def build_settings_audio(gui, body: ttk.Frame) -> None:
     # 每句约 +0.5s），切换即刻生效并写回 config.yaml；② 用什么音色（两条腿音色不通用，分两个下拉）。
     ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
     ttk.Label(body, text=t("译音：音源与音色"), style="Section.TLabel").pack(anchor=tk.W)
+    ttk.Label(body, text=t("本项只作用于「我说」那条腿（你说话 → 译音进虚拟声卡）；"
+                          "VRC 音频捕捉（别人说话 → 手腕屏）恒用 A 实时音源，不额外合成。"),
+              style="Muted.TLabel", justify=tk.LEFT,
+              wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(2, 0))
     _audio_cfg = (gui._cfg.output or {}).get("audio") or {}
     gui._voice_mode_var = tk.StringVar(master=gui._root,
                                        value=str(_audio_cfg.get("mode") or "realtime"))

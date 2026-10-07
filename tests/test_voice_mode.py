@@ -416,6 +416,38 @@ def test_gui_wiring() -> bool:
     return ok
 
 
+def test_mode_scope_only_mine() -> bool:
+    """音源 A/B **只作用于「我说」**；VRC 音频捕捉（别人说 → 手腕屏）恒为 A。
+
+    用户口径（2026-10-06）：「VRC 音频捕捉应该无论如何都是 A 模式以最大化效率，
+    只有用户说话部分是自由指定」。捕捉腿的产物是屏幕上的字，不需要声音 ——
+    所以既不该因为选了 B 就关掉实时模型的音频输出，更不该去走本地 TTS 合成。
+    """
+    ok = True
+
+    # ① 捕捉腿（theirs）：全局配成 B，它也必须仍走 A、且语音腿不出声
+    t = _mk("tts", output_audio=True, direction="theirs")
+    t._virtualmic, t._chatbox = FakeVirtualMic(), FakeChatbox()
+    cond = (t._voice_mode_for_leg() == "realtime"
+            and t._session_cfg().output_audio is True
+            and t._voice_leg_speaking_ready() is False)
+    print(f"  捕捉腿配成 B：仍要实时音频={t._session_cfg().output_audio is True}、"
+          f"不走本地 TTS={t._voice_leg_speaking_ready() is False}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ② 我说腿（mine）：B 模式照常生效
+    m = _mk("tts", output_audio=True, direction="mine")
+    m._virtualmic, m._chatbox = FakeVirtualMic(), FakeChatbox()
+    cond = (m._voice_mode_for_leg() == "tts"
+            and m._session_cfg().output_audio is False
+            and m._voice_leg_speaking_ready() is True)
+    print(f"  我说腿配成 B：不要实时音频={m._session_cfg().output_audio is False}、"
+          f"可出声={m._voice_leg_speaking_ready() is True}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    return ok
+
+
 def main() -> int:
     print("test_voice_mode:")
     results = [
@@ -425,6 +457,7 @@ def main() -> int:
         ("串行防交错", test_voice_serialized()),
         ("热切换 API", test_set_voice_output()),
         ("界面接线", test_gui_wiring()),
+        ("音源作用域（只管我说）", test_mode_scope_only_mine()),
     ]
     bad = [name for name, ok in results if not ok]
     print("ALL PASSED" if not bad else f"FAILED: {', '.join(bad)}")
