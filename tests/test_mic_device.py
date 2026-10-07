@@ -60,7 +60,7 @@ def _open_and_close(make_source):
 
 def test_device_passed_through_unchanged() -> None:
     """`str | int | None` 必须原样传给 sd.RawInputStream（尤其索引 0 不能变 None）。"""
-    import vlt.platform.audio as A
+    import vlt.platform.win as A
 
     _install_fake_sounddevice()
     for device in ("Fake Mic", 0, 3, None):

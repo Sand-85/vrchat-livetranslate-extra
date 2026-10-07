@@ -52,8 +52,14 @@ for %%t in (tests\test_*.py) do @.venv\Scripts\python.exe %%t
 ```
 
 ```bash
-# Linux —— 单个
-./.venv/bin/python tests/test_virtualmic.py
+# Linux —— 单个（★ 必须挂 xvfb-run，理由见下面第 3 条）
+xvfb-run -a ./.venv/bin/python tests/test_virtualmic.py
+
+# Linux —— 全部（与 CI 同口径）
+for t in tests/test_*.py; do
+  [ "$t" = tests/test_engine.py ] && continue          # 见下面第 2 条
+  xvfb-run -a ./.venv/bin/python "$t" || echo "FAIL $t"
+done
 ```
 
 几条**必须知道**的规矩：
@@ -63,6 +69,11 @@ for %%t in (tests\test_*.py) do @.venv\Scripts\python.exe %%t
 - **唯一例外是 `tests/test_engine.py`**：它要打一次**真实**会话，需要本机已配好 API key，
   CI 里**显式跳过**（workflow 里有 `::notice::` 写明原因）。它是本机实测项，别为了「变绿」
   删掉或改松。
+- **Linux 上必须挂 `xvfb-run -a` 跑**（CI 就是这么跑的，见 `ci.yml` 的 `linux-tests`）：
+  好几个用例会**建真窗口**再回读几何，平铺窗口管理器（Hyprland / niri / sway…）会把窗口
+  重排成满屏，于是它们全部**假红**（实测：不挂 xvfb 时 `test_desktop_overlay*.py`、
+  `test_i18n.py` 报的是几何/窗口宽度不符，挂上就全绿）。`xvfb-run -a` 给每个用例一个
+  无窗口管理器的虚拟 X，与 CI 完全一致。缺 `xvfb-run` 就装 `xorg-server-xvfb`。
 - **CI 跑在英文系统 + 1024px 虚拟屏上**。凡是本机是中文 Windows、断言了中文界面文案，或者
   假设窗口很宽 —— 本地绿了 CI 照样红（历史上真踩过：本机中文系统全绿、GitHub CI 一片红）。
   涉及界面语言的用例要在**构造窗口之前**把语言钉死。

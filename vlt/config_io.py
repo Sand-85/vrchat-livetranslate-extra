@@ -321,3 +321,22 @@ def _yaml_scalar(value) -> str:  # noqa: ANN001
         # 退回「始终单行」的双引号风格（YAML 双引号是 JSON 的超集）。
         return _yaml_quote(value)
     return first.strip()
+
+
+def write_leaf(path: list[str], value: str, err_label: str,
+               *, config_path: "Path", create: bool = False) -> None:
+    """把一个叶子值就地写进 config.yaml；失败只留痕，绝不把配置写坏。
+
+    *config_path* 由调用方给（通常是 ``DEFAULT_CONFIG``）；本函数不 import config 模块，
+    保持 config_io 的零依赖纪律。
+    """
+    p = config_path
+    if not p.exists():
+        return
+    try:
+        text = p.read_text(encoding="utf-8")
+        setter = _yaml_set_or_create if create else _yaml_set_in_text
+        text = setter(text, path, value)
+        _write_config_text(p, text)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[gui] {err_label}失败：{exc}", flush=True)

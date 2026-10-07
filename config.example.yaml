@@ -297,8 +297,15 @@ output:
       - "vb-audio"
     device_name: ""          # 用户手选的译音输出设备名；非空时优先于上面的回退链
     sample_rate: 48000       # VRChat / VoiceMeeter 统一要 48k
-    buffer_ms: 300           # 起播前先攒这么多，避免断续
+    buffer_ms: 300           # 起播前先攒这么多，避免断续（界面「设置→音频」可调）
     max_buffer_ms: 2000      # 排队上限：超了就**整句**丢弃最旧的（绝不从句中切断，正在播的那句不丢）
+    # 麦克风代理（**两端都支持**）：程序一启动就把真实麦克风直通到虚拟声卡，VRChat 里
+    # 麦克风永久固定选虚拟声卡（Windows = VoiceMeeter/VB-Cable，Linux = 程序自己声明的
+    # 「VLT Mic」），改「原声/译音」在界面一键切，不必再去 VRChat 里换麦克风。
+    proxy:
+      enabled: true            # 关掉 = 回到旧行为（引擎自建译音输出，界面切换开关置灰）
+      passthrough_buffer_ms: 150  # 原声直通的缓冲容量：越大越不易断续、但延迟越高。
+                                  # ⚠️ 下限 60ms——麦克风输入块约 100ms，太小会把每块削掉大半。
 
 # 打字输入（不想开麦时用键盘代替说话：界面下方输入框 + 回车发送）
 #
@@ -353,5 +360,6 @@ room:
 ui:
   direction: mine          # mine=我说的话 | theirs=别人说 | dual=双向同时
   chatbox: true            # 输出勾选：chatbox 气泡
+  chatbox_text: translated # chatbox 气泡显示什么：translated=译文（默认）| source=原文（ASR 识别结果）
   overlay: false           # 输出勾选：手腕屏（需要 SteamVR 在跑）
   desktop_overlay: false   # 输出勾选：桌面字幕（PC 桌面模式，贴在 VRChat 窗口上）

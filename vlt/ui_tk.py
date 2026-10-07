@@ -179,7 +179,17 @@ def apply_theme(root) -> None:
         style = ttk.Style(root)
         style.theme_use("clam")
 
-        style.configure(".", font=FONT_UI, background=PANEL, foreground=TEXT,
+        # ⚠️ 这里**故意不设 foreground**（前景色一律逐控件显式配，见下）。
+        # 原因：Tk 自带的文件对话框会从**根样式**读前景 —— Tcl 侧 `ttk::style lookup . -foreground`
+        # （updir 箭头图标），而它的文件列表（`::tk::IconList`）把每条文字的 item `-fill`
+        # 也取成这个值，可那块 canvas 的底色是**硬编码的 #ffffff**、没有任何选项能改。
+        # 实测：全局设了近白前景之后，文件列表的 `-fill` 恰好等于 TEXT(#e8eaee) → 白底白字，
+        # 且**改不掉**（建窗时读取，导航一次就重画一次）。所以宁可让未配色的 ttk 控件回落
+        # clam 的默认深色，也不要为了自己方便把全局前景染白。
+        # 代价已核查：本模块下面用到的每个类都显式配了前景（TLabel/各具名 Label/TButton/
+        # 具名 Button/TCombobox/TEntry/TSpinbox/TMenubutton/TCheckbutton/TNotebook.Tab），
+        # 因此我们自己的界面不受影响（有截图逐像素比对 + tests/test_ui_theme_contrast.py 钉住）。
+        style.configure(".", font=FONT_UI, background=PANEL,
                         bordercolor=BORDER, focuscolor=PANEL)
         style.configure("TFrame", background=PANEL)
         style.configure("TLabel", background=PANEL, foreground=TEXT)
@@ -265,17 +275,100 @@ def apply_theme(root) -> None:
         root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
         root.option_add("*TCombobox*Listbox.font", FONT_UI)
 
-        # 滚动条：细、暗、无箭头，跟聊天区融合
-        style.layout("Vertical.TScrollbar",
-                     [("Vertical.Scrollbar.trough",
-                       {"children": [("Vertical.Scrollbar.thumb",
-                                      {"expand": "1", "sticky": "nswe"})],
-                        "sticky": "ns"})])
-        style.configure("Vertical.TScrollbar", background=SURFACE, troughcolor=BG,
-                        bordercolor=BG, darkcolor=BG, lightcolor=BG,
-                        arrowcolor=TEXT_DIM, gripcount=0)
-        style.map("Vertical.TScrollbar",
-                  background=[("pressed", ACCENT_ACTIVE), ("active", SURFACE_HOVER)])
+        # ---- 通用输入区（Entry / Spinbox）----
+        # ⚠️ 上面 style.configure(".", foreground=TEXT) 是**全局**的：凡是没有显式配
+        #    `fieldbackground` 的 ttk 输入类，输入区会回落 clam 的**白色**默认底，
+        #    配上这份近白前景就是「白底白字」，内容完全看不见。
+        #    实测（ttk::style lookup）：修这条之前 TEntry/TSpinbox 的 fieldbackground 都是
+        #    空串，而 Key.TEntry/TCombobox 因为显式配过所以正常 —— 这正是「API key、OSC
+        #    端口没事，麦克风代理的两个缓冲框看不见」的原因（那两个是 ttk.Spinbox，
+        #    全仓库唯一没写 style= 的输入控件）。
+        #    所以：TEntry / TSpinbox 必须**作为基类**配深色，而不是只补一个具名样式 ——
+        #    别名样式（Key.TEntry）会覆盖这里的每一项，外观逐像素不变。
+        style.configure("TEntry", fieldbackground=SURFACE, background=SURFACE,
+                        foreground=TEXT, insertcolor=TEXT, bordercolor=BORDER,
+                        lightcolor=SURFACE, darkcolor=SURFACE,
+                        selectbackground=ACCENT, selectforeground="#ffffff",
+                        padding=(8, 4))
+        style.map("TEntry",
+                  bordercolor=[("focus", ACCENT), ("active", SURFACE_HOVER)],
+                  fieldbackground=[("disabled", BG), ("readonly", SURFACE)],
+                  foreground=[("disabled", TEXT_DIM), ("readonly", TEXT)])
+        # Spinbox 另有上下两个箭头元素（Spinbox.uparrow/downarrow），它们认 -background
+        # 与 -arrowcolor —— 只配 fieldbackground 的话箭头仍是 clam 的浅色小块。
+        style.configure("TSpinbox", fieldbackground=SURFACE, background=SURFACE,
+                        foreground=TEXT, insertcolor=TEXT, arrowcolor=TEXT_DIM,
+                        bordercolor=BORDER, lightcolor=SURFACE, darkcolor=SURFACE,
+                        selectbackground=ACCENT, selectforeground="#ffffff",
+                        padding=(8, 4))
+        style.map("TSpinbox",
+                  bordercolor=[("focus", ACCENT), ("active", SURFACE_HOVER)],
+                  fieldbackground=[("disabled", BG), ("readonly", SURFACE)],
+                  foreground=[("disabled", TEXT_DIM), ("readonly", TEXT)],
+                  arrowcolor=[("disabled", TEXT_MUTED), ("active", TEXT)])
+
+        # 菜单按钮（TMenubutton）：我们自己的界面一处都没用，但 **Tk 自带的文件对话框**
+        # 用 ttk::menubutton 画「Directory:」那一行 —— 不配就是 clam 浅底 + 我们的近白字，
+        # 整行看不清（用户截图里的实况）。配齐后它和 TCombobox 一个观感。
+        style.configure("TMenubutton", background=SURFACE, foreground=TEXT,
+                        arrowcolor=TEXT_DIM, bordercolor=BORDER,
+                        lightcolor=SURFACE, darkcolor=SURFACE, padding=(8, 4))
+        style.map("TMenubutton",
+                  background=[("pressed", SURFACE_HOVER), ("active", SURFACE_HOVER),
+                              ("disabled", "#20242d")],
+                  foreground=[("disabled", TEXT_MUTED)],
+                  arrowcolor=[("active", TEXT)],
+                  bordercolor=[("focus", ACCENT), ("active", SURFACE_HOVER)])
+
+        # 勾选框（TCheckbutton）：同理，我们自己的勾选框全是经典 tk.Checkbutton
+        # （见 gui_layout._indicator_kw），这条只为 Tk 文件对话框的「显示隐藏文件」而配。
+        # 指示器是独立元素，认 -indicatorbackground/-indicatorforeground/上下边框色 ——
+        # 只配 background 的话那个小方块仍是白的。
+        style.configure("TCheckbutton", background=PANEL, foreground=TEXT,
+                        focuscolor=PANEL, indicatorbackground=SURFACE,
+                        indicatorforeground=TEXT, upperbordercolor=BORDER,
+                        lowerbordercolor=BORDER)
+        style.map("TCheckbutton",
+                  background=[("active", PANEL)],
+                  foreground=[("disabled", TEXT_MUTED)],
+                  indicatorbackground=[("disabled", BG), ("selected", ACCENT)],
+                  indicatorforeground=[("disabled", TEXT_MUTED)])
+
+        # ---- 经典 Tk 控件（option database）----
+        # 同样是「只为 Tk 自带的文件对话框」而配：它的 Directory / Files of type 下拉是
+        # 经典 Menu、边缘是经典 Scrollbar、外框是经典 Toplevel —— 这些不吃 ttk 样式，
+        # 只能走 option database。
+        # 影响面已核查：本仓库代码里一处都没用经典 Scrollbar，唯一的 tk.Menu 是右键编辑
+        # 菜单（显式配色，显式配的选项优先于 option database，不受影响）。
+        # 更具体的 *TCombobox*Listbox.* 仍优先 → 下拉框的配色不动。
+        root.option_add("*Listbox.background", SURFACE)
+        root.option_add("*Listbox.foreground", TEXT)
+        root.option_add("*Listbox.selectBackground", ACCENT)
+        root.option_add("*Listbox.selectForeground", "#ffffff")
+        root.option_add("*Menu.background", SURFACE)
+        root.option_add("*Menu.foreground", TEXT)
+        root.option_add("*Menu.activeBackground", ACCENT)
+        root.option_add("*Menu.activeForeground", "#ffffff")
+        root.option_add("*Menu.borderWidth", 0)
+        root.option_add("*Scrollbar.background", SURFACE)
+        root.option_add("*Scrollbar.troughColor", BG)
+        root.option_add("*Scrollbar.activeBackground", SURFACE_HOVER)
+
+        # 滚动条：细、暗、无箭头，跟聊天区融合。
+        # 两个方向都配：垂直的是我们自己在用（聊天区 / 设置页 / 词库），
+        # 水平的是 **Tk 文件对话框** 的文件列表在用（我们代码里用不到，
+        # 但它是灰白的一整条）。同一份取值写两遍容易漂移，所以用循环。
+        for _orient, _sticky in (("Vertical", "ns"), ("Horizontal", "ew")):
+            style.layout(f"{_orient}.TScrollbar",
+                         [(f"{_orient}.Scrollbar.trough",
+                           {"children": [(f"{_orient}.Scrollbar.thumb",
+                                          {"expand": "1", "sticky": "nswe"})],
+                            "sticky": _sticky})])
+            style.configure(f"{_orient}.TScrollbar", background=SURFACE, troughcolor=BG,
+                            bordercolor=BG, darkcolor=BG, lightcolor=BG,
+                            arrowcolor=TEXT_DIM, gripcount=0)
+            style.map(f"{_orient}.TScrollbar",
+                      background=[("pressed", ACCENT_ACTIVE), ("active", SURFACE_HOVER)])
 
         # 设置弹窗的分页标签（Notebook）：clam 的默认 tab 是浅灰渐变，
         # 深色界面里就是一块亮斑（和「ttk.Entry 默认白底」同一类坑），必须逐状态配色。
@@ -308,3 +401,125 @@ def apply_theme(root) -> None:
                              ("!selected !active", PANEL)],
                   bordercolor=[("selected", BORDER), ("active", BORDER),
                                ("!selected !active", BORDER)])
+
+
+# ================================================================ Tk 自带文件对话框
+
+#: Tk 的文件列表是 C 实现的 `::tk::IconList`：它把每条文件名的 canvas item `-fill`
+#: 取成**根 ttk 样式的前景**（所以上面 `.` 才刻意不设前景，否则是白底白字），
+#: 但那块 canvas 的底色是**建窗时写死的 `#ffffff`** —— 没有对应选项、也吃不到
+#: option database（实测 `*Canvas.background` 对新建 canvas 有效、对它无效），
+#: `::tk::IconList` 自身只暴露 `-font`。
+#: 于是「整窗深色」只剩一条路：等它建好之后把这块 canvas 改色。对话框是模态的，
+#: 但 Tk 的 after 在它的嵌套事件循环里照常触发，所以用一条轮询兜住（导航一次会重画
+#: 条目，所以要反复补，不是补一次就完）。
+#:
+#: ⚠️ **对话框挂在哪，取决于 `-parent`**（tkfbox.tcl 110-118）：
+#:     `-parent .`          → `.__tk_filedialog`
+#:     `-parent .toplevel`  → `.toplevel.__tk_filedialog`
+#: 我们自己的调用点是「设置弹窗 → 导出日志压缩包」，传的 `parent` 是**设置弹窗**，
+#: 所以它挂在设置窗下面。第一版这里写死了 `winfo children "."` + `.__tk_filedialog`，
+#: 结果一个都找不到、列表保持浅色（真机复现过）—— 所以下面一律**从根递归搜**，
+#: 不假设它在谁下面。
+_DIALOG_LEAF = "__tk_filedialog"                # Tk 给文件名对话框起的窗口名（8.6 / 9.x 一致）
+_CANVAS_LEAF = "cHull.canvas"                   # 图标列表那块 canvas 的固定末段
+_SEARCH_BUDGET = 5000                           # 搜索上限（控件数），防止异常结构下遍历过久
+
+
+def _find_file_dialog_roots(window) -> list[str]:
+    """整棵树里所有 Tk 文件名对话框的窗口路径（`-parent` 决定它挂在哪一层）。"""
+    found: list[str] = []
+    stack, seen = ["."], 0
+    while stack and seen < _SEARCH_BUDGET:
+        parent = stack.pop()
+        try:
+            children = window.tk.call("winfo", "children", parent)
+        except Exception:                       # noqa: BLE001  控件已销毁
+            continue
+        for child in children:
+            child = str(child)
+            seen += 1
+            stack.append(child)
+            if child.rsplit(".", 1)[-1] == _DIALOG_LEAF:
+                found.append(child)
+    return found
+
+
+def _find_icon_canvas(window, dialog: str) -> str | None:
+    """对话框里那块图标列表 canvas 的路径（按名字找，不写死整条路径）。"""
+    stack, seen = [dialog], 0
+    while stack and seen < _SEARCH_BUDGET:
+        parent = stack.pop()
+        try:
+            children = window.tk.call("winfo", "children", parent)
+        except Exception:                       # noqa: BLE001
+            continue
+        for child in children:
+            child = str(child)
+            seen += 1
+            if child.endswith(_CANVAS_LEAF):
+                return child
+            stack.append(child)
+    return None
+
+
+def darken_file_dialog(window) -> int:
+    """把 Tk 文件对话框里那块写死白底的图标列表改成深色。返回改到的 canvas 数。
+
+    纯配色，**任何一步失败都静默跳过**（宁可是白的，也不能因为改色把对话框弄坏）。
+    独立成函数是为了能脱离真对话框单测（tests/test_ui_theme_contrast.py 造同形状的树）。
+    """
+    changed = 0
+    for dialog in _find_file_dialog_roots(window):
+        canvas = _find_icon_canvas(window, dialog)
+        if canvas is None:
+            continue
+        try:
+            window.tk.call(canvas, "configure", "-background", SURFACE,
+                           "-selectbackground", ACCENT, "-selectforeground", "#ffffff")
+        except Exception:                       # noqa: BLE001  不是这个版本的结构
+            continue
+        if str(window.tk.call(canvas, "cget", "-background")) != SURFACE:
+            continue                            # 没吃进去（Tk 改了实现）→ 不谎报
+        changed += 1
+        try:
+            for item in window.tk.splitlist(window.tk.call(canvas, "find", "all")):
+                if window.tk.call(canvas, "type", item) == "text":
+                    window.tk.call(canvas, "itemconfigure", item, "-fill", TEXT)
+        except Exception:                       # noqa: BLE001  条目列表取不到就算了
+            pass
+    return changed
+
+
+def watch_file_dialog(root, interval_ms: int = 150, give_up_after: int = 80) -> None:
+    """在打开文件对话框**之前**调用：轮询到它出现就补色，它一关就自动停。
+
+    `give_up_after` = 对话框始终没出现时最多轮询多少拍（默认 ~12s），到点自己退出，
+    绝不留下一条永不结束的 after 链。
+    """
+    try:
+        # Windows / macOS 用的是**系统原生**对话框（tk_getSaveFile 在那里是内建命令，
+        # tkfbox.tcl 那套 Tcl 对话框根本不会被创建）→ 没有可补色的树，直接别挂轮询。
+        if str(root.tk.call("tk", "windowingsystem")) != "x11":
+            return
+    except Exception:                           # noqa: BLE001  解释器没了
+        return
+
+    state = {"seen": False, "ticks": 0}
+
+    def tick() -> None:
+        state["ticks"] += 1
+        try:
+            alive = bool(_find_file_dialog_roots(root))     # 用同一个搜索：它不一定挂在根下
+        except Exception:                       # noqa: BLE001
+            return
+        if alive:
+            state["seen"] = True
+            darken_file_dialog(root)
+            root.after(interval_ms, tick)
+            return
+        # 还没出现 → 继续等；见过又没了（= 用户关了对话框）或等太久 → 收工
+        if not state["seen"] and state["ticks"] < give_up_after:
+            root.after(interval_ms, tick)
+
+    root.after(interval_ms, tick)

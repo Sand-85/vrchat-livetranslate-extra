@@ -386,20 +386,22 @@ def main() -> int:
 
 
 def _make_swapchain(session, glx):
-    """建一个 RGBA8 swapchain 并返回 (swapchain, gl 纹理 id 列表)。"""
+    """建一个 8 位 RGBA swapchain 并返回 (swapchain, gl 纹理 id 列表)。"""
     import xr
     formats = list(xr.enumerate_swapchain_formats(session))
     print(f"     可用 swapchain 格式：{[hex(f) for f in formats[:12]]}"
           f"{' …' if len(formats) > 12 else ''}", flush=True)
-    # ⚠️ 优先 GL_RGBA8(0x8058)，其次 sRGB 变体 —— 面板要的就是一张普通 RGBA 贴图。
-    #    直接取 formats[0] 有风险：可能是 GL_RGBA16F 之类，我们按 8 位上传会错位。
-    for cand in (0x8058, 0x8C43, 0x8059):
+    # ⚠️ 优先 **sRGB 变体 GL_SRGB8_ALPHA8(0x8c43)**：合成器按线性合成、输出前再编码
+    #    （Monado layer.comp 的 from_linear_to_srgb），层纹理标成线性就会双重 gamma
+    #    → 面板黑不下去。次选 GL_RGBA8（那时的正确性靠上传前预线性化）。
+    #    两条路都必须 8 位：直接取 formats[0] 可能是 RGBA16F，按 8 位上传会错位。
+    for cand in (0x8C43, 0x8058, 0x8059):
         if cand in formats:
             want = cand
             break
     else:
         want = formats[0] if formats else 0
-        print(f"     ⚠️ 没找到首选的 RGBA8/sRGB8，退回 {hex(want)}", flush=True)
+        print(f"     ⚠️ 没找到首选的 sRGB8/RGBA8，退回 {hex(want)}", flush=True)
     sc = xr.create_swapchain(session, xr.SwapchainCreateInfo(
         format=want, sample_count=1, width=glx.width, height=glx.height,
         face_count=1, array_size=1, mip_count=1))

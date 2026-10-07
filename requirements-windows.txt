@@ -4,6 +4,7 @@
 -r requirements.txt
 
 PyAudioWPatch>=0.2.12.8   # WASAPI loopback 采集（听别人说话）—— 必须是这个分支，不是 pyaudio
+sounddevice>=0.4.6        # 麦克风采集 + TTS 试听（Windows 侧；Linux 已改走 PipeWire 原生 pw-record/pw-cat）
 openvr>=1.26.701          # SteamVR overlay（手腕屏）
 #
 # ⚠️ 这两个都是 Windows 独占，**不要**加进公共 requirements.txt：

@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import sys
+import time
 
-from .config import load_config
+from .config import Direction, load_config
 from .engine import Engine, EngineEvents
 from .paths import BUNDLE_DIR
 
@@ -47,3 +48,25 @@ def run_self_test() -> int:
     print(f"GUI_SELFTEST_FAIL: source={has_source} target={has_target} rows={len(results)}",
           file=sys.stderr)
     return 1
+
+
+def run_self_test_dual(gui) -> int:
+    """双向同时验收（两个 PCM 驱动两个引擎）。"""
+    zh = BUNDLE_DIR / "testdata" / "zh_test_16k.pcm"; en = BUNDLE_DIR / "testdata" / "en_test_16k.pcm"
+    for p in (zh, en):
+        if not p.exists(): print(f"GUI_SELFTEST_DUAL_FAIL: 测试音频不存在 {p}", file=sys.stderr); return 1
+    cfg = load_config(); cfg.directions.setdefault("mine", Direction()); cfg.directions.setdefault("theirs", Direction())
+    cfg.output.setdefault("audio", {})["enabled"] = False   # 我们的：自检不碰真实音频设备
+    cfg.directions["mine"].source_lang = "zh"; cfg.directions["mine"].target_lang = "en"
+    cfg.directions["theirs"].source_lang = "en"; cfg.directions["theirs"].target_lang = "zh"
+    engines = []
+    for who, direction, pcm_path in (("mine", "mine", zh), ("theirs", "theirs", en)):
+        def on_text(src, txt, final, who=who): gui._add_text(src, txt, final, who=who)
+        events = EngineEvents(on_text=on_text, on_status=lambda lvl, msg, who=who: print(f"[dualtest][{who}][{lvl}] {msg}"))
+        eng = Engine(cfg=cfg, direction=direction, source=f"pcm:{pcm_path}", sinks={"chatbox"}, events=events, dry_run=True)
+        engines.append(eng); eng.start(); time.sleep(0.3)
+    for eng in engines: eng.join(timeout=90)
+    for eng in engines: eng.stop(timeout=5)
+    mine = [b for b in gui._bubbles if b.who == "mine"]; theirs = [b for b in gui._bubbles if b.who == "theirs"]
+    if mine and theirs: print(f"GUI_SELFTEST_DUAL_OK mine={len(mine)} theirs={len(theirs)}"); return 0
+    print(f"GUI_SELFTEST_DUAL_FAIL: mine={len(mine)} theirs={len(theirs)}", file=sys.stderr); return 1

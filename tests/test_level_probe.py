@@ -579,6 +579,7 @@ def _gui(fake_chunks=(), **src_kw):  # noqa: ANN001, ANN202
     """
     import vlt.config as config_mod
     import vlt.gui as gui_mod
+    import vlt.gui_audio as gui_audio_mod
 
     open_error = src_kw.pop("open_error", None)
     state: dict = {"opens": 0, "sources": []}
@@ -596,7 +597,11 @@ def _gui(fake_chunks=(), **src_kw):  # noqa: ANN001, ANN202
         return LevelProbe(opener=_opener, read_timeout=0.05, **kw)
 
     saved_env = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME")}
-    saved_cfg = (config_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG, gui_mod.LevelProbe)
+    # ⚠️ 探针的实例化已随 GUI 拆分移到 gui_audio.py（`from .level_probe import LevelProbe`
+    # 后 `LevelProbe(device_name=...)`），所以桩必须打在 gui_audio 模块上；
+    # gui_mod.LevelProbe 一并桩只是兼容旧引用（现在不走到）。
+    saved_cfg = (config_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG,
+                 gui_mod.LevelProbe, gui_audio_mod.LevelProbe)
     env_tmp = Path(tempfile.mkdtemp(prefix="vlt-level-env-"))
     os.environ["USERPROFILE"] = str(env_tmp)
     os.environ["HOME"] = str(env_tmp)
@@ -605,6 +610,7 @@ def _gui(fake_chunks=(), **src_kw):  # noqa: ANN001, ANN202
     config_mod.DEFAULT_CONFIG = cfg_path
     gui_mod.DEFAULT_CONFIG = cfg_path
     gui_mod.LevelProbe = _factory                            # type: ignore[assignment]
+    gui_audio_mod.LevelProbe = _factory                      # type: ignore[assignment]
     gui = None
     try:
         gui = gui_mod.TranslationGUI()
@@ -620,7 +626,8 @@ def _gui(fake_chunks=(), **src_kw):  # noqa: ANN001, ANN202
                 gui._root.destroy()                          # noqa: SLF001
             except Exception:  # noqa: BLE001
                 pass
-        config_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG, gui_mod.LevelProbe = saved_cfg
+        config_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG, gui_mod.LevelProbe, \
+            gui_audio_mod.LevelProbe = saved_cfg
         for k, v in saved_env.items():
             if v is None:
                 os.environ.pop(k, None)

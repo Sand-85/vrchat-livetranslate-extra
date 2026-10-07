@@ -85,6 +85,42 @@ def test_diagnostic_block_shape() -> None:
     print(f"  诊断块逐行可读 OK（{len(lines)} 行）")
 
 
+def test_logging_info_reaches_the_log_file() -> None:
+    """`logging` 的 **INFO** 也必须落进日志文件。
+
+    为什么必须有这条：`logging.basicConfig(level=INFO)` 只在 `openxr_overlay` 的
+    `--smoke` 分支里调用。GUI 跑起来时没人配 logging，root 只剩 `logging.lastResort`
+    （级别 **WARNING**）—— 于是 `[overlay:xr] 会话就绪：… format=0x…`、
+    `[vmic] 虚拟声卡就绪：…` 这些**只以 INFO 打出的关键诊断一行都进不了日志**。
+    而 `docs/GUIDE.linux.md` 的排障表（判断「面板黑不下去」的双重 gamma）与
+    《平台约束记录》§十一 正是把用户指到这些行上 —— 指向一行永远不会出现的日志 = 白指。
+
+    这条用例**最后跑**：`install()` 会把本进程的 stdout/stderr 换成 Tee。
+    """
+    import logging
+    import tempfile
+
+    from vlt import crashlog
+
+    log_dir = Path(tempfile.mkdtemp(prefix="vlt-crashlog-"))
+    log_path = crashlog.install(log_dir, "logtest")
+    try:
+        logging.getLogger("vlt.output.openxr_overlay").info(
+            "[overlay:xr] 会话就绪：1024x1024 format=0x2b（sRGB）")
+        logging.getLogger("vlt.platform.linux").info(
+            "[vmic] 虚拟声卡就绪：vlt_mic_sink（可写入）")
+        for _h in logging.getLogger().handlers:
+            _h.flush()
+    finally:
+        crashlog.close()
+
+    text = log_path.read_text(encoding="utf-8")
+    assert "[overlay:xr] 会话就绪：1024x1024 format=0x2b" in text, \
+        f"logging 的 INFO 没进日志文件：{text!r}"
+    assert "[vmic] 虚拟声卡就绪" in text, \
+        f"platform/linux.py 的 INFO 没进日志文件：{text!r}"
+
+
 if __name__ == "__main__":
     print("test_crashlog_stamp:")
     test_single_line_gets_stamp()
@@ -92,4 +128,6 @@ if __name__ == "__main__":
     test_partial_line_not_split()
     test_consecutive_blank_lines_ok()
     test_diagnostic_block_shape()
+    test_logging_info_reaches_the_log_file()
+    print("  logging INFO → 日志文件 OK")
     print("ALL PASSED")

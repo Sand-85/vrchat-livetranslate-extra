@@ -47,13 +47,17 @@
 # 机器上必然有，带一份只是白胖；所以构建后**反向删掉**下面两组（见第 4 步）：
 #   * **X11 客户端栈**：libX11 / libXext / libXrender / libXau / libXdmcp / libXss / libXft
 #     —— 这套 Wayland 会话（XWayland）也必须有，没有的话 GUI 本来就跑不起来；
-#   * **音频链路**：libportaudio / libasound / libjack / libpipewire ——
-#     麦克风走 sounddevice→PortAudio（GUIDE.linux 前置条件第 5 条要求宿主装 portaudio；
-#     sounddevice 是惰性导入的，宿主缺它只掉麦克风，不影响启动）；
-#     **整个音频依赖都交还给宿主**：程序对 PipeWire 只用 `pw-dump/pw-record/pw-cat`
-#     命令行，包里那份 libpipewire 没有任何代码调用（构建期有「无引用者」断言兜底）。
+#   * **libpipewire** —— 程序对 PipeWire 只用 `pw-dump/pw-record/pw-cat` 命令行，
+#     包里那份没有任何代码调用（构建期有「无引用者」断言兜底）。
 #   * **保留**：fontconfig/freetype/png/expat/brotli（字体渲染）、libstdc++/libgcc
 #     （numpy/OpenBLAS 的 ABI，不赌宿主版本）。
+#
+# ⚠️ **不再有 `libportaudio / libasound / libjack`**（2026-10）：Linux 上 PortAudio 已彻底出局 ——
+# 麦克风走原生 `pw-record`（`vlt/platform/linux.py: LinuxMicSource`），TTS 试听走原生
+# `pw-cat --playback`（`vlt/ui_text._play_pcm_local`）。于是 `sounddevice` 也被 `--exclude-module`
+# 排除，PyInstaller 分析里根本不会出现 PortAudio 及其依赖 —— 既不用往包里收、也不用再要求构建机装它们。
+# （`SoundDeviceMicSource` 已移到 `vlt/platform/win.py`；win.py 同样被 `--exclude-module` 剔除。）
+#
 # 裁剪后会做两道断言：① 宿主的 ldconfig 真的能提供这些 soname；② 包里其余 ELF 的
 # `ldd` 没有 `not found`。⚠️ 运行机缺哪个，症状都是「那一层加载失败」，见 GUIDE.linux。
 #
@@ -242,8 +246,8 @@ HIDDEN=(
     vlt.platform vlt.platform.audio vlt.platform.base vlt.platform.linux
     vlt.platform.wayland vlt.platform.x11 vlt.platform.overlay_pixels   # 桌面字幕原生窗（layer-shell / ARGB）+ 共用像素工具
     vlt.session vlt.session.base vlt.session.qwen38
-    # 第三方：按需导入 / 运行时加载
-    sounddevice miniaudio _miniaudio pythonosc websockets yaml
+    # 第三方：按需导入 / 运行时加载（音频第三方只在 Windows 侧，见文件头「反向裁剪」）
+    miniaudio _miniaudio pythonosc websockets yaml
     PIL PIL.Image PIL.ImageDraw PIL.ImageTk numpy xr
     # ★ Wayland 下 PyOpenGL 会挑 `egl` 平台插件（OpenGL/platform/__init__.py 的
     #   plugin 匹配：XDG_SESSION_TYPE=wayland / WAYLAND_DISPLAY → "wayland"→EGLPlatform）。
@@ -259,9 +263,9 @@ HIDDEN=(
     PIL._tkinter_finder
 )
 # 带二进制/数据文件的库 → 连数据一起收
-COLLECT_ALL=(xr sounddevice pythonosc)
+COLLECT_ALL=(xr pythonosc)
 # Linux 产物里**不允许**出现 Windows 独占实现（与 build_exe.py 的 EXCLUDE_WIN 镜像）
-EXCLUDES=(vlt.platform.win vlt.output.openvr_overlay openvr pyaudiowpatch pycaw comtypes)
+EXCLUDES=(vlt.platform.win vlt.output.openvr_overlay openvr pyaudiowpatch pycaw comtypes sounddevice)
 
 PYI_ARGS=(
     --noconfirm --clean --noupx --onedir
@@ -436,8 +440,7 @@ fi
 # PyInstaller 默认把依赖闭包全带进 `_internal/`；这两组机器上必然有，带一份只是白胖。
 HOST_LIBS=(
     libX11 libXext libXrender libXau libXdmcp libXss libXft   # X11 客户端栈（XWayland 也在用）
-    libportaudio libasound libjack                            # 音频链路（麦克风）—— 整条交宿主
-    libpipewire                                               # 同上：程序只用宿主 pw-* CLI
+    libpipewire                                               # 程序只用宿主 pw-* CLI，包里那份无人调用
 )
 for _n in "${HOST_LIBS[@]}"; do
     # ① 构建机必须真的能提供这个 soname —— 否则包在**任何**机器上都少一个库。
@@ -559,6 +562,9 @@ fi
 
 # ---------------------------------------------------------------- 7. 完成
 step "7/7 完成"
+# ⚠️ 本段是**未加引号的 heredoc**：`$VAR` / `$(...)` / 反引号都会被 shell 展开。要输出字面量的
+#    代码格式（反引号）必须写成 \`...\`，否则会被**当命令执行**（实测踩过：`pw-record` 真被跑了、
+#    还打印了帮助，文案被吞成空）。新增含反引号的行时务必转义。
 cat <<EOF
 产物：$OUT_IMG（$(du -h "$OUT_IMG" | cut -f1)）
 
@@ -570,8 +576,7 @@ cat <<EOF
   * 手腕屏还需要 **OpenXR 运行时已起 + 头显已连**（Monado / WiVRn）
   * 译音虚拟声卡由程序运行时自己声明，**不需要**事先装 VB-Cable 之类
   * 需要宿主自带一套中日韩字体
-  * X11 基础库、以及**整条音频链路**（portaudio/ALSA/JACK/PipeWire）都由宿主提供：
-    麦克风需要宿主装 portaudio（Arch: pacman -S portaudio / Debian: apt install libportaudio2），
-    少它只掉麦克风，不影响启动；系统声/虚拟声卡本来就走宿主的 PipeWire CLI（pw-*）
+  * X11 基础库由宿主提供；音频**全部走宿主的 PipeWire**（\`pw-dump/pw-record/pw-cat\`）：
+    麦克风也走 \`pw-record\`，**不需要** portaudio / JACK / PulseAudio 兼容层
   * 详见 GUIDE.linux.md
 EOF

@@ -41,6 +41,11 @@ def _dups_in_body(body: list[ast.stmt]) -> list[tuple[str, list[int]]]:
     seen: dict[str, list[int]] = {}
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # property 的 setter/deleter 与 getter **同名是合法成对定义**（`@x.setter`），
+            # 不是「后者静默覆盖前者」→ 跳过（否则会把 `@property` + `@x.setter` 误判成重复）。
+            if any(isinstance(d, ast.Attribute) and d.attr in ("setter", "deleter")
+                   for d in getattr(node, "decorator_list", [])):
+                continue
             seen.setdefault(node.name, []).append(node.lineno)
     return [(name, lines) for name, lines in sorted(seen.items()) if len(lines) > 1]
 

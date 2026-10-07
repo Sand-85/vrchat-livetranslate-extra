@@ -357,6 +357,7 @@ def _capture_statuses(gui) -> list[tuple[str, str]]:      # noqa: ANN001
         gui._last_status_level = level
 
     gui._set_status = _fake                          # type: ignore[method-assign]
+    gui._engine_ctx.set_status_fn = _fake             # 同步更新 EngineCtx 的回调
     return seen
 
 

@@ -1,9 +1,9 @@
 """音频设备枚举与名称解析。
 
 三类设备，三种枚举来源：
-  - 麦克风（输入）：sounddevice / PipeWire 的 `Audio/Source`
+  - 麦克风（输入）：Windows = sounddevice/WASAPI；Linux = PipeWire `Audio/Source`（播放走 `pw-record`）
   - VRChat 音频（loopback）：Windows = WASAPI loopback；Linux = PipeWire 的 `Audio/Sink`
-  - 译音输出（输出）：sounddevice / PipeWire 的 `Audio/Sink`
+  - 译音输出（输出）：Windows = sounddevice；Linux = PipeWire 的 `Audio/Sink`
 
 **真实设备从 `vlt/platform/` 取，本模块只负责「解释」**：
 （⚠️ 必须写 `platform.device_backend()` 而不是 `from .platform import device_backend` ——
@@ -17,8 +17,9 @@
 名称解析顺序：全名精确匹配 → 不区分大小写 → 去重后的子串匹配 → 解析不到返回 None。
 配置里只存纯设备名字符串，绝不存设备索引（索引会随插拔/重启变化）。
 
-> PortAudio 的串行锁（`PA_LOCK`）搬到了 `vlt/platform/base.py` —— 它现在是
-> 「两个平台的麦克风枚举共用同一把锁」的问题，不再属于本模块。
+> PortAudio 的串行锁（`PA_LOCK`）搬到了 `vlt/platform/base.py` —— 它现在服务于
+> **Windows** 侧（sounddevice/PyAudio 的枚举与开流共用一把锁），不再属于本模块。
+> （Linux 枚举走 `pw-dump`，不碰 PortAudio。）
 """
 from __future__ import annotations
 
@@ -34,6 +35,8 @@ class DeviceInfo:
     sample_rate: int
     channels: int
     kind: str  # "input" | "output" | "loopback"
+    #: PipeWire 的稳定标识（Linux 输入源有；Windows 无 → ""）。`pw-record --target=` 要的就是它。
+    node_name: str = ""
 
 
 def enumerate_mic_devices(devices: list[dict] | None = None) -> list[DeviceInfo]:
@@ -53,6 +56,7 @@ def enumerate_mic_devices(devices: list[dict] | None = None) -> list[DeviceInfo]
                     sample_rate=int(d.get("default_samplerate", 0)),
                     channels=int(d.get("max_input_channels", 0)),
                     kind="input",
+                    node_name=str(d.get("node_name", "") or ""),
                 ))
         return result
     except Exception:

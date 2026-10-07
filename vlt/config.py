@@ -224,6 +224,23 @@ def _float_or_default(value, default: float, *, key: str) -> float:
         return default
 
 
+def _int_clamped(value, default: int, *, key: str, lo: int, hi: int) -> int:
+    """带范围的整数配置：非法值 → 留痕 + 回落默认值；越界 → 留痕 + 夹到 [lo, hi]。
+
+    与 `_float_or_default` 同一口径（手写笔误不许让程序起不来、也不许静默带病运行）。
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        print(f"[config] ⚠️ {key}={value!r} 不是整数 → 回落默认值 {default}", flush=True)
+        return default
+    if n < lo or n > hi:
+        clamped = max(lo, min(hi, n))
+        print(f"[config] ⚠️ {key}={n} 超出合理范围 [{lo}, {hi}] → 夹到 {clamped}", flush=True)
+        return clamped
+    return n
+
+
 def _resolve_api_key(api_key: str | None, require_key: bool, slot: str = "qianwen") -> str:
     """取 key；`require_key=False` 时"还没有 key"不抛错，而是返回空串。
 
@@ -357,6 +374,9 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         directions = {"mine": Direction(source_lang="zh", target_lang="en")}
     raw_output = raw.get("output") or {}
     raw_audio = raw_output.get("audio") or {}
+    raw_proxy = raw_audio.get("proxy") or {}
+    if not isinstance(raw_proxy, dict):
+        raw_proxy = {}
     raw_capture = raw.get("capture") or {}
     raw_textin = raw.get("text_input") or {}
     # room 段原样带出（脏值交给 RoomConfig.from_dict 回落 + 留痕）；
@@ -376,6 +396,15 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
             "sample_rate": int(raw_audio.get("sample_rate", 48000)),
             "buffer_ms": int(raw_audio.get("buffer_ms", 300)),
             "max_buffer_ms": int(raw_audio.get("max_buffer_ms", 2000)),
+            # 麦克风代理（两端都支持）：常驻把麦克风直通虚拟声卡，界面一键切「原声/译音」。
+            # ⚠️ passthrough_buffer_ms 的下限不能太小：麦克风输入块约 100ms，缓冲帽小于一个
+            #    输入块会把每块削掉大半 → 严重断续（见 vlt/output/micproxy.py 模块头说明）。
+            "proxy": {
+                "enabled": bool(raw_proxy.get("enabled", True)),
+                "passthrough_buffer_ms": _int_clamped(
+                    raw_proxy.get("passthrough_buffer_ms", 150), 150,
+                    key="output.audio.proxy.passthrough_buffer_ms", lo=60, hi=500),
+            },
         },
         "capture": {
             "mic_device": str(raw_capture.get("mic_device") or ""),

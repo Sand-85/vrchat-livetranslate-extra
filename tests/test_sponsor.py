@@ -15,13 +15,20 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(TESTS))
 
 # 这些用例断言的是中文界面文案（「☕ 赞助」「打开 Ko-fi 赞助页面」「二维码图片缺失」等）。
 # 界面语言会跟随系统语言（CI 与外国机器是英文系统）→ 必须钉死，
 # 否则同一份代码在不同机器上结果不同。产品代码不依赖这个补丁。
 import vlt.i18n as _i18n  # noqa: E402
 _i18n.detect_system_language = lambda: "zh"
+
+# 钉死语言还不够：配置里的 ui.lang 优先于系统语言检测（gui.py）。
+# 开发者本机 config.yaml 若是 lang: en，中文断言就假红 → 统一走沙箱配置。
+from _cfgbox import sandbox_config  # noqa: E402
+sandbox_config(reset=True)
 
 
 def _make_gui():
@@ -35,6 +42,11 @@ def _make_gui():
 def _destroy(gui) -> None:
     try:
         gui._close_sponsor()
+    except Exception:
+        pass
+    try:
+        from vlt import gui_chat
+        gui_chat.cancel_poll(gui._chat_ctx, gui._root)
     except Exception:
         pass
     try:
@@ -214,6 +226,7 @@ def test_about_sponsors_listed() -> None:
     import tkinter.ttk as ttk
 
     import vlt.gui as gui_mod
+    import vlt.gui_settings as gui_settings_mod
 
     gui = _make_gui()
     try:
@@ -239,10 +252,13 @@ def test_about_sponsors_listed() -> None:
               f"（加粗亮字，无底块无描边）")
 
         # 空名单 → 整区不出现（不留一个没有内容的标题）
-        orig = gui_mod.SPONSORS
+        # ⚠️ 渲染逻辑随 GUI 拆分搬到了 gui_settings.py，`if SPONSORS:` 读的是
+        #    gui_settings 模块自己的 SPONSORS（与 gui.SPONSORS 各自 import 自 ui_theme）。
+        #    所以桩必须打在 gui_settings 上，只改 gui_mod.SPONSORS 不生效（拆分回归）。
+        orig = gui_settings_mod.SPONSORS
         frame = ttk.Frame(gui._root)
         try:
-            gui_mod.SPONSORS = ()
+            gui_settings_mod.SPONSORS = ()
             gui._build_settings_about(frame)
             assert not gui._sponsor_names_widgets, "空名单时不该渲染名牌"
             texts = [str(w.cget("text")) for w in frame.winfo_children()
@@ -250,7 +266,7 @@ def test_about_sponsors_listed() -> None:
             assert not any("赞助者" in x for x in texts), f"空名单却留了标题：{texts}"
             print("  ✓ 空名单时不显示这一区（无空标题）")
         finally:
-            gui_mod.SPONSORS = orig
+            gui_settings_mod.SPONSORS = orig
             frame.destroy()
     finally:
         _destroy(gui)

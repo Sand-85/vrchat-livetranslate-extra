@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import faulthandler
+import logging
 import re
 import sys
 import threading
@@ -285,6 +286,32 @@ def install(log_dir: Path, tag: str = "gui") -> Path:
     # 若都去切段/关文件，会互相把对方手里的句柄关掉。stderr 量极小，不单独计。
     sys.stdout = _Tee(_ORIG_STDOUT, _LOG_FILE, log_path=_LOG_PATH, log_dir=log_dir)
     sys.stderr = _Tee(_ORIG_STDERR, _LOG_FILE)
+
+    # 0) 把 `logging` 接到**同一条** stderr Tee 上（= 同一个日志文件）。
+    #
+    # 本仓库绝大多数诊断是 `print()`，但 `vlt/output/openxr_overlay.py` 与
+    # `vlt/platform/linux.py` 用的是 `logging`。GUI 路径下没人调 `logging.basicConfig`
+    # （它只在 `openxr_overlay` 的 `--smoke` `__main__` 里），于是 root 只剩
+    # `logging.lastResort` —— 那个 handler 的级别是 **WARNING**，**所有 log.info 被丢弃**。
+    #
+    # 后果是「文档让人看的行根本不存在」：
+    #   · `[overlay:xr] 会话就绪：… format=0x…`（判断「面板黑不下去」的双重 gamma 靠它）
+    #   · `[overlay:xr] ✅ 已挂到 <锚点>（… 会话状态 …）`
+    #   · `[vmic] 虚拟声卡就绪：vlt_mic_sink（可写入）/ vlt_mic_source（虚拟麦）`
+    # 全都只以 INFO 打出 —— GUI 日志里一行都看不到，用户只能靠肉眼，而
+    # `docs/GUIDE.linux.md` 排障表与《平台约束记录》§十一 恰恰把用户指到这些行上。
+    #
+    # 格式只留消息体（`%(message)s`），与满屏 print 行风格一致；不覆盖已有的显式配置。
+    try:
+        _root_log = logging.getLogger()
+        if not _root_log.handlers:
+            _h = logging.StreamHandler(sys.stderr)      # 就是上面那个 Tee
+            _h.setFormatter(logging.Formatter("%(message)s"))
+            _root_log.addHandler(_h)
+        if _root_log.level in (logging.NOTSET, logging.WARNING):
+            _root_log.setLevel(logging.INFO)
+    except Exception:
+        pass
 
     # 1) 原生崩溃：段错误 / 访问违规时 dump 所有线程的 Python 栈
     try:

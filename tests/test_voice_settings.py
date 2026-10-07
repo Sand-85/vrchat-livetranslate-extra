@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import queue
 import sys
 import tempfile
 import threading
@@ -189,6 +190,29 @@ def _destroy(gui) -> None:
 
 def _example_body() -> str:
     return (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+
+
+def _take_voice_preview(gui):
+    """从界面队列里取**试听结果**（`("voice_preview", kind, voice, err)`），取不到返回 None。
+
+    ⚠️ 不能假设「队首就是试听结果」：界面构造期就会往**同一个队列**塞状态消息
+    （`("status", ...)` —— 例如麦克风代理启动/失败、引擎腿状态）。这里按标签取，
+    其余消息原样放回队列，免得把别处的断言搞坏。
+    """
+    rest = []
+    found = None
+    while True:
+        try:
+            item = gui._q.get_nowait()
+        except queue.Empty:
+            break
+        if found is None and item and item[0] == "voice_preview":
+            found = item
+        else:
+            rest.append(item)
+    for it in rest:
+        gui._q.put(it)
+    return found
 
 
 @contextlib.contextmanager
@@ -386,7 +410,9 @@ def test_preview_worker_success_plays_and_reports() -> None:
     with _gui_with_config(_example_body()) as (gui, mod, _cfg):
         with _stubbed_tts(mod) as (calls, played):
             gui._preview_worker("tts", "Cherry", "sk-fake")
-            kind, voice, err = gui._q.get_nowait()[1:]
+            _pv = _take_voice_preview(gui)
+            assert _pv is not None, "没收到试听结果（队列里只有状态消息？）"
+            kind, voice, err = _pv[1:]
             assert (kind, voice, err) == ("tts", "Cherry", ""), f"回主线程的消息不对：{(kind, voice, err)!r}"
             assert played == [b"\x01\x00\x02\x00"], "没把合成音频交给本地播放"
             assert calls["syn"][0]["voice"] == "Cherry"
@@ -404,7 +430,9 @@ def test_preview_speech_uses_omni_model() -> None:
     with _gui_with_config(_example_body()) as (gui, mod, _cfg):
         with _stubbed_tts(mod) as (calls, played):
             gui._preview_worker("speech", "Tina", "sk-fake")
-            kind, voice, err = gui._q.get_nowait()[1:]
+            _pv = _take_voice_preview(gui)
+            assert _pv is not None, "没收到试听结果（队列里只有状态消息？）"
+            kind, voice, err = _pv[1:]
             assert (kind, voice, err) == ("speech", "Tina", ""), f"{(kind, voice, err)!r}"
             assert calls["syn"] == [], "说话侧不该走 qwen3-tts-flash（会 InvalidParameter）"
             assert len(calls["omni"]) == 1 and calls["omni"][0]["voice"] == "Tina", \
@@ -425,7 +453,9 @@ def test_preview_speech_unsupported_voice_reports_friendly() -> None:
     with _gui_with_config(_example_body()) as (gui, mod, _cfg):
         with _stubbed_tts(mod, omni_raises=boom) as (_calls, played):
             gui._preview_worker("speech", "SomeClonedId", "sk-fake")
-            kind, voice, err = gui._q.get_nowait()[1:]
+            _pv = _take_voice_preview(gui)
+            assert _pv is not None, "没收到试听结果（队列里只有状态消息？）"
+            kind, voice, err = _pv[1:]
             assert err and "InvalidParameter" in err
             assert not played, "合成失败就不该播放"
             gui._on_voice_preview_done(kind, voice, err)
@@ -451,7 +481,7 @@ def test_preview_voice_guards() -> None:
         gui._tts_voice_var.set("   ")
         gui._preview_voice("tts")
         assert "请先选择或填写音色" in gui._status_label.cget("text")
-        assert gui._preview_busy is False and gui._q.empty(), "空音色不应起合成"
+        assert gui._preview_busy is False and _take_voice_preview(gui) is None, "空音色不应起合成"
 
         gui._tts_voice_var.set("Cherry")
         orig = gui._resolve_api_key_safe
@@ -461,11 +491,11 @@ def test_preview_voice_guards() -> None:
         finally:
             gui._resolve_api_key_safe = orig
         assert "还没配置 API key" in gui._status_label.cget("text")
-        assert gui._preview_busy is False and gui._q.empty(), "无 key 不应起合成"
+        assert gui._preview_busy is False and _take_voice_preview(gui) is None, "无 key 不应起合成"
 
         gui._preview_busy = True
         gui._preview_voice("tts")
-        assert gui._q.empty(), "忙时应直接忽略，不再排一条"
+        assert _take_voice_preview(gui) is None, "忙时应直接忽略，不再排一条"
         gui._preview_busy = False
     print("  ✓ 前置校验：空音色/无 key 只提示不合成；忙时忽略重复点击")
 

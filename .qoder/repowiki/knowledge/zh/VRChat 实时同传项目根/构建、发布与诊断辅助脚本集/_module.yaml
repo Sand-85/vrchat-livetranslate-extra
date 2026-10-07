@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: scripts
+title: 构建、发布与诊断辅助脚本集
+scope:
+    - scripts/
+source_files: []
+depends_on: []
+related_to:
+    - path: docs
+    - path: vlt_app

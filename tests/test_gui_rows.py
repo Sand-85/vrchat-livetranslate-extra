@@ -408,6 +408,83 @@ def test_entry_right_click_menu() -> bool:
             pass
 
 
+def test_chatbox_text_toggle_button() -> bool:
+    """★ 第二行 chatbox 右边那颗「气泡: 译文 / 原文」按钮：文案随模式、未勾 chatbox 时置灰、
+    点一下**改内存 cfg（引擎每条现读 → 同一次会话内立即生效）**并落盘。
+
+    用**临时 config.yaml**（绝不碰用户真实配置），并把 `vlt.config/gui.DEFAULT_CONFIG`
+    一起指过去 —— `_save_ui_state` 走的是 `vlt.gui.DEFAULT_CONFIG` 这个名字。
+    """
+    import tempfile
+
+    import yaml
+
+    import vlt.config as cfg_mod
+    import vlt.gui as gui_mod
+
+    tmp = Path(tempfile.mkdtemp(prefix="vlt-chatbox-text-"))
+    cfg_path = tmp / "config.yaml"
+    cfg_path.write_text("ui:\n  chatbox: true\n  chatbox_text: translated\n", encoding="utf-8")
+    saved_paths = (cfg_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG)
+    cfg_mod.DEFAULT_CONFIG = cfg_path
+    gui_mod.DEFAULT_CONFIG = cfg_path
+    gui = None
+    try:
+        from vlt.engine import chatbox_text_mode
+        from vlt.gui import TranslationGUI
+
+        gui = TranslationGUI()
+        if gui._update_check_job is not None:
+            gui._root.after_cancel(gui._update_check_job)
+            gui._update_check_job = None
+        gui._root.update()
+
+        btn = gui._chatbox_text_btn
+        assert btn.winfo_manager() == "pack", "切换按钮没被 pack 进输出行"
+        assert gui._chatbox_var.get() is True, "前提：chatbox 勾着"
+
+        # ① 默认态：显示当前模式（译文）+ 可点
+        assert btn.cget("text") == "🌐 气泡: 译文", f"默认文案不对：{btn.cget('text')!r}"
+        assert str(btn.cget("state")) == "normal", f"勾着 chatbox 时按钮不可点：{btn.cget('state')!r}"
+
+        # ② 点一下 → 切到原文：内存 cfg 立刻变（引擎每条现读，无需重启）+ 落盘 + 状态栏回执
+        gui._on_chatbox_text_toggle()
+        assert btn.cget("text") == "📝 气泡: 原文", f"切换后文案不对：{btn.cget('text')!r}"
+        assert gui._cfg.ui.get("chatbox_text") == "source", \
+            f"内存 cfg 没跟着变（引擎读的还是旧的）：{gui._cfg.ui!r}"
+        assert chatbox_text_mode(gui._cfg) == "source", "同一份 cfg 给引擎，模式必须已是 source"
+        assert yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["ui"]["chatbox_text"] == "source", \
+            "没写回 config.yaml"
+        assert "气泡改为显示原文" in str(gui._status_label.cget("text")), \
+            f"状态栏没回执：{gui._status_label.cget('text')!r}"
+
+        # ③ 再点一下 → 切回译文
+        gui._on_chatbox_text_toggle()
+        assert gui._cfg.ui.get("chatbox_text") == "translated"
+        assert btn.cget("text") == "🌐 气泡: 译文"
+        assert yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["ui"]["chatbox_text"] == "translated"
+
+        # ④ 取消勾选 chatbox → 置灰（改了也不生效，放着能点等于骗人）；勾回来立刻可点
+        gui._chatbox_var.set(False)
+        gui._on_chatbox_toggle()
+        assert str(btn.cget("state")) == "disabled", \
+            f"没勾 chatbox 时按钮应置灰，实际 {btn.cget('state')!r}"
+        gui._chatbox_var.set(True)
+        gui._on_chatbox_toggle()
+        assert str(btn.cget("state")) == "normal", f"勾回 chatbox 后按钮应可点：{btn.cget('state')!r}"
+
+        print("  ✓ 气泡文本切换按钮：文案随模式 · 点击改内存 cfg（同会话即时生效）+ 落盘 + 状态栏回执 · "
+              "未勾 chatbox 时置灰（全程用临时 config.yaml）")
+        return True
+    finally:
+        cfg_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG = saved_paths
+        if gui is not None:
+            try:
+                gui._root.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def main() -> int:
     cases = [
         # 一句话：增量 → 增量 → 终版，应只占 1 条气泡
@@ -465,6 +542,11 @@ def main() -> int:
         all_ok &= test_entry_right_click_menu()
     except AssertionError as exc:
         print(f"  ❌ 输入框右键菜单失败：{exc}")
+        all_ok = False
+    try:
+        all_ok &= test_chatbox_text_toggle_button()
+    except AssertionError as exc:
+        print(f"  ❌ 气泡文本切换按钮失败：{exc}")
         all_ok = False
     for i, (events, expect) in enumerate(cases, 1):
         print(f"用例 {i}:")

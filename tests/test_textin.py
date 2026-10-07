@@ -25,12 +25,18 @@ from pathlib import Path
 from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # 「界面接线」用例断言的是中文状态栏文案（无「我说」腿时提示里含「麦克风」）。
 # 界面语言会跟随系统语言（CI 与外国机器是英文系统）→ 必须钉死，
 # 否则同一份代码在不同机器上结果不同。产品代码不依赖这个补丁。
 import vlt.i18n as _i18n  # noqa: E402
 _i18n.detect_system_language = lambda: "zh"
+
+# 钉死语言还不够：配置里的 ui.lang 优先于系统语言检测（gui.py）。
+# 开发者本机 config.yaml 若是 lang: en，中文断言就假红 → 统一走沙箱配置。
+from _cfgbox import sandbox_config  # noqa: E402
+sandbox_config(reset=True)
 
 import vlt.engine as engine_mod
 import vlt.textin as textin

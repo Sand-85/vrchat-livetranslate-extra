@@ -30,6 +30,10 @@ STRINGS: dict[str, str] = {
     "输出:": "Output:",
     "手腕屏": "Wrist Overlay",
     "译音输出": "Voice Output",
+    "🌐 气泡: 译文": "🌐 Bubble: Translated",
+    "📝 气泡: 原文": "📝 Bubble: Source",
+    "气泡改为显示译文": "Bubble now shows the translation",
+    "气泡改为显示原文": "Bubble now shows the source text",
     "就绪": "Ready",
     "状态：{msg}": "Status: {msg}",
 
@@ -581,4 +585,60 @@ STRINGS: dict[str, str] = {
         "Anchor, position / rotation / font size and more for the in-headset wrist overlay.",
     "贴在 VRChat 窗口上的那块字幕窗：尺寸 / 字号 / 透明度。":
         "The subtitle window pinned to the VRChat window: size / font size / opacity.",
+    # ---- 麦克风代理（原声/译音一键切换）----
+    # 运行期状态（经 `gui._on_proxy_status`：日志打中文原文、状态栏查这里的词条）。
+    # key = 代理发出的中文模板（与 vlt/output/micproxy*.py 逐字一致，含 {占位符}）。
+    "检测到测试进程（{name}）→ 拒绝{action}（这条腿不启用）":
+        "Test process detected ({name}) → refusing to {action} (this leg stays off)",
+    "未找到输出设备 {dev}，回退到回退链":
+        "Output device {dev} not found — falling back to the fallback chain",
+    "枚举输出设备失败：{err}（其余功能不受影响）":
+        "Failed to enumerate output devices: {err} (everything else still works)",
+    "没找到匹配的虚拟声卡输出设备（虚拟声卡装好了吗？）→ 麦克风代理不可用，其余功能不受影响。":
+        "No matching virtual sound card output found (is it installed?) — Mic Proxy unavailable; everything else still works.",
+    "虚拟声卡已打开：#{idx} {name}": "Virtual sound card opened: #{idx} {name}",
+    "虚拟声卡 #{idx} 打不开：{err}": "Cannot open virtual sound card #{idx}: {err}",
+    "打开虚拟声卡失败：{err}（其余功能不受影响）":
+        "Failed to open the virtual sound card: {err} (everything else still works)",
+    "麦克风直通线程异常退出：{kind}: {err}":
+        "Mic passthrough thread exited with an error: {kind}: {err}",
+    "麦克风直通已启动（{rate}Hz {channels}ch → 48k 立体声）":
+        "Mic passthrough started ({rate}Hz {channels}ch → 48k stereo)",
+    "直通缓冲欠载 {n} 次/{secs}s（可能爆音）：可在 设置→音频 调大直通缓冲":
+        "Passthrough buffer underran {n} times in {secs}s (may crackle) — raise it in Settings → Audio",
+    "翻译未运行，无法切到译音档（保持原声）":
+        "Translation isn't running — can't switch to Translated (staying on Original)",
+    "已切到「译音」档": "Switched to Translated",
+    "已切到「原声」档": "Switched to Original",
+    "虚拟声卡声明失败 → 麦克风代理不可用（其余功能不受影响）":
+        "Failed to declare the virtual sound card — Mic Proxy unavailable (everything else still works)",
+    "麦克风代理输出已接到虚拟声卡节点：{target}":
+        "Mic Proxy output connected to the virtual sound card node: {target}",
+    "麦克风代理": "Mic Proxy",
+    "启用 —— VRChat 麦克风固定选虚拟声卡，原声/译音在主界面一键切":
+        "Enable — VRChat mic stays on the virtual cable; switch Original/Translated in the main window",
+    "直通缓冲(ms):": "Passthrough buffer (ms):",
+    "译音缓冲(ms):": "Translated buffer (ms):",
+    "直通缓冲越小延迟越低（下限 60ms）；持续爆音请调大。改完即时生效。":
+        "Smaller passthrough buffer = lower latency (min 60ms); increase it if the audio keeps crackling. Applies instantly.",
+    "已关闭：回到旧行为（译音输出随翻译启停，主界面切换开关置灰）":
+        "Disabled: back to the old behavior (translated output follows translation start/stop; the main-window toggle is greyed out)",
+    "虚拟声卡未打开——检查「译音输出」设备；缓冲改动已存，下次生效":
+        "Virtual cable not open — check the Translated Output device; buffer changes saved, applied next time",
+    "麦克风代理不可用（虚拟声卡没打开？）；原声/译音切换已禁用":
+        "Mic Proxy unavailable (virtual cable not open?); Original/Translated switching disabled",
+    "麦克风代理已启用": "Mic Proxy enabled",
+    "麦克风代理已关闭（回到旧行为）": "Mic Proxy disabled (back to the old behavior)",
+    "直通麦克风已切换：{name}": "Passthrough microphone switched: {name}",
+    "麦克风已切换（直通即时生效；翻译输入下轮生效）":
+        "Microphone switched (passthrough applied now; translation input takes effect when translation restarts)",
+    "麦克风已保存（切换未即时生效，下次启动生效）":
+        "Microphone saved (not applied instantly; takes effect on next start)",
+    "缓冲已更新（即时生效）": "Buffers updated (applied instantly)",
+    "缓冲已保存（译音缓冲下次开始翻译生效）":
+        "Buffers saved (translated buffer applies next time translation starts)",
+    "未勾选「译音输出」，译音档会无声（已在输出行勾选后重试）":
+        "Translated Output is unchecked, so Translated mode will be silent (tick it in the output row and try again)",
+    "🎙 原声": "🎙 Original",
+    "🗣 译音": "🗣 Translated",
 }

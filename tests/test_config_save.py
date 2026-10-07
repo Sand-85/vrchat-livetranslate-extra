@@ -19,7 +19,9 @@ import yaml
 os.environ.setdefault("DASHSCOPE_API_KEY", "sk" + "-ws-" + "cfgtestonly0123456789abcdef")
 
 ROOT = Path(__file__).resolve().parents[1]          # 不写死本机路径：CI / 别人克隆后也能跑
+TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(TESTS))
 
 # 这个用例用中文下拉标签操作控件（`gui._anchor_combo.set("外部 tracker")`）。
 # 界面语言会跟随系统语言（CI 与外国机器是英文系统）→ 必须钉死，
@@ -27,7 +29,12 @@ sys.path.insert(0, str(ROOT))
 import vlt.i18n as _i18n  # noqa: E402
 _i18n.detect_system_language = lambda: "zh"
 
-CONFIG = ROOT / "config.yaml"
+# 钉死语言还不够：配置里的 ui.lang 优先于系统语言检测（gui.py）。开发者本机
+# config.yaml 若是 lang: en，中文下拉标签就失效；且本用例断言「注释不被破坏」，
+# 需要一份带注释的配置。统一走沙箱（内容 = config.example.yaml，与 CI 一致）。
+from _cfgbox import sandbox_config  # noqa: E402
+
+CONFIG = sandbox_config(reset=True)   # 沙箱配置路径（已同步改写 gui.DEFAULT_CONFIG）
 BACKUP = ROOT / "out" / "cfg_backup.yaml"
 
 

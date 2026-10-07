@@ -173,33 +173,37 @@ def check_tune_fallbacks_match_config_defaults() -> None:
     field_of = {"width_m": "width_m", "curvature": "curvature", "alpha": "alpha",
                 "font_size": "font_size", "source_font_size": "source_font_size",
                 "bg_alpha": "bg_alpha", "source_alpha": "source_alpha"}
-    tree = ast.parse((ROOT / "vlt" / "gui.py").read_text(encoding="utf-8"))
+    # ⚠️ 微调面板已随 GUI 拆分搬到 gui_desktop.py（`ctx.tune_values = {...}`），
+    # 不再在 gui.py 里。两个文件都扫，避免下次再搬时这条用例默默扫空。
+    scan_files = [ROOT / "vlt" / "gui_desktop.py", ROOT / "vlt" / "gui.py"]
     found: dict[str, float] = {}
-    for node in ast.walk(tree):
-        # 目标形态：self._tune_values: dict[str, float] = { ..., "键": float(x.get("键", 兜底)), ... }
-        # 目标形态：self._tune_values: dict[str, float] = { ..., "键": float(x.get("键", 兜底)), ... }
-        # ⚠️ 带类型标注时是 AnnAssign 而不是 Assign —— 只认 Assign 会「一条都扫不到」
-        if isinstance(node, ast.AnnAssign):
-            tgt, value = node.target, node.value
-        elif isinstance(node, ast.Assign):
-            tgt, value = (node.targets[0] if node.targets else None), node.value
-        else:
-            continue
-        if not (isinstance(tgt, ast.Attribute) and tgt.attr == "_tune_values"
-                and isinstance(value, ast.Dict)):
-            continue
-        for val in value.values:
-            # 形态是 float(<x>.get("<键>", 兜底))：先把外面的 float(...) 剥掉
-            inner = val.args[0] if (isinstance(val, ast.Call)
-                                    and isinstance(val.func, ast.Name)
-                                    and val.func.id == "float" and val.args) else val
-            if not (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
-                    and inner.func.attr == "get" and len(inner.args) == 2
-                    and isinstance(inner.args[0], ast.Constant)
-                    and isinstance(inner.args[1], ast.Constant)):
+    for scan in scan_files:
+        tree = ast.parse(scan.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            # 目标形态：ctx.tune_values = { ..., "键": float(x.get("键", 兼底)), ... }
+            # ⚠️ 带类型标注时是 AnnAssign 而不是 Assign —— 只认 Assign 会「一条都扫不到」
+            if isinstance(node, ast.AnnAssign):
+                tgt, value = node.target, node.value
+            elif isinstance(node, ast.Assign):
+                tgt, value = (node.targets[0] if node.targets else None), node.value
+            else:
                 continue
-            if inner.args[0].value in field_of:
-                found[inner.args[0].value] = inner.args[1].value
+            # 拆分后属性名是 `tune_values`（挂在 ctx 上）；兼容旧名 `_tune_values`。
+            if not (isinstance(tgt, ast.Attribute) and tgt.attr in ("tune_values", "_tune_values")
+                    and isinstance(value, ast.Dict)):
+                continue
+            for val in value.values:
+                # 形态是 float(<x>.get("<键>", 兼底))：先把外面的 float(...) 剥掉
+                inner = val.args[0] if (isinstance(val, ast.Call)
+                                        and isinstance(val.func, ast.Name)
+                                        and val.func.id == "float" and val.args) else val
+                if not (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "get" and len(inner.args) == 2
+                        and isinstance(inner.args[0], ast.Constant)
+                        and isinstance(inner.args[1], ast.Constant)):
+                    continue
+                if inner.args[0].value in field_of:
+                    found[inner.args[0].value] = inner.args[1].value
 
     missing = sorted(set(field_of) - set(found))
     assert not missing, f"没扫到这些键的兜底值（键名改了就同步改这条用例）：{missing}"

@@ -60,7 +60,7 @@ check_cmd() {  # 名字 用途 安装提示
 }
 
 check_cmd pw-dump  "枚举音频设备"     "pacman -S pipewire"
-check_cmd pw-record "采集系统声音（听别人说话）" "pacman -S pipewire"
+check_cmd pw-record "采集系统声 / 麦克风" "pacman -S pipewire"
 check_cmd pw-cat   "写入虚拟声卡（译音输出）"   "pacman -S pipewire"
 
 # 手腕屏 → 自建 OpenXR overlay：需要 pyopenxr（python 侧）+ OpenXR 运行时 + EGL/Wayland
@@ -94,13 +94,9 @@ else
     missing=1
 fi
 
-# 麦克风采集走 sounddevice(ALSA)，需要 libportaudio
-if [ -e /usr/lib/libportaudio.so ] || [ -e /usr/lib/libportaudio.so.2 ]; then
-    echo "      OK   libportaudio（麦克风采集）"
-else
-    echo "      缺   libportaudio → pacman -S portaudio"
-    missing=1
-fi
+# 麦克风采集自 2026-10 走 PipeWire 原生 `pw-record`（与 loopback 同一条通路）：
+# 不再需要 sounddevice/libportaudio，也不依赖可选包 pipewire-jack / pipewire-alsa。
+echo "      ℹ️   麦克风走 PipeWire 原生 pw-record（上面 pw-* 检查已覆盖；无需 portaudio/JACK）"
 echo
 
 # ---------------------------------------------------------------- 4. API key

@@ -24,13 +24,20 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(TESTS))
 
 # 这些用例断言的是中文界面文案（如「⚠ 未配置」「还没配置 API key」）。
 # 界面语言会跟随系统语言（CI 与外国机器是英文系统）→ 必须钉死，
 # 否则同一份代码在不同机器上结果不同。产品代码不依赖这个补丁。
 import vlt.i18n as _i18n  # noqa: E402
 _i18n.detect_system_language = lambda: "zh"
+
+# 钉死语言还不够：配置里的 ui.lang 优先于系统语言检测（gui.py）。
+# 开发者本机 config.yaml 若是 lang: en，中文断言就假红 → 统一走沙箱配置。
+from _cfgbox import sandbox_config  # noqa: E402
+sandbox_config(reset=True)
 
 # 假 key 刻意用拼接构造：一是别被 pre-commit 的凭据扫描误判（它按 API key 前缀匹配），
 # 二是明确告诉后来者这不是真凭据。
@@ -323,6 +330,11 @@ def _restore_env(saved: dict) -> None:
 def _destroy(gui) -> None:
     if gui is not None:
         try:
+            from vlt import gui_chat
+            gui_chat.cancel_poll(gui._chat_ctx, gui._root)
+        except Exception:
+            pass
+        try:
             gui._root.destroy()
         except Exception:
             pass
@@ -397,12 +409,18 @@ def test_save_key_not_shadowed_by_old_source() -> None:
 def test_start_uses_refreshed_key() -> None:
     """★ 修复钉住③：_start() 第一段前置检查必须读刷新后的值，不是启动时快照。
 
-    绝不真启动引擎/联网：_start_engine / _start_overlay / _open_settings 全部打桩。
+    绝不真启动引擎/联网：gui_engine 的 start_engine / start_overlay / start_desktop
+    与 gui._open_settings 全部打桩。
     """
     _use_temp_storage()
     saved_env = _isolate_env(Path(tempfile.mkdtemp(prefix="vlt-start-env-")))
     buf = io.StringIO()
     gui = None
+    import vlt.gui_engine as ge
+    # ⚠️ 拆分后：gui._start → gui_engine.start(ctx)，其内部直接调**模块函数**
+    #    start_engine / start_overlay / start_desktop（不再走 gui._start_engine 这些壳
+    #    方法）。所以桩必须打在 gui_engine 模块上，打在 gui 实例上会被绕过（拆分回归）。
+    saved_fns = (ge.start_engine, ge.start_overlay, ge.start_desktop)
     try:
         from vlt.gui import TranslationGUI
 
@@ -423,8 +441,9 @@ def test_start_uses_refreshed_key() -> None:
             gui._on_save_key()
 
         started = []
-        gui._start_engine = lambda index: started.append(index)  # 打桩：绝不真起引擎
-        gui._start_overlay = lambda: None                        # 打桩：绝不碰 SteamVR
+        ge.start_engine = lambda ctx, index: started.append(index)  # 打桩：绝不真起引擎
+        ge.start_overlay = lambda ctx, **kw: None                   # 打桩：绝不碰 SteamVR
+        ge.start_desktop = lambda ctx, **kw: None                   # 打桩：绝不碰桌面窗
         settings_calls.clear()
         with contextlib.redirect_stdout(buf):
             gui._start()
@@ -438,6 +457,7 @@ def test_start_uses_refreshed_key() -> None:
         assert FAKE_KEY not in out, f"★ 日志里出现了完整 key！\n{out}"
         print("  _start() 用刷新后的 key OK（引擎/手腕屏/弹窗均已打桩）")
     finally:
+        ge.start_engine, ge.start_overlay, ge.start_desktop = saved_fns
         _destroy(gui)
         _restore_env(saved_env)
         _reset_storage()

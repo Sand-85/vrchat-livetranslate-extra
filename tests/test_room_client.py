@@ -720,14 +720,19 @@ def test_reconnect_replays_only_final_and_latest_partial() -> None:
                 a.publish("u2", 1, "另一句", False)
                 a.publish("u2", 2, "另一句定稿了", True)      # u2 定稿但没被 ack
 
+                # ⚠️ 别用 `r.conn(0)`：两个 `client_ctx` 是**并发连接**，假中继的连接下标 =
+                #    accept 顺序 —— 慢 runner 上「阿华」可能先连上，`conn(0)` 就不是小明、
+                #    其 frames() 恒为 0，用例偶发超时（CI 实测踩到过）。按昵称取连接才稳。
+                conn_a = r.conn_by_nick("小明")
+
                 def _arrived() -> int:
-                    return (len(r.conn(0).frames(FRAME_SEG)) +
-                            len(r.conn(0).frames(FRAME_FINAL)))
+                    return (len(conn_a.frames(FRAME_SEG)) +
+                            len(conn_a.frames(FRAME_FINAL)))
 
                 def _why() -> str:
-                    texts = [f.get("text") for f in r.conn(0).frames() if f.get("t") in TEXT_KINDS]
+                    texts = [f.get("text") for f in conn_a.frames() if f.get("t") in TEXT_KINDS]
                     st = a.state()
-                    return (f"断线前 5 帧应已到达中继（conn(0) 实到 {_arrived()} 帧：{texts}；"
+                    return (f"断线前 5 帧应已到达中继（小明 conn 实到 {_arrived()} 帧：{texts}；"
                             f"中继连接总数 {r.connections}；A {st.summary}；"
                             f"A 已发 {st.sent_frames} 帧 / 发送失败 {st.send_fails}；"
                             f"A 最后错误 {st.last_error!r}；回放表 {st.pending_replay} 条）")

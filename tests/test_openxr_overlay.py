@@ -32,12 +32,15 @@ from vlt.output.openxr_overlay import (  # noqa: E402
     TRACKER_ROLES,
     OpenXrOverlay,
     XrOverlaySession,
+    _SRGB_TO_LINEAR,
     anchor_paths,
     apply_overlay_alpha,
     effective_curvature,
     euler_to_quaternion,
+    format_needs_linearize,
     layer_alpha_flags,
     layer_geometry,
+    linearize_rgb,
     pick_swapchain_format,
     render_alpha_test,
     rotate_vector,
@@ -144,18 +147,98 @@ def test_anchor_paths_mapping():
     print("  锚点路径映射 OK（含越界夹取）")
 
 
-def test_swapchain_format_prefers_rgba8():
-    """★ 格式必须优先 8 位 RGBA —— 实测可用列表的第一个是 0x805b(RGBA16F)。
+def test_swapchain_format_prefers_srgb():
+    """★ 格式必须**优先 sRGB** —— 颜色空间选错的表现是「面板黑不下去」。
 
-    直接取 `formats[0]` 就会拿到 16 位浮点格式，而我们按 8 位上传 → 画面错乱。
+    合成器按线性合成、输出前再 `from_linear_to_srgb()`（Monado `layer.comp` 的
+    `main()`，WiVRn 侧 `k_do_color_correction=true`），所以：
+
+    * 格式 = sRGB → 硬件采样时解码，端到端恒等；
+    * 格式 = 线性 → 我们的 sRGB 字节被当线性值再编码一次 = **双重 gamma**，
+      底板 (12,14,20) 显示成 ≈(52,56,67)（用户实测头显内截图 (51,56,68) 正压地板）。
+
+    另一条约束是**必须 8 位**：实测可用列表的第一个是 0x805b(RGBA16F)，
+    直接取 `formats[0]` 会拿 16 位浮点、而我们按 8 位上传。
     """
     real = [0x805B, 0x881A, 0x8C43, 0x8058, 0x8CAC, 0x81A5]
-    assert pick_swapchain_format(real) == 0x8058, "没优先选 GL_RGBA8"
-    assert pick_swapchain_format([0x805B, 0x8C43]) == 0x8C43, "没有 RGBA8 时应退到 sRGB8_ALPHA8"
+    assert pick_swapchain_format(real) == 0x8C43, "没优先选 GL_SRGB8_ALPHA8"
+    assert pick_swapchain_format([0x805B, 0x8058]) == 0x8058, \
+        "没有 sRGB 格式时应退到 GL_RGBA8（上传前会预线性化）"
     assert pick_swapchain_format([0x805B, 0x8059]) == 0x8059
     assert pick_swapchain_format([0x805B]) == 0x805B, "都没有时应退回第一个而不是崩"
-    assert pick_swapchain_format([]) == 0x8058, "空列表要有兜底"
-    print("  格式选择优先 RGBA8 OK")
+    assert pick_swapchain_format([]) == 0x8C43, "空列表要有兜底"
+    print("  格式选择优先 sRGB OK（没有 sRGB 才退线性）")
+
+
+def test_color_space_needs_linearize_and_lut():
+    """★ 颜色空间契约：sRGB 格式交硬件解码；线性格式必须自己线性化。
+
+    判定用**白名单**：认不出的格式一律当线性（多转一次是安全的，少转就是发灰）。
+    LUT 的验收标准不是「值好看」，而是**往返误差** —— 线性化过的像素经合成器
+    再编码回 sRGB 后，必须回到原值附近（≤2/255，8 位线性装暗端的量化代价）。
+    """
+    assert format_needs_linearize(0x8C43) is False, "GL_SRGB8_ALPHA8 不该再转"
+    assert format_needs_linearize(0x8C41) is False, "GL_SRGB8 不该再转"
+    assert format_needs_linearize(0x8058) is True, "GL_RGBA8 是线性 → 必须转"
+    assert format_needs_linearize(0x8059) is True, "RGB10_A2 是线性 → 必须转"
+    assert format_needs_linearize(0x805B) is True, "认不出的一律按线性（保守）"
+
+    lut = _SRGB_TO_LINEAR
+    assert len(lut) == 256 and lut[0] == 0 and lut[255] == 255
+    assert all(lut[i] <= lut[i + 1] for i in range(255)), "LUT 必须单调不减"
+    for v, want in ((12, 1), (64, 13), (128, 55), (192, 134)):
+        assert lut[v] == want, f"LUT[{v}] 应为 {want}，实得 {lut[v]}"
+
+    def l2s(x: float) -> int:            # 合成器输出端的编码（独立于我们的 LUT 实现）
+        x = max(0.0, min(1.0, x))
+        return round(255 * (12.92 * x if x <= 0.0031308 else 1.055 * x ** (1 / 2.4) - 0.055))
+
+    for v in (0, 12, 20, 32, 64, 96, 128, 160, 192, 235, 255):
+        back = l2s(lut[v] / 255.0)
+        assert abs(back - v) <= 2, f"{v} 线性化后往返回来是 {back}（误差 >2）"
+    # ★ 双重 gamma 的对照：不线性化时暗端会被抬到 5 倍 —— 这正是用户看到的现象
+    assert l2s(12 / 255.0) == 61 and l2s(32 / 255.0) == 99, "双重 gamma 的特征值变了？"
+    print("  颜色空间：判定表 + LUT 往返 ≤2/255 OK（双重 gamma 特征值 12→61 / 32→99）")
+
+
+def test_linearize_rgb_touches_only_rgb():
+    """线性化**只动 RGB**，alpha 一个 bit 都不许改。
+
+    预乘/未预乘的语义全在 alpha 上（`layer_alpha_flags()` 的
+    `UNPREMULTIPLIED_ALPHA_BIT`）—— 动 alpha 就等于把那条修好的路又搞坏。
+    """
+    from PIL import Image
+
+    img = Image.new("RGBA", (4, 1))
+    img.putdata([(255, 255, 255, 255), (12, 14, 20, 205),
+                 (0, 0, 0, 0), (128, 64, 32, 128)])
+    out = linearize_rgb(img)
+    assert [out.getpixel((x, 0))[3] for x in range(4)] == [255, 205, 0, 128], "alpha 被改了"
+    assert out.getpixel((0, 0)) == (255, 255, 255, 255), "白必须留在白"
+    assert out.getpixel((2, 0))[:3] == (0, 0, 0), "黑必须留在黑"
+    assert out.getpixel((1, 0)) == (_SRGB_TO_LINEAR[12], _SRGB_TO_LINEAR[14],
+                                    _SRGB_TO_LINEAR[20], 205)
+    assert linearize_rgb(img.convert("RGB")).mode == "RGBA", "非 RGBA 输入要能收下"
+    print("  线性化只动 RGB（alpha / 白 / 黑 都不动）OK")
+
+
+def test_prepared_linearizes_only_for_linear_swapchain_format():
+    """★ 上传路径接线：格式是线性 → 字节被线性化；格式是 sRGB → 字节原样。
+
+    缓存键必须含格式 —— 换链后若协商到另一种格式（`rebuild_swapchain()`），
+    拿旧字节贴上去颜色就错了。
+    """
+    from PIL import Image
+
+    img = Image.new("RGBA", (2, 1), (12, 64, 255, 205))
+    sess = XrOverlaySession(None, (2, 1))            # type: ignore[arg-type]
+    sess.format = 0x8058                             # 线性 → 要转
+    assert sess._prepared(img, 1.0) == linearize_rgb(img).tobytes()   # noqa: SLF001
+    sess.format = 0x8C43                             # sRGB → 原样
+    assert sess._prepared(img, 1.0) == img.tobytes(), "sRGB 格式不该再转一次"  # noqa: SLF001
+    sess.format = 0x8058                             # 换回来 → 缓存不该复用旧字节
+    assert sess._prepared(img, 1.0) == linearize_rgb(img).tobytes()   # noqa: SLF001
+    print("  _prepared 按交换链格式决定是否线性化（缓存键含格式）OK")
 
 
 def test_layer_geometry_matches_windows_curvature():
@@ -1013,7 +1096,10 @@ if __name__ == "__main__":
     test_quaternion_matches_matrix_convention()
     test_quaternion_is_normalized()
     test_anchor_paths_mapping()
-    test_swapchain_format_prefers_rgba8()
+    test_swapchain_format_prefers_srgb()
+    test_color_space_needs_linearize_and_lut()
+    test_linearize_rgb_touches_only_rgb()
+    test_prepared_linearizes_only_for_linear_swapchain_format()
     test_layer_geometry_matches_windows_curvature()
     test_cylinder_pose_offset_rotates_with_panel()
     test_effective_curvature_degrades_without_extension()

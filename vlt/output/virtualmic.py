@@ -307,12 +307,18 @@ class PwCatVirtualMic(VirtualMic):
 
     def __init__(self, target: str, *, sample_rate: int = 48000,
                  buffer_ms: int = 300, max_buffer_ms: int = 2000,
-                 on_status: Callable[[str, str], None] = lambda *_a: None) -> None:
+                 on_status: Callable[[str, str], None] = lambda *_a: None,
+                 provider: Callable[[int], bytes] | None = None) -> None:
         super().__init__(device_index=0, device_name=target,
                          sample_rate=sample_rate, buffer_ms=buffer_ms,
                          max_buffer_ms=max_buffer_ms, on_status=on_status)
         self._target = target
         self._chunk = int(sample_rate * 0.02) * 2 * 2      # 20ms 立体声 s16le（对齐 PortAudio 的 blocksize）
+        # ★ provider 模式（麦克风代理用）：每次如实产出 chunk 字节，**不做起播兜时**。
+        #   父类那套 `_maybe_prime()` 是给 TTS 用的（先攒够 buffer_ms 才出声，避免半句起播）；
+        #   而原声直通要**立刻出声**（低延迟），攒 300ms 只会平白加延迟。
+        #   默认 None = 现有 TTS 语义**一字不变**。
+        self._provider = provider
         self._proc: subprocess.Popen | None = None
         self._stop = threading.Event()
         self._writer: threading.Thread | None = None
@@ -338,20 +344,33 @@ class PwCatVirtualMic(VirtualMic):
         self._writer = threading.Thread(target=self._writer_loop, daemon=True,
                                         name="vlt-pwcat-writer")
         self._writer.start()
-        self._on_status("info", f"译音输出已接到虚拟声卡节点：{self._target}")
+        if self._provider is None:
+            self._on_status("info", f"译音输出已接到虚拟声卡节点：{self._target}")
+        else:
+            # provider 模式 = 麦克风代理：文案带占位符，交给界面层查 i18n 词条
+            # （见 `gui._on_proxy_status`；日志仍打中文原文）。
+            self._on_status("info", "麦克风代理输出已接到虚拟声卡节点：{target}",
+                            target=self._target)
         return True
 
     def _writer_loop(self) -> None:
-        """按 PortAudio 回调的语义持续喂数据：起播前补静音，起播后排空缓冲（不足补静音）。"""
+        """按 PortAudio 回调的语义持续喂数据：起播前补静音，起播后排空缓冲（不足补静音）。
+
+        `provider` 模式下（麦克风代理）跳过起播兜时：每次直接取 `chunk` 字节如实写出，
+        由 provider 自己保证「不够就补静音」—— 与 `MicProxy._out_callback` 同一口径。
+        """
         assert self._proc is not None and self._proc.stdin is not None
         try:
             while not self._stop.is_set():
-                with self._lock:
-                    self._maybe_prime()
-                    if self._primed:
-                        data = self._drain(self._chunk)
-                    else:
-                        data = b"\x00" * self._chunk      # 还没攒够 → 出静音（与回调一致）
+                if self._provider is not None:
+                    data = self._provider(self._chunk)
+                else:
+                    with self._lock:
+                        self._maybe_prime()
+                        if self._primed:
+                            data = self._drain(self._chunk)
+                        else:
+                            data = b"\x00" * self._chunk      # 还没攒够 → 出静音（与回调一致）
                 try:
                     self._proc.stdin.write(data)
                     self._proc.stdin.flush()

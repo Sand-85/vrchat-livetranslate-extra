@@ -6,7 +6,7 @@ Windows 与 Linux 做「同一件事」用的是完全不同的机制：
 
 | 能力 | Windows | Linux |
 |---|---|---|
-| 麦克风采集 | sounddevice（WASAPI） | sounddevice（ALSA → PipeWire） |
+| 麦克风采集 | sounddevice（WASAPI，按端点原生声道） | `pw-record --target=<源 node.name>`（PipeWire 原生） |
 | 系统声采集（听别人说话） | pyaudiowpatch（WASAPI loopback） | `pw-record` 抓 `<sink>` 的 monitor |
 | 译音虚拟声卡 | PortAudio 打开 VB-Cable / VoiceMeeter | PipeWire 运行期声明 + `pw-cat` 写入 |
 | 手腕屏 | pyopenvr 的 IVROverlay | 自建 OpenXR overlay（XR_EXTX_overlay + EGL_MNDX） |
@@ -54,8 +54,9 @@ from typing import Any, Protocol, runtime_checkable
 # 所以：**设备枚举一律在主线程同步做**（实测冷启动 348ms、预热后 23ms，完全可接受），
 # 这个锁只是防止将来有人又把它挪回线程里。
 #
-# 放在 base.py 而不是各平台模块里：两个平台的「麦克风枚举」都走 sounddevice →
-# 必须是**同一把锁**，否则各持一把等于没锁。
+# 放在 base.py 而不是各平台模块里：**Windows** 侧麦克风与 loopback 的枚举/开流都走
+# sounddevice/PyAudio → 必须共用**同一把锁**，否则各持一把等于没锁。
+# （Linux 枚举走 `pw-dump`、采集/试听走子进程，不碰 PortAudio，也就不需要这把锁。）
 PA_LOCK = threading.Lock()
 
 
@@ -117,11 +118,12 @@ class DeviceBackend(Protocol):
 class CaptureBackend(DeviceBackend, Protocol):
     """采集流工厂。
 
-    `open_mic` 的设备口径按平台定：**Linux 传名字、Windows 传 PortAudio 索引**
-    （名字怎么变索引由 Windows 的 `open_mic` 自己解析，调用方只管把用户配的
-    设备名交进来）。`open_loopback` 用 `LoopbackTarget` 抹平「Windows 是设备 index、
-    Linux 是 sink 名」的差异。两者都返回 `AudioSource`，调用方不感知底层是
-    PortAudio 还是子进程。
+    `open_mic` 的设备口径按平台定：**Linux 传设备描述（内部映射到 PipeWire `node.name`，
+    走 `pw-record --target=`）；Windows 传设备名（`open_mic` 内部解析成 PortAudio 索引）**。
+    调用方只管把用户配的设备名交进来。`channels=None` = 全声道（Linux 由 PipeWire 服务端
+    降混为单声道；Windows 按端点原生声道开、下游取均值）。`open_loopback` 用 `LoopbackTarget`
+    抹平「Windows 是设备 index、Linux 是 sink 名」的差异。两者都返回 `AudioSource`，
+    调用方不感知底层是 PortAudio 还是子进程。
     """
 
     def default_output_index(self) -> int: ...
@@ -129,7 +131,7 @@ class CaptureBackend(DeviceBackend, Protocol):
     def device_info_by_index(self, index: int) -> dict: ...
 
     def open_mic(self, device_name: str | None, *, rate: int = 16000,
-                 channels: int = 1, blocksize: int) -> AudioSource: ...
+                 channels: int | None = None, blocksize: int) -> AudioSource: ...
 
     def open_loopback(self, target: LoopbackTarget, *, blocksize: int) -> AudioSource: ...
 

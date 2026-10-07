@@ -146,6 +146,21 @@ def open_audio_out(audio_cfg: dict, on_status: Any) -> Any:
     return backend().open_audio_out(audio_cfg, on_status)
 
 
+def create_mic_proxy(audio_cfg: dict, mic_name: str | None = None,
+                     on_status: Any = None) -> Any:
+    """麦克风代理（原声 / 译音一键切）。两端各有一份实现，接口与语义对齐。
+
+    * Windows → `vlt/output/micproxy.py`：`sounddevice` 输出流，虚拟声卡是用户自备设备
+    * Linux  → `vlt/output/micproxy_linux.py`：`pw-cat` 写管道，虚拟声卡**运行时声明**
+
+    生命周期归调用方（GUI）：`start()` 失败只降级、不抛异常；`close()` 幂等。
+    引擎侧只认 `proxy.translated_sink`（鸭子类型垫片），不感知代理在哪。
+    """
+    if on_status is None:
+        on_status = lambda *_a: None  # noqa: E731
+    return backend().create_mic_proxy(audio_cfg, mic_name, on_status)
+
+
 def child_env() -> dict[str, str]:
     """给「宿主子进程」用的环境变量：还原被 PyInstaller 改过的动态库搜索路径。
 

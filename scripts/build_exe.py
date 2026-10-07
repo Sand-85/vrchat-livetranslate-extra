@@ -76,6 +76,7 @@ EXCLUDE_WIN = [
     "vlt.platform.wayland",    # 原生 layer-shell 桌面叠加窗（libwayland-client）
     "vlt.platform.x11",        # 原生 ARGB 桌面叠加窗（libX11）
     "vlt.output.openxr_overlay",
+    "vlt.output.micproxy_linux",   # Linux 麦克风代理（pw-cat 管道 + 运行时声明虚拟麦）
     "xr",                      # pyopenxr
 ]
 

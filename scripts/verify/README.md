@@ -31,10 +31,15 @@ CI 只跑 `tests/`（纯离线单元测试）与打包门禁；这里的手动�
 | `verify_room_button.py` | 验房间按钮三态、空房间码拦截并跳设置页、输入框已移入设置，并截主窗/设置页 | Windows + 真实桌面会话（GUI） | **本机已实测跑通** |
 | `verify_room_button_live.py` | 真 Tk 窗 + 真 WebSocket：点「连接房间」真连线上服务、按钮自动变「断开连接」，再点真断开 | 真实桌面会话 + **联网到线上房间服务** | **本机已实测跑通**（联网成功走到 online） |
 | `verify_room_i18n.py` | 五种语言各起一次窗，逐控件比需求宽 / 实际宽查裁切，并给 en/ru 截设置页 | Windows + 真实桌面会话（GUI） | **本机已实测跑通** |
+| `verify_proxy_loopback.py` | 假麦克风喂已知正弦（1kHz）→ 麦克风代理直通 / 译音档 → 从虚拟声卡**录音端**抓回来判主频（原声应 1kHz、译音应 500Hz、切回又 1kHz），证明档位路由真的过线 | Windows + **已装虚拟声卡**（VB-CABLE / VoiceMeeter）；**不需要**麦克风 / 头显 | **本机已实测跑通** |
+| `verify_proxy_loopback_linux.py` | 同一件事的 **Linux 版**：假麦克风喂 1kHz → 代理直通 / 译音档 → 从**运行时声明**的虚拟麦（`vlt_mic_source`）抓回来判主频；**顺带验**两条 Linux 硬约束：声明虚拟麦**不抢默认输出**、退出后**节点零残留** | Linux + **PipeWire**（`pw-dump`/`pw-record`/`pw-cat`）；**不需要**虚拟声卡 / 麦克风 / 头显 / 桌面会话 | **本机已实测跑通** |
+| `verify_proxy_app_start.py` | **真起界面**（非 headless）证明「启动即起代理」：启动日志出现「虚拟声卡已打开 / 麦克风代理已启动 / 麦克风直通已启动」，并从录音端真抓到假麦克风的 1kHz | Windows + 真实桌面会话 + **已装虚拟声卡** | **本机已实测跑通** |
 | `run_suite.sh` | 在指定 worktree（默认本仓库）跑全量**离线**测试并汇总（死代理 + 清 `DASHSCOPE_API_KEY`） | bash + 该 worktree 的 `.venv` | **本机已实测跑通** |
 
 内部助手：`_shot_window.py`（Win32 `PrintWindow` 截图的共用小工具，**不是给人单独跑的入口**，
-被 `verify_room_button.py` / `verify_room_i18n.py` 复用）。
+被 `verify_room_button.py` / `verify_room_i18n.py` 复用）；`_proxy_probe.py`（两份回环探针共用的
+假正弦 / 假麦克风源 / FFT 主频判据 —— 判据抄两份必然漂移，而「看着绿、其实没测到」正是这类
+探针最要命的失败模式）。
 
 ## 跑法
 
@@ -52,6 +57,15 @@ CI 只跑 `tests/`（纯离线单元测试）与打包门禁；这里的手动�
 # 需要联网到线上房间服务
 ./.venv/Scripts/python.exe scripts/verify/verify_room_button_live.py
 
+# 需要虚拟声卡（VB-CABLE / VoiceMeeter）——不需要麦克风、不需要头显，麦克风那路被换成假源
+./.venv/Scripts/python.exe scripts/verify/verify_proxy_loopback.py
+./.venv/Scripts/python.exe scripts/verify/verify_proxy_app_start.py    # 这个还要真实桌面会话（要开窗）
+#   设备名不一样时用 --out-pattern / --in-pattern 指定关键词；--list 看本机设备
+
+# Linux 侧同一件事：不需要自备虚拟声卡（程序运行时自己声明）、不需要麦克风 / 头显 / 桌面会话
+./.venv/bin/python scripts/verify/verify_proxy_loopback_linux.py
+#   --list 看本机 PipeWire 音频节点（排查「虚拟麦在不在、类对不对」）
+
 # 全量离线测试（可指定别的 worktree：bash scripts/verify/run_suite.sh <路径> [标签]）
 bash scripts/verify/run_suite.sh
 ```
@@ -63,3 +77,6 @@ bash scripts/verify/run_suite.sh
 - 截图证据落在 `out/`（如 `overlay_over_desktop.png`、`room_btn_*.png`）；
 - `run_suite.sh` 的汇总写到 `out/<标签>_results.txt`，失败用例完整输出写到
   `out/<标签>_fail_<用例>.log`。
+- `verify_proxy_loopback.py` / `verify_proxy_app_start.py` **不写任何文件**（只读音频、打印判据），
+  配置也只读临时沙箱那份；`verify_proxy_loopback_linux.py` 同样不写文件，但会**短暂**在
+  PipeWire 里声明一对节点（就是产品运行时的行为），退出前一定回收并**自检零残留**。

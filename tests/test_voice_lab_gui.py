@@ -250,6 +250,10 @@ def _install_widgets(gui) -> None:
     # 音频页那两个下拉（保存后要把新音色排进「音色选择」里）
     gui._tts_voice_var = _Var("")                                   # type: ignore[assignment]
     gui._tts_voice_combo = _Btn()                                   # type: ignore[assignment]
+    # 上游重构后，音色控件搬进了 `_voice_ctx`，而代码读的是**ctx 里那份**
+    # （gui 上的只是测试兼容别名，且是单向的）→ 两边都设，别只设别名。
+    gui._voice_ctx.tts_voice_var = gui._tts_voice_var
+    gui._voice_ctx.tts_voice_combo = gui._tts_voice_combo
     for name in ("_lab_gen_btn", "_lab_save_btn", "_lab_del_btn", "_lab_recipe_btn",
                  "_lab_recipe_preview_btn", "_lab_pick_btn", "_lab_clone_btn",
                  "_lab_preset_preview_btn", "_lab_preset_clone_btn",

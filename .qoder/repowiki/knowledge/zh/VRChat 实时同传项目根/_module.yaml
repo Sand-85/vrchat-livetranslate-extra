@@ -1,0 +1,21 @@
+schema_version: 1
+module_path: ""
+title: VRChat 实时同传项目根
+scope:
+    - README.md
+    - .gitignore
+    - .gitattributes
+    - requirements.txt
+    - config.example.yaml
+    - run_gui.py
+    - run_chatbox.bat
+    - run_overlay.bat
+    - run_selfcheck.bat
+    - build_exe.bat
+    - install_secret_guard.bat
+    - setup.bat
+    - LICENSE
+    - run_gui.bat
+source_files: []
+depends_on: []
+related_to: []

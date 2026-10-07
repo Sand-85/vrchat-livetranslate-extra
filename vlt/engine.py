@@ -112,6 +112,33 @@ def voice_segment_from_partial(confirmed: str, spoken: str, *,
     return seg
 
 
+# ---- chatbox 气泡显示哪种文本（界面上是 `chatbox` 勾选框右边那颗切换按钮）----
+# 互斥二选一，**只影响 chatbox 气泡**：手腕屏 / 桌面字幕 / 聊天区恒为译文。
+CHATBOX_TEXT_TRANSLATED = "translated"   # 默认：气泡显示译文
+CHATBOX_TEXT_SOURCE = "source"           # 气泡显示 ASR 源文（「我说的话」本身）
+_CHATBOX_TEXT_VALUES = (CHATBOX_TEXT_TRANSLATED, CHATBOX_TEXT_SOURCE)
+# 脏值只在**首次见到**时留痕一次：本函数每条文本增量都要调，不去重就会刷屏。
+_CHATBOX_TEXT_WARNED: set[str] = set()
+
+
+def chatbox_text_mode(cfg) -> str:
+    """读 `ui.chatbox_text`：`translated`（默认）| `source`。脏值回落 `translated` 并留痕。
+
+    每次调用都现读（**不缓存**）：界面点一下切换就要在同一次会话里立刻生效，
+    所以判据不能是启动时算好的一份快照。
+    """
+    raw = (getattr(cfg, "ui", None) or {}).get("chatbox_text", CHATBOX_TEXT_TRANSLATED)
+    if isinstance(raw, str) and raw.strip() in _CHATBOX_TEXT_VALUES:
+        return raw.strip()
+    key = repr(raw)
+    if key not in _CHATBOX_TEXT_WARNED:
+        _CHATBOX_TEXT_WARNED.add(key)
+        print(f"[config] ui.chatbox_text={raw!r} 不是 "
+              f"{' / '.join(_CHATBOX_TEXT_VALUES)} 之一 → 回落 translated（气泡显示译文）",
+              flush=True)
+    return CHATBOX_TEXT_TRANSLATED
+
+
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
 SILENCE_PEAK = 220
 
@@ -566,6 +593,7 @@ class Engine:
         config_path: str | Path | None = None,
         audio_out: bool | None = None,
         audio_device: list[str] | None = None,
+        audio_sink=None,
     ) -> None:
         self._cfg = cfg
         self._direction = direction
@@ -579,6 +607,10 @@ class Engine:
         self._config_path = config_path
         self._audio_out_override = audio_out
         self._audio_device_override = audio_device
+        # 外部注入的译音输出（麦克风代理的 TranslatedSink）：非 None 时引擎**不自建**
+        # VirtualMic，而是把译音 PCM 灌进代理那条常驻输出流（原声/译音一键切换）。
+        # 归代理管生命周期 —— 引擎停翻译时**绝不能** close 它（见 _cleanup 的 _owns_virtualmic）。
+        self._audio_sink = audio_sink
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -592,8 +624,12 @@ class Engine:
         self._merger: Merger | None = None
         self._overlay: Any | None = None
         self._virtualmic: VirtualMic | None = None
-        # 通联开关音（每句开头 on / 结尾 off）：懒加载后缓存，改配置要重启才生效
+        # 通联开关音（每句开头 on / 结尾 off）：缓存**未加增益**的原始波形 ——
+        # 增益每次出声按 config 现值再乘，所以调 `sfx_gain` **不用重启**。
         self._sfx_cache: tuple[bytes, bytes] | None = None
+        # True = _virtualmic 是引擎自建的（停翻译时要 close）；False = 外部注入的共享 sink
+        # （归代理管，引擎不碰它的生命周期）。
+        self._owns_virtualmic = False
         # 流式合成**串行**锁：同一时刻只让一路往虚拟声卡写分片（并发写会让分片交错，
         # 听感是「整段反复重念」—— 连打两条也会）。懒建：首次用时在事件循环线程里创建。
         self._speak_lock_obj: asyncio.Lock | None = None
@@ -722,6 +758,22 @@ class Engine:
     @property
     def merger(self) -> Merger | None:
         return self._merger
+
+    @property
+    def chatbox_text_mode(self) -> str:
+        """当前 chatbox 气泡显示哪种文本（每条现读，界面点一下立刻生效）。"""
+        return chatbox_text_mode(self._cfg)
+
+    def chatbox_payload(self, d: TextDelta) -> str:
+        """本条 TextDelta 该往 chatbox 送什么文本（空串 = 本条不发）。
+
+        译文模式：`display`（译文，与改动前逐字节一致）；
+        原文模式：`d.source`（ASR 源文）。源文为空就返回空串 —— **绝不回落译文、
+        绝不发占位符**（气泡里语言突然跳变比空一拍更糟）。
+        """
+        if self.chatbox_text_mode == CHATBOX_TEXT_SOURCE:
+            return (d.source or "").strip()
+        return d.display
 
     @property
     def virtualmic(self) -> VirtualMic | None:
@@ -976,9 +1028,10 @@ class Engine:
         except Exception:
             pass
         try:
-            if self._virtualmic is not None:
+            if self._virtualmic is not None and self._owns_virtualmic:
                 self._virtualmic.close()
-                self._virtualmic = None
+            self._virtualmic = None
+            self._owns_virtualmic = False
         except Exception:
             pass
         try:
@@ -1107,13 +1160,23 @@ class Engine:
             造出对象（可能顺带声明设备）→ 调 open() → 失败就清成 None
         Linux 的「造」这一步还会**运行时声明**一对 PipeWire 节点
         （无配置文件、不重启任何服务、不改任何全局状态），见 `vlt/platform/linux.py`。
+
+        若外部注入了 `audio_sink`（麦克风代理的 TranslatedSink）→ 直接用它，
+        **不自建 VirtualMic、不 pick 设备**：译音灌进代理那条常驻输出流，
+        由代理的档位开关决定此刻放原声还是译音。
         """
+        if self._audio_sink is not None:
+            self._virtualmic = self._audio_sink
+            self._owns_virtualmic = False
+            return
         vm = self._make_audio_out(audio_cfg)
         if vm is None:
             return
         self._virtualmic = vm
+        self._owns_virtualmic = True
         if not vm.open():
             self._virtualmic = None
+            self._owns_virtualmic = False
             print(f"[virtualmic] 打开失败 → 译音输出已禁用（其余功能不受影响）：{vm.device_name}",
                   flush=True)
         # 打开成功不用再打印：open() 自己会报（Windows 经 on_status → 日志 + 状态栏）。
@@ -1161,6 +1224,12 @@ class Engine:
                 f"没找到匹配的输出设备（回退链：{chain}）。虚拟声卡装好了吗？其余功能不受影响。")
             return None
         idx, name, rate = picked
+        # 同名回落候选：**两条选设备的分支都要算** —— 「自动回退链」档挑中的设备同样可能
+        # 打不开（虚拟声卡的 WASAPI 端点真机必现 `-9999`），而这条分支原先 `fallbacks`
+        # 一直是空的 → 只试一次就把「译音输出」整条腿判死（2026-10-06 测试者真机复现：
+        # 设备名一空、档位落到回退链，译音输出直接禁用；指定设备名时反而没事）。
+        if not fallbacks:
+            fallbacks = platform.output_device_fallbacks(name, exclude=idx)
         return VirtualMic(
             device_index=idx,
             device_name=name,
@@ -1283,7 +1352,17 @@ class Engine:
         if self._overlay is not None:
             self._overlay.update(text, d.source or "")
         if self._merger is not None and self._chatbox_wanted:
-            self._merger.push(d)
+            # 只换「往 chatbox 送什么」这一步：节流 / 去重 / 句末必刷全部复用同一个
+            # Merger（构造一个载荷 TextDelta 给它，Merger 自身一行不改）。
+            payload = self.chatbox_payload(d)
+            if payload:
+                self._merger.push(TextDelta(confirmed=payload, pending="",
+                                            is_final=d.is_final, source=d.source or ""))
+            elif self.chatbox_text_mode == CHATBOX_TEXT_SOURCE:
+                # 原文模式下源文还没到 → 本条不发（不入 pending 队列、不重发旧内容）。
+                # 留痕只走 print（crashlog 的 Tee 会落进日志文件），**不进状态栏**、
+                # 不碰任何用户可见的表面；每条都打，不限频（用户明确要求）。
+                print(f"[chatbox] 原文为空，本条跳过（is_final={d.is_final}）", flush=True)
 
     # 终版短于这个长度不参与 repeat 判定：「嗯。」「好。」这类短应答天然会连撞，
     # 把它们当证据会误杀正常对话（宁可晚一句判出真 repeat，也不可误杀真译文）。
@@ -1658,7 +1737,11 @@ class Engine:
             self._overlay.update(translated, text)
         if self._chatbox is not None and self._chatbox_wanted:
             limit = int((self._cfg.chatbox or {}).get("max_chars", 144))
-            for chunk in split_for_chatbox(translated, limit):
+            # 原文模式：chatbox 收到的是你**敲的那句字**本身（与语音链路口径一致 ——
+            # 气泡里始终是「我说的话」）。翻译仍然照常做（界面气泡 / 手腕屏 / TTS 都用它），
+            # 只是不进 chatbox；所以这一步保持在翻译完成之后，不动共用时序。
+            payload = text if self.chatbox_text_mode == CHATBOX_TEXT_SOURCE else translated
+            for chunk in split_for_chatbox(payload, limit):
                 self._chatbox.send(chunk, True)
 
         # 打字也要出声：文本翻译接口**不回音频**，所以补一步 TTS 再喂虚拟声卡。
@@ -1865,7 +1948,7 @@ async def run_mic(session, tele, seconds: float = 0.0, device_pattern: str | Non
     print("[mic] 开始采集" + ("（Ctrl+C 结束）" if seconds <= 0 else f"（{seconds:.0f}s）"))
     await _pump_capture(session, tele, seconds, stop_event, "mic",
                         lambda: platform.capture_backend().open_mic(
-                            dev_name, rate=16000, channels=1,
+                            dev_name, rate=16000, channels=None,
                             blocksize=CHUNK_BYTES // 2))
     print("[mic] 采集结束")
 
@@ -1873,8 +1956,8 @@ async def run_mic(session, tele, seconds: float = 0.0, device_pattern: str | Non
 def _resolve_mic_name(device_name: str | None, device_pattern: str | None) -> str | None:
     """把用户配置（设备名 / 关键词）解析成一个**设备名**，交给平台层打开。
 
-    这里只负责「名字」，不碰索引：设备名怎么变成底层句柄按平台定 ——
-    Linux 直接把名字递给 `sd.RawInputStream(device="名字")`；
+    这里只负责「名字」，不碰索引/句柄：设备名怎么变成底层句柄按平台定 ——
+    Linux 把描述映射到 PipeWire `node.name` 后走 `pw-record --target=`；
     Windows 由 `vlt/platform/win.py: open_mic` 再解析成 PortAudio 索引
     （保持 v0.3.x 同名端点的打开口径，见那边的说明）。
     `device_pattern` 是界面「设备关键词」那条兼容路径：在我们的输入设备表里做子串匹配。

@@ -12,7 +12,7 @@
 | 会话链 = `SessionCreateInfo → GraphicsBindingEGLMNDX → SessionCreateInfoOverlayEXTX` | `createFlags` 必须为 0（规范要求） |
 | 建 session **前**必须调 `xrGetOpenGLGraphicsRequirementsKHR` | Monado 检查 `sys->gotten_requirements`，否则 `GRAPHICS_REQUIREMENTS_CALL_MISSING` |
 | 建完 session **必须泵事件到 READY 再 `xrBeginSession`** | `oxr_session_begin()` 首句就要求 `XR_SESSION_STATE_READY`，否则 `SESSION_NOT_RUNNING` |
-| swapchain 选 `GL_RGBA8 (0x8058)`，acquire 后必须 `wait_swapchain_image` | 实测可用格式列表里 0x8058 在；漏 wait 会「上传成功但画面不动」 |
+| swapchain **必须优先 sRGB 变体 `GL_SRGB8_ALPHA8 (0x8C43)`**，只有 8 位线性格式时才退而求其次并在上传前预线性化（`format_needs_linearize()`）；acquire 后必须 `wait_swapchain_image` | 合成器按**线性**合成、输出前再 `from_linear_to_srgb()`（Monado `shaders/layer.comp` 的 `main()`，注释原文「no automatic conversion in hardware available」；WiVRn 侧 `layer_squasher.cpp` 的 `k_do_color_correction=true`）。层纹理标成线性 = 我们的 sRGB 字节被当线性值再编码一次 = **双重 gamma → 面板黑不下去**。实测：底板 (12,14,20) 在 72.4% 覆盖下显示成 **(51,56,68)** —— 而双重 gamma 的理论地板正是 (52,56,67)（不管背后多黑）；漏 wait 则「上传成功但画面不动」 |
 | Quad ✅ / **Cylinder ✅**（弯曲可用） | spike E/F 两项实测通过 |
 | 手部 pose **可用** | spike G 实测 `position_tracked`，profile 匹配到 `oculus/touch_controller` |
 
@@ -106,16 +106,85 @@ def anchor_paths(anchor: str, tracker_index: int = 0) -> tuple[str | None, str |
     return None, None                      # hmd / 未知 → 用 VIEW 参考空间
 
 
-def pick_swapchain_format(formats: list[int]) -> int:
-    """挑一个 8 位 RGBA 的 GL 内部格式。
+# GL 内部格式（OpenXR 的 GL swapchain 格式就是 GL internal format）。
+GL_RGBA8 = 0x8058               # UNORM：采样时**不做** sRGB→线性 解码
+GL_SRGB8_ALPHA8 = 0x8C43        # sRGB：采样时硬件解码
+GL_RGB10_A2 = 0x8059
+GL_SRGB8 = 0x8C41               # sRGB（无 alpha，仅用于判定，不选它当交换链）
 
-    ⚠️ 不能直接取 `formats[0]`：实测列表里第一个是 0x805b（RGBA16F），
-    而我们按 8 位上传 → 画面会错位。顺序：RGBA8 → sRGB8_ALPHA8 → RGB10_A2。
+# 「采样时硬件会做 sRGB→线性 解码」的格式。判定按**白名单**而不是黑名单：
+# 将来运行时冒出别的 sRGB 变体，宁可保守地按线性处理（多转一次是安全的，少转才发灰）。
+SRGB_TEXTURE_FORMATS = (GL_SRGB8_ALPHA8, GL_SRGB8)
+
+
+def format_needs_linearize(fmt: int) -> bool:
+    """该交换链格式的纹素会不会被硬件自动做 sRGB→线性 解码；不会 → 我们要自己转。
+
+    ⚠️ 这不是「可选优化」，是**颜色正确性**：`render_panel` 出来的是 sRGB 编码的
+    8 位像素（PIL 语义，与 Windows 侧喂给 SteamVR 的同一份），而合成器（Monado
+    `layer.comp` / WiVRn `layer_squasher.cpp`）按**线性**合成、输出前再
+    `from_linear_to_srgb()` 编码一次。格式选成线性（`0x8058`）时没人解码我们的
+    字节 → 等于拿 sRGB 值当线性值用 → 输出端再编码 = **双重 gamma**：
+    暗部被抬到 5 倍（12 → 61、32 → 99），亮端几乎不动（255 → 255）。
+
+    用户实测的现象就是**面板黑不下去**：底板 (12,14,20) 在 72.4% 覆盖下，
+    双重 gamma 的**理论地板**是 (52,56,67)（背后不管多黑都到不了黑），
+    而头显内截图实测 (51,56,68) 正好压在地板上。SteamVR 侧（`setOverlayRaw`
+    的 RGBA8 被 SteamVR 当 sRGB）没有这个问题，所以「两端观感不一致」。
     """
-    for cand in (0x8058, 0x8C43, 0x8059):
+    return int(fmt) not in SRGB_TEXTURE_FORMATS
+
+
+def pick_swapchain_format(formats: list[int]) -> int:
+    """挑一个 8 位 RGBA 的 GL 内部格式 —— **优先 sRGB 变体**。
+
+    两条约束一起管：
+
+    1. **必须 8 位**：不能直接取 `formats[0]` —— 实测列表里第一个是 0x805b（RGBA16F），
+       而我们按 8 位上传 → 画面会错位。所以候选只有 8 位的三个。
+    2. **优先 sRGB**：见 `format_needs_linearize()` 的说明，选线性格式会双重 gamma。
+       顺序 sRGB8_ALPHA8 → RGBA8 → RGB10_A2；运行时只给线性格式时也照用，
+       由上传路径（`XrOverlaySession._prepared()`）预线性化兜住正确性。
+    """
+    for cand in (GL_SRGB8_ALPHA8, GL_RGBA8, GL_RGB10_A2):
         if cand in formats:
             return cand
-    return formats[0] if formats else 0x8058
+    return formats[0] if formats else GL_SRGB8_ALPHA8
+
+
+def _srgb_to_linear_lut() -> list[int]:
+    """sRGB 8 位 → 线性 8 位 的 256 项 LUT（`Image.point()` 用）。
+
+    用 8 位线性装线性值是**有损**的（线性空间暗处台阶大），但误差只出现在暗端
+    且 ≤2/255：`12 → 1/255`，合成器输出时编回 13（真值 12）；`32 → 4/255` → 34。
+    对「面板黑不下去」这个问题来说，13 和 12 已经肉眼无差；真要更准只能换 16 位
+    上传，不值得为一条兜底路径把上传路径改复杂（首选路径是 sRGB 交换链，零损失）。
+    """
+    out = []
+    for v in range(256):
+        x = v / 255.0
+        lin = x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4
+        out.append(round(255.0 * lin))
+    return out
+
+
+_SRGB_TO_LINEAR = _srgb_to_linear_lut()
+
+
+def linearize_rgb(img: Any) -> Any:
+    """把 sRGB 编码的 **RGB** 通道转成线性；alpha 通道一动不动。
+
+    ⚠️ 只动 RGB：预乘/未预乘的语义全在 alpha 上，动 alpha 会把
+    `layer_alpha_flags()` 那套（`UNPREMULTIPLIED_ALPHA_BIT`）搞坏。
+    调用方只在 `format_needs_linearize(self.format)` 为真时走这里。
+    """
+    from PIL import Image
+
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    r, g, b, a = img.split()
+    lut = _SRGB_TO_LINEAR
+    return Image.merge("RGBA", (r.point(lut), g.point(lut), b.point(lut), a))
 
 
 def layer_alpha_flags() -> Any:
@@ -751,7 +820,7 @@ class XrOverlaySession:
         self._frame_state: Any = None
         # 「整层 alpha + 转字节」的记忆化缓存：(帧, alpha, bytes)。
         # 帧循环每帧重提同一张图，没有它就要每帧白跑一次 LUT。
-        self._prep: tuple[Any, float, bytes] | None = None
+        self._prep: tuple[Any, float, int, bytes] | None = None
         # 本会话**实际启用**的扩展名（`create()` 传进来的那批）。`submit()` 靠它判断
         # 运行时到底支不支持柱面层，不支持就退回平面（见 `effective_curvature()`）。
         self.extensions: list[str] = []
@@ -776,8 +845,12 @@ class XrOverlaySession:
         self._begin_session()
         self._create_ref_spaces()
         self._create_swapchain()
-        log.info("[overlay:xr] 会话就绪：%sx%s format=0x%x，扩展 %d 个",
-                 self.size_px[0], self.size_px[1], self.format, len(extensions))
+        log.info("[overlay:xr] 会话就绪：%sx%s format=0x%x（%s），扩展 %d 个",
+                 self.size_px[0], self.size_px[1], self.format,
+                 "线性纹理 → 像素已预线性化"
+                 if format_needs_linearize(self.format)
+                 else "sRGB 纹理 → 采样时硬件解码",
+                 len(extensions))
 
     def _begin_session(self) -> None:
         """建 overlay session 并推进到 running。"""
@@ -834,6 +907,12 @@ class XrOverlaySession:
         self.swapchain = None
         formats = list(xr.enumerate_swapchain_formats(self.session))
         self.format = pick_swapchain_format(formats)
+        if format_needs_linearize(self.format):
+            # 降级**不许静默**：这条说明运行时没给 sRGB 的 8 位格式，我们靠预线性化
+            # 兜的正确性（暗端会有 ±2/255 的量化误差，不是错色）。
+            log.warning("[overlay:xr] ⚠️ 运行时没提供 sRGB 的 8 位 RGBA 交换链格式"
+                        "（可用：%s）→ 用 format=0x%x（线性）并在上传前预线性化像素",
+                        [hex(int(f)) for f in formats[:12]], self.format)
         w, h = self.size_px
         self.swapchain = xr.create_swapchain(self.session, xr.SwapchainCreateInfo(
             format=self.format, sample_count=1, width=w, height=h,
@@ -1160,18 +1239,25 @@ class XrOverlaySession:
             layer_count=1, layers=arr))
 
     def _prepared(self, image: Any, alpha: float) -> bytes:
-        """按 `(帧, 整层 alpha)` 记忆化「乘 alpha + 转字节」的结果。
+        """按 `(帧, 整层 alpha, 交换链格式)` 记忆化「乘 alpha → 可选线性化 → 转字节」。
 
         帧循环**每帧都要重提同一张图**（OpenXR 的 composition layer 不是持久对象），
         所以这里必须缓存，否则每帧白过一次 1024x440 的 LUT。缓存里**持有这帧的
         引用**，`id()` 就不可能被回收复用，键也就不会撞车。
+
+        格式也进键：`rebuild_swapchain()` 若协商到不同格式，线性化与否会变
+        （见 `format_needs_linearize()`），拿旧字节贴上去颜色就错了。
         """
         k = max(0.0, min(1.0, float(alpha)))
         cached = self._prep
-        if cached is not None and cached[0] is image and cached[1] == k:
-            return cached[2]
-        data = apply_overlay_alpha(image, k).tobytes()
-        self._prep = (image, k, data)
+        if cached is not None and cached[0] is image and cached[1] == k \
+                and cached[2] == self.format:
+            return cached[3]
+        img = apply_overlay_alpha(image, k)
+        if format_needs_linearize(self.format):
+            img = linearize_rgb(img)     # 只动 RGB；alpha 由上面的乘子决定
+        data = img.tobytes()
+        self._prep = (image, k, self.format, data)
         return data
 
     def destroy(self) -> None:
@@ -1591,7 +1677,7 @@ class OpenXrOverlay:
 # ================================================================ 冒烟自检
 
 def render_alpha_test(cfg: OverlayConfig | None = None) -> Any:
-    """画一张「一眼就能看出 alpha 对不对」的判定图（`--smoke --alpha-test` 用）。
+    """画一张「一眼就能看出 alpha / 颜色空间对不对」的判定图（`--smoke --alpha-test` 用）。
 
     底板/边框沿用真实面板的配色与留白，所以看它 ≈ 看真面板：
 
@@ -1600,7 +1686,13 @@ def render_alpha_test(cfg: OverlayConfig | None = None) -> Any:
       * **四块 25/50/75/100% 不透明度的灰块**：应当由淡到实。整体偏亮、半透明的块
         发白，就说明未预乘 alpha 被当成预乘了（缺 `UNPREMULTIPLIED_ALPHA_BIT`）；
       * **一行 100% 不透明的白字**：底板半透明不该把文字一起变淡
-        （整层乘子只乘 alpha 通道，RGB 不动）。
+        （整层乘子只乘 alpha 通道，RGB 不动）；
+      * **一排纯灰阶（0 / 12 / 32 / 64 / 128 / 192 / 255，全部 100% 不透明）**：
+        盯**颜色空间**（transfer function）。数字应逐级变亮且与标注值对得上；
+        若 12 看着像 60、32 像 99（暗端整体被抬起、255 却仍是白），就是层纹理被
+        当成线性值再编码一次 = **双重 gamma** —— 用户实测的「面板黑不下去」，
+        病根见 `format_needs_linearize()`。这一排是纯色不透明块，没有 alpha 参与，
+        所以它**只**反映颜色空间，不会和上面那排 alpha 判定混在一起。
     """
     from PIL import Image, ImageDraw, ImageFont
 
@@ -1639,6 +1731,18 @@ def render_alpha_test(cfg: OverlayConfig | None = None) -> Any:
                font=f_label, fill=(*cfg.color_translation, 255))
     d.text((x0, bottom + 22 + cfg.source_font_size), "文字必须实心 / text stays solid",
            font=f_label, fill=(*cfg.color_translation, 255))
+
+    # ★ 灰阶带（颜色空间判定）：值写在标签上，观感应与标签一致。
+    ramp_top = bottom + 22 + cfg.source_font_size + 18
+    ramp_h = min(70, (h - pad) - ramp_top - (cfg.source_font_size + 12))
+    if ramp_h >= 28:                     # 面板太矮就不画（判定图优先保持不越界/不遮底板）
+        grays = (0, 12, 32, 64, 128, 192, 255)
+        gw = max(18, (w - 2 * x0 - gap * (len(grays) - 1)) // len(grays))
+        for i, v in enumerate(grays):
+            x = x0 + i * (gw + gap)
+            d.rectangle([x, ramp_top, x + gw, ramp_top + ramp_h], fill=(v, v, v, 255))
+            d.text((x, ramp_top + ramp_h + 6), str(v), font=f_label,
+                   fill=(*cfg.color_translation, 255))
     return img
 
 
@@ -1673,10 +1777,13 @@ def _smoke(seconds: float = 15.0, alpha_test: bool = False) -> int:
         return 1
     if alpha_test:
         ov._queue_frame(render_alpha_test(cfg))
-        print("✅ 会话已建立，正在提交 **alpha 判定图**。要看三点：\n"
+        print("✅ 会话已建立，正在提交 **alpha + 颜色空间判定图**。要看四点：\n"
               "   ① 蓝色边框外面是否**全透明**（有黑边 = 图层 alpha 没生效）\n"
               "   ② 四块灰是否由淡到实（发白/发光 = 未预乘 alpha 被当成预乘）\n"
-              "   ③ 白字是否实心（跟着底板一起变淡 = 乘子乘到了 RGB）", flush=True)
+              "   ③ 白字是否实心（跟着底板一起变淡 = 乘子乘到了 RGB）\n"
+              "   ④ 最下面一排灰阶（标着 0/12/32/64/128/192/255）是否**黑得下去**：\n"
+              "      若 12 看着像 60、32 像 99，而 255 仍是白 → 双重 gamma（层纹理被当线性值），\n"
+              "      见 format_needs_linearize()；两侧观感不一致时先看这一排", flush=True)
     else:
         ov.update("你好，我是逆袭。这句话正在被实时翻译，看看贴在你手腕上是什么效果。",
                   "Hello! I'm Nixi. This sentence is being translated in real time.")
@@ -1723,7 +1830,8 @@ if __name__ == "__main__":
     ap.add_argument("--smoke", type=float, default=15.0, metavar="秒",
                     help="建会话并持续提交示例面板，默认 15 秒")
     ap.add_argument("--alpha-test", action="store_true",
-                    help="改提交「透明边距 + 25/50/75/100%% 半透明块 + 实心白字」判定图，"
-                         "用来肉眼验收通透性")
+                    help="改提交「透明边距 + 25/50/75/100%% 半透明块 + 实心白字 + "
+                         "0/12/32/64/128/192/255 灰阶带」判定图，"
+                         "用来肉眼验收通透性与颜色空间（黑不下去 = 双重 gamma）")
     args = ap.parse_args()
     raise SystemExit(_smoke(args.smoke, args.alpha_test))

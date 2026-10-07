@@ -1,0 +1,75 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: main
+nodes_managed: true
+exported_at: "2026-10-06T06:56:13Z"
+modules:
+    "":
+        dir_name: VRChat 实时同传项目根
+        title: VRChat 实时同传项目根
+        scope:
+            - README.md
+            - .gitignore
+            - .gitattributes
+            - requirements.txt
+            - config.example.yaml
+            - run_gui.py
+            - run_chatbox.bat
+            - run_overlay.bat
+            - run_selfcheck.bat
+            - build_exe.bat
+            - install_secret_guard.bat
+            - setup.bat
+            - LICENSE
+            - run_gui.bat
+        source_files: []
+        children:
+            - docs
+            - scripts
+            - tests
+            - vlt_app
+        depends_on: []
+        related_to: []
+    docs:
+        dir_name: 项目文档与多语言指南
+        title: 项目文档与多语言指南
+        scope:
+            - docs/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: scripts
+    scripts:
+        dir_name: 构建、发布与诊断辅助脚本集
+        title: 构建、发布与诊断辅助脚本集
+        scope:
+            - scripts/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: docs
+            - path: vlt_app
+    tests:
+        dir_name: VRChat Live Translate 测试套件
+        title: VRChat Live Translate 测试套件
+        scope:
+            - tests/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: vlt_app
+    vlt_app:
+        dir_name: VRChat 实时同传核心引擎与 GUI
+        title: VRChat 实时同传核心引擎与 GUI
+        scope:
+            - vlt/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: scripts
+            - path: tests

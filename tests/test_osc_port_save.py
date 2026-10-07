@@ -21,12 +21,15 @@
 """
 from __future__ import annotations
 
+import gc
 import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(TESTS))
 
 # 干净环境（CI）没有 API key，而 load_config 默认 require_key=True 会 SystemExit。
 # 给一个拼接出来的假 key：本文件只验配置读写，与 key 真假无关。
@@ -37,7 +40,11 @@ import vlt.i18n as _i18n  # noqa: E402
 
 _i18n.detect_system_language = lambda: "zh"
 
-CONFIG = ROOT / "config.yaml"          # 源码运行的配置路径（与 gui.DEFAULT_CONFIG 同一个）
+# 回填断言的是模板里的 port: 9000（带行尾注释）。开发者本机 config.yaml 可能
+# 改过端口/删了注释 → 假红。统一走沙箱配置（内容 = config.example.yaml，与 CI 一致）。
+from _cfgbox import sandbox_config  # noqa: E402
+
+CONFIG = sandbox_config(reset=True)   # 沙箱配置路径（已同步改写 gui.DEFAULT_CONFIG）
 
 
 def _n_comments(t: str) -> int:
@@ -91,10 +98,29 @@ def _make_gui():
 
 
 def _destroy(gui) -> None:  # noqa: ANN001
+    """按**真实生命周期**收尾：先关设置窗（会停掉电平探针线程），再销毁根窗。
+
+    ⚠️ 顺序不能反，也不能省掉最后的 `gc.collect()`：
+
+    电平探针跑在**后台线程**，它每次 `pw-dump` + `json.loads` 都会触发 GC。而根窗
+    销毁后，设置页那十几个 `tkinter.Variable` 会留在**循环垃圾**里；如果此时还有探针
+    线程活着，GC 就会在那个线程上执行 `Variable.__del__`（内部调 `self._tk.call(...)`）
+    → **非主线程调 Tcl** → Linux 上 `Tcl_AsyncDelete` / 段错误（本机实测 3/3 稳定复现）。
+
+    CI 的 ubuntu runner 没装 PipeWire：`_pw_dump` 在 `shutil.which()` 就抛错、几乎不分配
+    内存、不触发 GC，所以这条**只出现在真实 Linux 用户机器上**，CI 结构性看不见。
+
+    真实产品路径本来就是「关设置窗 → 停探针 → 再退出窗口」，这里补上同一顺序。
+    """
+    try:
+        gui._close_settings()          # 停探针（后台线程）—— 必须在销毁窗口之前
+    except Exception:  # noqa: BLE001
+        pass
     try:
         gui._root.destroy()
     except Exception:  # noqa: BLE001
         pass
+    gc.collect()                       # 主线程清干净 Tk 循环垃圾，别留给下一个用例的探针线程
 
 
 def test_backfill_and_save_keeps_comments() -> None:

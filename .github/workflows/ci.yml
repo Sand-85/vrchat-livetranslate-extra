@@ -211,7 +211,7 @@ jobs:
           GUI_TESTS="tests/test_api_key_gui.py tests/test_config_save.py tests/test_gui_rows.py \
                      tests/test_i18n.py tests/test_level_probe.py tests/test_overlay_conversation.py \
                      tests/test_sponsor.py tests/test_textin.py tests/test_update_dialog.py \
-                     tests/test_vrchat_capture.py"
+                     tests/test_ui_theme_contrast.py tests/test_vrchat_capture.py"
 
           fail=0
           for t in tests/test_*.py; do

@@ -11,9 +11,5 @@ python-osc>=1.9.0         # 发 chatbox 消息（UDP 127.0.0.1:9000）—— 两
 Pillow>=10.0.0            # 把中日文渲染成贴图（手腕屏）/ 收款码缩放
 websockets>=12.0          # 与阿里实时翻译建立双工会话
 numpy>=1.26               # 重采样 / 音频处理
-sounddevice>=0.4.6        # 麦克风采集 + 设备枚举
-                          # ⚠️ Linux 上**只能用于麦克风**：Arch 的 portaudio 不含 PulseAudio
-                          # 后端，枚举不到 PipeWire 的 monitor source（采系统声走 parec，见
-                          # vlt/platform/linux.py）。原因见该模块注释。
 miniaudio>=1.60           # （留给语音路）音频格式转换
 PyYAML>=6.0               # 配置读取

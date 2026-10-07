@@ -12,7 +12,10 @@ pyopenxr>=1.1.6301
 # 其余 Linux 功能都不需要额外的 Python 包：
 #   * 系统声采集 → `pw-record` 子进程读 PCM（PipeWire 原生，monitor 语义）
 #   * 虚拟声卡   → 运行期声明 PipeWire 节点（capture 侧用 Audio/Sink/Internal）＋ `pw-cat` 写入
-#   * 麦克风     → sounddevice（在公共依赖里），PortAudio 走 ALSA
+#   * 麦克风     → `pw-record --target=<源 node.name>` 子进程（PipeWire 原生；不经 PortAudio）
+#   * 试听播放   → `pw-cat --playback` 子进程（同一条原生路径，也不经 PortAudio）
+#
+# ⚠️ 因此 Linux **不需要** sounddevice / PortAudio（那是 Windows 独占，见 requirements-windows.txt）。
 #
 # 需要系统层具备（非 pip 依赖，setup.sh 会体检）：
 #   pipewire（pw-dump / pw-record / pw-cat）

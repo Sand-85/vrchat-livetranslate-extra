@@ -10,13 +10,16 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 from typing import Any
 import threading
 import time
 from pathlib import Path
 
-from .audio import QueueAudioSource, SoundDeviceMicSource
+from .audio import QueueAudioSource
 from .base import PA_LOCK, AudioSource, LoopbackTarget
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 设备枚举
 
@@ -113,6 +116,45 @@ def default_output_index() -> int:
                        .get("defaultOutputDevice", -1))
         finally:
             p.terminate()
+
+
+def default_input_index() -> int:
+    """系统默认**输入**端点在 PortAudio 里的索引；取不到返回 -1。
+
+    与 `default_output_index()` 对偶。优先取 **WASAPI host API 的 `default_input_device`**
+    （与 `query_devices()` 收敛到的那张表同一口径）；拿不到再退 PortAudio 全局默认
+    （`sd.default.device[0]`）。
+
+    用途：让「自动检测」也解析成**具体索引**，再走与手选完全相同的打开通路
+    （原生采样率 + 端点声道数 + 同名回落）—— 否则自动会走 `device=None`，还会绕过
+    「WASAPI 只吃端点原生采样率」那条修复。
+    """
+    try:
+        import sounddevice as sd
+        with PA_LOCK:
+            apis = [dict(a) for a in sd.query_hostapis()]
+            wasapi = next((a for a in apis
+                           if "WASAPI" in str(a.get("name", "")).upper()), None)
+            if wasapi is not None:
+                idx = int(wasapi.get("default_input_device", -1) or -1)
+                if idx >= 0:
+                    return idx
+            dev = sd.default.device
+            return int(dev[0]) if dev and len(dev) > 0 and dev[0] is not None else -1
+    except Exception as exc:                    # noqa: BLE001 — 拿不到就回落 PortAudio 默认
+        print(f"[devices] ⚠️ 取默认输入设备失败（{type(exc).__name__}: {exc}）"
+              "→ 改用 PortAudio 默认输入", flush=True)
+        return -1
+
+
+def _sounddevice_input_name(index: int) -> str:
+    """按 PortAudio 索引取设备名（用 sounddevice，与解析索引同一套口径）。"""
+    try:
+        import sounddevice as sd
+        with PA_LOCK:
+            return str(sd.query_devices(index).get("name") or "")
+    except Exception:                           # noqa: BLE001 — 拿不到名字不是致命错
+        return ""
 
 
 def device_info_by_index(index: int) -> dict:
@@ -358,7 +400,105 @@ def device_native_rate(index: int) -> int:
         return 0
 
 
-def open_mic(device_name: str | None, *, rate: int = 16000, channels: int = 1,
+class SoundDeviceMicSource(QueueAudioSource):
+    """麦克风采集（sounddevice / PortAudio）—— **Windows 独占**。
+
+    Linux 麦克风走原生 `pw-record`（见 `vlt/platform/linux.py: LinuxMicSource`），不经过
+    PortAudio。本类特意放在 `win.py`（Linux 产物里被 `--exclude-module vlt.platform.win`
+    剔除）：它在模块图里 `import sounddevice`，会把 PortAudio 及其依赖
+    （`libportaudio` / `libasound` / `libjack`）拉进包 —— Linux 已不需要，不该为它付这个代价。
+
+    Windows 用 **PortAudio 索引**打开（`device=<int>`）—— 由 `win.open_mic` 经
+    `resolve_device_name(name, "input")` 解析得到，与 v0.3.x 的口径一致（同名端点并存时，
+    选中的物理端点才不会漂）。构造函数仍容忍 `str | int | None`（测试/兼容用）。
+
+    ## 多声道输入
+
+    按调用方给的 `channels` 打开（`win.open_mic` 负责解析出**端点原生声道数**）。开成功后把
+    `self.channels` 回填成**实际**声道数，由下游 `engine.to_16k_mono` /
+    `micproxy.resample_to_48k_stereo` 取均值降为单声道 —— 双声道 / 5.1 / 7.1 输入因此不会
+    只剩第一路。设备只吃 2/1 声道时按 `channel_fallbacks` 逐级回落。
+    """
+
+    label = "mic"
+
+    def __init__(self, loop, device: str | int | None, *, rate: int = 16000,
+                 channels: int = 1, blocksize: int = 1600,
+                 fallbacks: "list[int] | tuple[int, ...]" = (),
+                 channel_fallbacks: "list[int] | tuple[int, ...]" = ()) -> None:
+        super().__init__(loop, rate=rate, channels=max(1, int(channels)))
+        # ⚠️ 不能用 `device or None`：PortAudio 的索引 0 是合法设备，
+        #    被 `or` 判成假值就悄悄回落默认设备了。
+        self._device = None if device in (None, "") else device
+        self._blocksize = blocksize
+        #: 首选设备打不开时按序再试的候选（同名设备的其它 host API 条目）
+        self._fallbacks = tuple(int(f) for f in fallbacks if f != self._device)
+        #: 首选声道数打不开时按序再试的候选（多声道设备被拒时降到 2/1；见 mic_channel_fallbacks）
+        want = self.channels
+        self._channel_candidates = tuple(
+            [want] + [int(c) for c in channel_fallbacks if int(c) >= 1 and int(c) != want])
+
+    def _pump(self, stop: threading.Event) -> None:
+        import sounddevice as sd
+
+        def callback(indata, frames, time_info, status):   # noqa: ANN001
+            if status:
+                log.debug("[mic] callback status: %s", status)
+            self._emit(bytes(indata))
+
+        # 候选顺序：设备（首选 → 同名回落）× 声道数（原生 → 逐级回落到 2/1）。
+        # 每一次失败都留痕 —— 「麦克风没声音」最难查的就是「到底开的是哪个设备、几声道、为什么没开成」。
+        # ★ 多声道设备**按原生声道数打开**（1/2/6/8 都接），下游 `to_16k_mono` 按
+        #   `source.channels` 取均值降为单声道。
+        candidates = [(self._device, False)] + [(f, True) for f in self._fallbacks]
+        last_exc: Exception | None = None
+        for dev, is_dev_fallback in candidates:
+            for ch in self._channel_candidates:
+                # ★ 先回填再开流：PortAudio 可能在 open 返回后立刻回调，先设好才不会
+                #   让引擎拿到「上一轮/构造时」的声道数去降混。
+                self.channels = ch
+                try:
+                    # `with` 退出即关流；而 close() 是「先置 stop → 再 join」，
+                    # 所以关流时采集线程已经不再产生新数据 —— 顺序与 loopback 侧一致。
+                    with sd.RawInputStream(samplerate=self.rate, channels=ch,
+                                           dtype="int16", blocksize=self._blocksize,
+                                           device=dev, callback=callback):
+                        if is_dev_fallback:
+                            print(f"[mic] 首选设备 #{self._device} 打不开，"
+                                  f"已回落到同名设备 #{dev}（{self.rate}Hz ×{ch}ch）", flush=True)
+                        elif ch != self._channel_candidates[0]:
+                            print(f"[mic] 设备 #{dev} 原生 {self._channel_candidates[0]}ch 被拒，"
+                                  f"已回落到 {ch}ch（下游仍降为单声道）", flush=True)
+                        elif ch > 1:
+                            print(f"[mic] 设备 #{dev} 按 {ch} 声道打开（下游降混为单声道）",
+                                  flush=True)
+                        stop.wait()
+                    return
+                except Exception as exc:  # noqa: BLE001 — 换候选再试
+                    last_exc = exc
+                    print(f"[mic] 设备 #{dev} 按 {ch} 声道打不开（{self.rate}Hz）：{exc}",
+                          flush=True)
+                    continue
+        log.warning("[mic] 所有候选设备/声道都打不开（%d 设备 × %d 声道）：%s",
+                    len(candidates), len(self._channel_candidates), last_exc)
+        if last_exc is not None:
+            raise last_exc
+
+
+def mic_channel_fallbacks(primary: int) -> tuple[int, ...]:
+    """多声道设备被拒时的**声道回落候选**：只保留比 `primary` 小的 2 / 1。
+
+    与 loopback 侧口径一致（`PyaudioLoopbackSource` 原生失败回落到 2）—— 目的是
+    「多声道一定能全采到；万一设备只吃 2/1 声道，也要能开起来，而不是直接判死」。
+    """
+    out: list[int] = []
+    for c in (2, 1):
+        if c < int(primary) and c not in out:
+            out.append(c)
+    return tuple(out)
+
+
+def open_mic(device_name: str | None, *, rate: int = 16000, channels: int | None = None,
              blocksize: int) -> AudioSource:
     """麦克风采集（与 Linux 共用同一个实现）。
 
@@ -382,9 +522,15 @@ def open_mic(device_name: str | None, *, rate: int = 16000, channels: int = 1,
     `to_16k_mono(chunk, source.rate, source.channels)` 本来就负责转 16kHz —— 与 loopback 腿同一口径。
     `blocksize` 跟着采样率走，保持约 100ms 一块。
     另外带上**同名回落候选**（见 `same_name_fallbacks`），首选打不开时按序再试并留痕。
+
+    ## 声道数（双声道 / 5.1 / 7.1 都要全采）
+
+    `channels=None`（默认）= 按**端点原生输入声道数**打开（见 `_endpoint_input_channels`）：
+    WASAPI 端点报的是真实声道数（与 `PyaudioLoopbackSource` 同一口径），全声道采集后由
+    `to_16k_mono` 取均值降为单声道。只开 1 声道会丢掉其余声道。设备只吃 2/1 声道时按
+    `channel_fallbacks` 逐级回落。`channels=int` = 显式指定。
     """
     import asyncio
-    import logging
 
     index: int | None = None
     rate_use = int(rate or 16000)
@@ -393,22 +539,54 @@ def open_mic(device_name: str | None, *, rate: int = 16000, channels: int = 1,
         from ..devices import resolve_device_name   # 局部导入，避免与 devices 循环导入
         index = resolve_device_name(device_name, "input")
         if index is None:
-            logging.getLogger(__name__).warning(
-                "[mic] 未找到设备 %r，回退系统默认输入设备", device_name)
+            log.warning("[mic] 未找到设备 %r，回退系统默认输入设备", device_name)
         else:
             native = device_native_rate(index)
             if native and native != rate_use:
                 rate_use = native
             fallbacks = same_name_fallbacks(device_name, "input", exclude=index)
+    else:
+        # ★「自动检测」也解析成**具体索引**，再走与手选完全相同的通路（原生采样率 +
+        #   端点声道数 + 同名回落）。不能停在 `device=None`：那样会绕过「WASAPI 只吃
+        #   端点原生采样率」这条修复，自动时有概率直接 -9997。
+        idx = default_input_index()
+        if idx >= 0:
+            index = idx
+            name = _sounddevice_input_name(idx)
+            print(f"[mic] 自动检测 → 系统默认输入设备：{name or '（未知）'!r}（#{idx}）", flush=True)
+            native = device_native_rate(idx)
+            if native and native != rate_use:
+                rate_use = native
+            if name:
+                fallbacks = same_name_fallbacks(name, "input", exclude=idx)
+        else:
+            print("[mic] 自动检测：拿不到系统默认输入设备 → 改用 PortAudio 默认输入", flush=True)
 
     if rate_use != rate:
         blocksize = int(rate_use * 0.1)        # 保持 ~100ms 一块（块大小跟着采样率走）
 
+    ch = max(1, int(channels)) if channels else _endpoint_input_channels(index)
     src = SoundDeviceMicSource(asyncio.get_running_loop(), index,
-                               rate=rate_use, channels=channels, blocksize=blocksize,
-                               fallbacks=fallbacks)
+                               rate=rate_use, channels=ch, blocksize=blocksize,
+                               fallbacks=fallbacks, channel_fallbacks=mic_channel_fallbacks(ch))
     src.start()
     return src
+
+
+def _endpoint_input_channels(index: int | None) -> int:
+    """端点（`index=None` = 默认输入）的**原生输入声道数**；取不到返回 2。
+
+    ⚠️ 与 loopback 那条腿同一口径：WASAPI 只吃端点自己的声道数，压成别的会被
+    PortAudio 拒（`-9998 Invalid number of channels`，见 `PyaudioLoopbackSource`）。
+    Windows 端点报的就是真实声道数，没有 Linux ALSA 插件「虚报 128」那种坑。
+    """
+    try:
+        import sounddevice as sd
+        info = sd.query_devices(index) if index is not None else sd.query_devices(kind="input")
+        n = int(info.get("max_input_channels", 0) or 0)
+        return n if n >= 1 else 2
+    except Exception:                           # noqa: BLE001 — 查不到不该让整条腿挂掉
+        return 2
 
 
 def open_loopback(target: LoopbackTarget, *, blocksize: int) -> AudioSource:
@@ -432,6 +610,20 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
     """
     from ..output.openvr_overlay import WristOverlay
     return WristOverlay(cfg, config_path=config_path, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------- 麦克风代理
+
+def create_mic_proxy(audio_cfg: dict, mic_name: str | None = None,
+                     on_status=None) -> Any:  # noqa: ANN001
+    """麦克风代理（原声 / 译音一键切）：Windows 走 PortAudio 输出流的原版实现。
+
+    与 Linux 版（`vlt/output/micproxy_linux.py`，`pw-cat` 管道 + 运行时声明虚拟麦）
+    接口与语义对齐；工厂留在平台模块里，共享代码里不出现任何后端名字。
+    """
+    from ..output.micproxy import MicProxy
+    return MicProxy(audio_cfg=audio_cfg, mic_name=mic_name,
+                    on_status=on_status or (lambda *_a: None))
 
 
 # ---------------------------------------------------------------- 桌面叠加窗（issue #11）

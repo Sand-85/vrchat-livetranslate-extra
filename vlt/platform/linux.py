@@ -19,8 +19,14 @@ PipeWire 提供了 PulseAudio 兼容层（`pipewire-pulse`），`pactl`/`parec`/
 会是一堆噪音。
 
 所以：**设备表从 `pw-dump` 构建**（只取 `Audio/Source` 与 `Audio/Sink`），
-而**麦克风打开走 sounddevice 的按名打开**（`device="<node.description>"`，
-sounddevice 接受字符串设备名）。这样既干净，又不引入新的采集依赖。
+**麦克风采集也走 `pw-record`**（`--target=<源 node.name>`）——与本模块其它采集同一条
+原生路径。
+
+> ⚠️ 2026-10 修正：麦克风曾走 sounddevice 的按名打开，但 PortAudio 会把那个名字解析到
+> **JACK** host API 的条目（名字只存在于 JACK 侧），而 `libjack` 由**可选包**
+> `pipewire-jack` 提供 —— 没装它的环境里麦克风整条腿挂掉，而且「自动检测」同样中招。
+> 改走 `pw-record` 后只依赖 PipeWire 本体（已声明/已自检的 `pw-record`）。
+> 顺带：`--channels=1` 让 PipeWire 服务端把源的全部声道降混进一路（双声道/5.1/7.1 都覆盖）。
 
 ## 与 Windows 的形状对齐
 
@@ -47,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from . import child_env
-from .audio import QueueAudioSource, SoundDeviceMicSource
+from .audio import QueueAudioSource
 from .base import AudioSource, LoopbackTarget
 
 log = logging.getLogger(__name__)
@@ -312,6 +318,54 @@ def default_output_index() -> int:
                     if media_class == "Audio/Sink" and str(props.get("node.name")) == target:
                         return node_id
     return -1
+
+
+def default_source_node() -> str:
+    """系统默认**输入源**的 `node.name`（PipeWire 稳定标识）；取不到返回 ""。
+
+    读 WirePlumber 元数据：优先 `default.audio.source`（当前生效），缺了看
+    `default.configured.audio.source`（用户配置的）。「自动检测」据此解析成具体设备，
+    再走与手选完全相同的通路（`pw-record --target=<node.name>`）。
+    """
+    try:
+        dump = _pw_dump()
+    except PipeWireUnavailable:
+        return ""
+    preferred = configured = ""
+    for obj in dump:
+        if obj.get("type") != "PipeWire:Interface:Metadata":
+            continue
+        for entry in (obj.get("metadata") or []):
+            key = entry.get("key")
+            val = entry.get("value")
+            if not isinstance(val, dict):
+                continue
+            name = str(val.get("name") or "")
+            if not name:
+                continue
+            if key == "default.audio.source":
+                preferred = name
+            elif key == "default.configured.audio.source":
+                configured = name
+    return preferred or configured
+
+
+def default_source_name() -> str:
+    """系统默认**输入源**在人可读名字（= 我们设备表里的描述）；取不到返回 ""。
+
+    由 `default_source_node()` 的 `node.name` 映射出 description（给人看、进日志）。
+    """
+    node = default_source_node()
+    if not node:
+        return ""
+    try:
+        dump = _pw_dump()
+    except PipeWireUnavailable:
+        return ""
+    for _node_id, media_class, props in _nodes(dump):
+        if media_class == "Audio/Source" and str(props.get("node.name")) == node:
+            return _display_name(props)
+    return ""
 
 
 def device_info_by_index(index: int) -> dict:
@@ -728,6 +782,20 @@ def open_audio_out(audio_cfg: dict, on_status) -> LinuxAudioOut | None:  # noqa:
     return LinuxAudioOut(cable, sink)
 
 
+def create_mic_proxy(audio_cfg: dict, mic_name: str | None = None,
+                     on_status=None):  # noqa: ANN001
+    """Linux 麦克风代理：`pw-loopback` 声明虚拟麦 + `pw-cat` 写管道驱动输出。
+
+    与 Windows 版同构（见 `vlt/output/micproxy_linux.py` 的模块头）；本函数只是
+    把「平台独占的模块」挡在共享代码之外 —— 与 `open_audio_out` / `create_wrist_overlay`
+    同一条纪律。
+    """
+    from ..output.micproxy_linux import LinuxMicProxy
+
+    return LinuxMicProxy(audio_cfg=audio_cfg, mic_name=mic_name,
+                         on_status=on_status or (lambda *_a: None))
+
+
 
 # ---------------------------------------------------------------- 平台能力探测
 
@@ -748,30 +816,36 @@ _RAW = "--raw"
 
 
 class PwRecordSource(QueueAudioSource):
-    """系统声采集：`pw-record` 子进程读 stdout（PipeWire 原生，monitor 语义）。
+    """系统声采集：`pw-record` 子进程读 stdout（PipeWire 原生）。
+
+    两个用途共用本类（`label` 区分子进程/日志归属）：
+      * **loopback**（`label="loopback"`）：`--target=<sink>` 抓该 sink 的 **monitor**
+        （输出内容的副本）—— Windows 上 WASAPI loopback 的等价物；
+      * **麦克风**（`LinuxMicSource`，`label="mic"`）：`--target=<源 node.name>` 抓该输入源。
+        ⚠️ 之前麦克风走 sounddevice/PortAudio，设备名只解析得到 **JACK** host API 里的条目，
+        于是隐式依赖 `pipewire-jack`（可选包，很多环境没有）；改走 `pw-record` 后只依赖
+        PipeWire 本体（`pw-record`，已声明/已自检），且多声道由 PipeWire 服务端降混。
 
     为什么不用 `parec`：它走的是 PulseAudio 兼容层，实测在本机上直接
     `Connection refused`（兼容层不是必装件）。`pw-record` 连的是 PipeWire 本体。
-
-    `--target=<sink>` 抓的就是该 sink 的 **monitor**（输出内容的副本）——
-    这正是 Windows 上 WASAPI loopback 的等价物。
     """
 
     label = "loopback"
 
-    def __init__(self, loop, *, target: str, rate: int = 16000,
+    def __init__(self, loop, *, target: str = "", rate: int = 16000,
                  channels: int = 1, latency_ms: int = 50) -> None:
         super().__init__(loop, rate=rate, channels=channels)
-        self._target = target
+        self._target = target or ""
         self._latency_ms = latency_ms
         self._block = max(2, int(rate * 0.1)) * 2 * channels   # 100ms 一块
         self._proc: subprocess.Popen | None = None
 
     @property
     def argv(self) -> list[str]:
-        return [
-            "pw-record",
-            f"--target={self._target}",
+        argv = ["pw-record"]
+        if self._target:                 # 空 = 用 PipeWire 默认源/输出（loopback 永远有 target）
+            argv.append(f"--target={self._target}")
+        argv += [
             "--format=s16",
             f"--rate={self.rate}",
             f"--channels={self.channels}",
@@ -779,6 +853,7 @@ class PwRecordSource(QueueAudioSource):
             _RAW,
             "-",
         ]
+        return argv
 
     def _pump(self, stop: threading.Event) -> None:
         self._proc = subprocess.Popen(
@@ -830,43 +905,73 @@ class PwRecordSource(QueueAudioSource):
             return ""
 
 
-def _mic_native_rate(device_name: str | None, fallback: int = 48000) -> int:
-    """设备的原生采样率 —— Linux 上**必须**用它打开 mic。
+class LinuxMicSource(PwRecordSource):
+    """Linux 麦克风采集：`pw-record --target=<源 node.name>`（PipeWire 原生）。
 
-    ⚠️ PortAudio 的 ALSA 后端**不做采样率转换**：设备是 48000 时用 16000 打开会直接
-    `PortAudioError: Invalid sample rate [PaErrorCode -9997]`（真机实测，2026-09）。
-    Windows 的 WASAPI/MME 会自己重采样，所以那边一直用 16k 没事 —— 这是纯 Linux 的坑。
+    与 loopback 同一条路径，**只依赖 PipeWire 本体**（`pw-record`，项目已声明/已自检）。
 
-    查不到设备信息就按 PipeWire 的常规默认 48000（PipeWire 图内统一跑在 48k）。
+    ⚠️ 为什么不再走 sounddevice（2026-10）：PortAudio 在 Linux 上把我们的设备名解析到
+    **JACK** host API（名字只存在于 JACK 条目里），而 `libjack` 由**可选包** `pipewire-jack`
+    提供 —— 没装它的 PipeWire 环境里，按名字开麦直接抛错、整条腿挂掉（且「自动检测」同样中招）。
+    `pw-record --target=<node.name>` 只连 PipeWire 本体，没有这层隐藏依赖。
+
+    `--channels=1`：由 PipeWire 服务端把源的**全部声道降混进这一路**（双声道 / 5.1 / 7.1 都
+    覆盖）—— 正是「把所有声道混在同一个输入端口上」。
     """
-    import sounddevice as sd
-    try:
-        info = sd.query_devices(device_name) if device_name else sd.query_devices(kind="input")
-        rate = int(float(info.get("default_samplerate") or 0))
-    except Exception:  # noqa: BLE001 — 查不到不该让整条腿挂掉
-        return fallback
-    return rate or fallback
+
+    label = "mic"
 
 
-def open_mic(device_name: str | None, *, rate: int = 16000, channels: int = 1,
+def open_mic(device_name: str | None, *, rate: int = 16000, channels: int | None = None,
              blocksize: int) -> AudioSource:
-    """麦克风采集（与 Windows 共用同一个 sounddevice 实现）。
+    """麦克风采集（Linux 走 `pw-record`；Windows 走 sounddevice，见 `vlt/platform/win.py`）。
 
-    设备用**名字**打开（`sd.RawInputStream` 接受字符串设备名），所以不需要在
-    「我们设备表的索引」和「sounddevice 的索引」之间做映射 —— Linux 上那张表来自
-    pw-dump，索引跟 PortAudio 毫无关系。
+    ## 目标解析（描述 → `node.name`）
+    `device_name` 是我们设备表里的**描述**，`pw-record --target=` 要的是 `node.name`，所以先经
+    设备表映射；为空（自动检测）→ `default_source_node()` 取系统默认输入源的 `node.name`。
+    都拿不到就不带 `--target`（PipeWire 默认源）。这样「自动检测」与手选走**同一条通路**。
 
-    ⚠️ 打开用的**不是** `rate`(16000)，而是设备原生率（见 `_mic_native_rate`）：
-        `source.rate` 即原生率，引擎的 `_pump_capture` 会拿它把每块 PCM 重采样到 16k
-        （`to_16k_mono` 已支持 48000/44100 等非整数倍）。`rate` 只作兜底参考。
+    ## 采样率 / 声道
+    直接在 **16kHz 单声道**采集：PipeWire 图内重采样是系统级的，`--channels=1` 会把全部声道
+    降混进这一路。所以引擎里的 `to_16k_mono` 是恒等变换。`channels` 参数在此**忽略**
+    （保留签名只为与 Windows 对齐）。
     """
     import asyncio
 
-    native = _mic_native_rate(device_name)
-    src = SoundDeviceMicSource(asyncio.get_running_loop(), device_name,
-                               rate=native, channels=channels, blocksize=blocksize)
+    target = ""
+    if device_name:
+        target = _mic_target_node(device_name)
+        if target:
+            print(f"[mic] 采集源 {device_name!r} → pw-record --target={target}", flush=True)
+        else:
+            print(f"[mic] ⚠️ 设备表里查不到 {device_name!r} 的 node.name"
+                  " → 用 PipeWire 默认输入", flush=True)
+    else:
+        target = default_source_node()
+        if target:
+            print(f"[mic] 自动检测 → 系统默认输入源 node.name={target!r}", flush=True)
+        else:
+            print("[mic] 自动检测：查不到系统默认输入源 → 用 PipeWire 默认输入", flush=True)
+
+    src = LinuxMicSource(asyncio.get_running_loop(), target=target,
+                         rate=16000, channels=1)
     src.start()
     return src
+
+
+def _mic_target_node(device_name: str | None) -> str:
+    """设备描述（设备表里的 `name`）→ PipeWire `node.name`；查不到返回 ""。"""
+    if not device_name:
+        return ""
+    try:
+        # 局部导入避免与 devices.py↔platform 的循环导入（与 win.open_mic 同一条纪律）。
+        from ..devices import enumerate_mic_devices
+        for info in enumerate_mic_devices():
+            if info.name == device_name:
+                return str(getattr(info, "node_name", "") or "")
+    except Exception:                         # noqa: BLE001 — 查不到不该让整条腿挂掉
+        pass
+    return ""
 
 
 def open_loopback(target: LoopbackTarget, *, blocksize: int) -> AudioSource:

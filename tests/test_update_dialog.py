@@ -25,7 +25,9 @@ from pathlib import Path
 os.environ.setdefault("DASHSCOPE_API_KEY", "sk" + "-ws-" + "updguitest0123456789abcdef")
 
 ROOT = Path(__file__).resolve().parents[1]          # 不写死本机路径：CI / 别人克隆后也能跑
+TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(TESTS))
 
 # 这些用例断言的是中文界面文案（「发现新版本」「立即更新」「下次再说」等按钮/标题）。
 # 界面语言会跟随系统语言（CI 与外国机器是英文系统）→ 必须钉死，
@@ -33,10 +35,17 @@ sys.path.insert(0, str(ROOT))
 import vlt.i18n as _i18n  # noqa: E402
 _i18n.detect_system_language = lambda: "zh"
 
+# ⚠️ 钉死语言还不够：GUI 起界面时**配置里的 ui.lang 优先于系统语言检测**（gui.py），
+# 开发者本机 config.yaml 若是 `lang: en`，这些中文断言就全红（CI 干净所以绿）。
+# 统一走沙箱配置（内容 = config.example.yaml，与 CI 一致），也顺带隔离
+# update_ignored 残留 —— 「不再提示这个版本」会真写 config，测完不用还原用户配置。
+from _cfgbox import sandbox_config                  # noqa: E402
+
 import vlt.gui as vlt_gui                            # noqa: E402
 from vlt import __version__                          # noqa: E402
 from vlt import update_check as uc                   # noqa: E402
-from vlt.config import DEFAULT_CONFIG                # noqa: E402
+
+DEFAULT_CONFIG = sandbox_config(reset=True)
 
 MB = 1024 * 1024
 OUT = ROOT / "out" / "update_dialog"
@@ -99,6 +108,12 @@ def _destroy(gui) -> None:
             closer()
         except Exception:  # noqa: BLE001
             pass
+    # 取消 poll 循环，防止窗口销毁后 after 回调仍在事件队列里
+    try:
+        from vlt import gui_chat
+        gui_chat.cancel_poll(gui._chat_ctx, gui._root)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         gui._root.destroy()
     except Exception:  # noqa: BLE001
@@ -1015,15 +1030,8 @@ def test_updater_env_strips_pyinstaller_vars() -> None:
 
 
 def main() -> int:
-    # config.yaml 备份/还原（照抄 tests/test_config_save.py 的模式）：
-    # 「不再提示这个版本」会真写它，测完必须原样放回；CI 上没有它就先按模板生成、测完删掉。
-    cfg_existed = DEFAULT_CONFIG.exists()
-    cfg_before = DEFAULT_CONFIG.read_text(encoding="utf-8") if cfg_existed else None
-    if not cfg_existed:
-        DEFAULT_CONFIG.write_text((ROOT / "config.example.yaml").read_text(encoding="utf-8"),
-                                  encoding="utf-8")
-        print("config.yaml 不存在 → 已从 config.example.yaml 生成（测试结束会删掉）")
-
+    # 配置已在模块级指向沙箱（临时目录 + 模板内容），不碰仓库根的 config.yaml，
+    # 也不再需要备份/还原 —— 沙箱随临时目录丢弃。
     tests = [
         test_updater_env_strips_pyinstaller_vars,
         test_update_dialog_and_ignore,
@@ -1047,21 +1055,14 @@ def main() -> int:
     ]
     print("更新弹窗/下载窗/设置区接线验收：")
     failed = 0
-    try:
-        for t in tests:
-            try:
-                t()
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                import traceback
-                print(f"  ❌ {t.__name__}: {type(exc).__name__}: {exc}")
-                traceback.print_exc()
-    finally:
-        if cfg_before is not None:
-            DEFAULT_CONFIG.write_text(cfg_before, encoding="utf-8")
-        else:
-            DEFAULT_CONFIG.unlink(missing_ok=True)
-        print("已还原 config.yaml")
+    for t in tests:
+        try:
+            t()
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            import traceback
+            print(f"  ❌ {t.__name__}: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
     print()
     if failed:
         print(f"❌ {failed} 个用例失败")

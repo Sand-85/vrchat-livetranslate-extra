@@ -32,7 +32,15 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(TESTS))
+
+# GUI 用例断言「门限默认启用」（gate_enabled is True）与模板一致。
+# 开发者本机 config.yaml 若是 gate_enabled: false，就会假红 → 统一走沙箱配置
+# （内容 = config.example.yaml，gate_enabled: true，与 CI 一致）。
+from _cfgbox import sandbox_config  # noqa: E402
+sandbox_config(reset=True)
 
 CHUNK = 0.1          # 每块时长（秒）：3200B @16kHz s16le mono
 

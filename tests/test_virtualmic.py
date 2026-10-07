@@ -480,6 +480,149 @@ def test_engine_marks_sentence_boundaries():
     print(f"  引擎在句子边界封句 OK（推入 {vm.pushed} 段，封句 {vm.marks} 次）")
 
 
+def test_engine_uses_injected_audio_sink():
+    """★ 注入 audio_sink（麦克风代理的 TranslatedSink）时：引擎**不自建** VirtualMic、
+    **不 pick 设备**；停翻译（_cleanup）时**不 close** 注入的 sink（它归代理管）。
+
+    这是「原声/译音一键切换」的地基：虚拟声卡输出流由代理独占持有，引擎只把译音 PCM
+    灌进代理那条常驻流。若引擎误自建 / 误关，切换时就会出现「两条流写同一设备」或
+    「停翻译把代理的输出流也一起关了」的事故 —— 用会炸的桩把这两条路都堵死来证明没走。
+    """
+    import asyncio
+    from vlt.config import AppConfig, Direction
+    from vlt.engine import Engine, EngineEvents
+
+    class RecordingSink:
+        def __init__(self) -> None:
+            self.closed = 0
+            self.pushed = 0
+            self.device_name = "proxy-translated-sink"
+
+        def open(self) -> bool:
+            raise AssertionError("引擎不该 open 注入的 sink（它归代理管）")
+
+        def push(self, pcm: bytes) -> None:  # noqa: ARG002
+            self.pushed += 1
+
+        def end_sentence(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed += 1
+
+    class BoomVM:
+        def __init__(self, *a, **k) -> None:  # noqa: ANN002, ANN003
+            raise AssertionError("注入 sink 时引擎不该自建 VirtualMic")
+
+    def _boom_pick(*a, **k):  # noqa: ANN002, ANN003
+        raise AssertionError("注入 sink 时引擎不该 pick 输出设备")
+
+    sink = RecordingSink()
+    cfg = AppConfig(
+        session_base={"model": "x", "base_url": "x", "voice": "x", "api_key": "x",
+                      "workspace_id": "", "reconnect_backoff": [1],
+                      "max_new_sessions_per_minute": 10, "final_silence_s": 1.0},
+        directions={"mine": Direction(source_lang="zh", target_lang="en", output_audio=True)},
+        chatbox={}, merger={}, overlay={},
+        output={"audio": {"enabled": True, "device": ["voicemeeter input"], "sample_rate": 48000}},
+    )
+    with _stub_audio_out(win_vm=BoomVM, win_pick=_boom_pick,
+                         linux_factory=lambda _c, _s: None):
+        eng = Engine(cfg=cfg, direction="mine", source="mic", sinks=set(),
+                     events=EngineEvents(on_status=lambda lvl, msg: None),
+                     audio_sink=sink)
+        eng._setup_virtualmic(cfg.output["audio"])       # 注入路径：直接返回，不碰桩
+        assert eng.virtualmic is sink, "应直接采用注入的 sink，不自建 VirtualMic"
+        assert eng._owns_virtualmic is False, "注入的 sink 不归引擎所有"
+        asyncio.run(eng._cleanup())                      # 停翻译收尾
+        assert sink.closed == 0, "共享 sink 归代理管，引擎停翻译时绝不能 close 它"
+        assert eng.virtualmic is None and eng._owns_virtualmic is False
+    print("  注入 audio_sink：不自建 VirtualMic、不 pick 设备、停翻译不 close OK")
+
+
+def test_fallback_computed_in_auto_chain_branch():
+    """★ 「自动回退链」档（device_name 为空）挑中的虚拟声卡，也必须带同名回落候选。
+
+    真机事故（2026-10-06 测试者）：配置里 `device_name` 为空（界面下拉停在「自动检测」）时，
+    `_make_audio_out` 走 `pick_output_device(patterns)` 那条分支，而 `fallbacks` 一直是空列表
+    → 虚拟声卡的 WASAPI 端点打不开（真机必现 `-9999 … WdmSyncIoctl … GLE = 0x490`）时
+    **一次候选都不试**，直接把「译音输出」整条腿判死；指定设备名时反而正常回落。
+
+    判据：回退链分支也要算候选（桩成同名设备 #31），且首选 #40 打不开时能真的回到 #31、
+    译音输出仍然活着。
+    """
+    from vlt.config import AppConfig, Direction
+    from vlt.engine import Engine, EngineEvents
+    import vlt.engine as E
+    from vlt.output.virtualmic import VirtualMic as RealVirtualMic
+    from vlt import platform
+
+    if not platform.IS_WINDOWS:
+        # `Engine._make_audio_out` 在 Linux 上是**早返回**（走 `platform.open_audio_out`
+        # 运行时声明 PipeWire 节点），而「同名回落候选」是 **Windows 独占**分支的补丁 ——
+        # 只有 WASAPI 端点才会 `-9999` 打不开、需要按 host API 回落。
+        # 所以这里照仓库口径**显式跳过、不静默**（上游这条用例没有平台守卫，
+        # 在 Linux CI 上会假红；已在本机复现 upstream/main 原样即失败）。
+        print("  [skip] 非 Windows：同名回落候选是 Windows 独占分支"
+              "（Linux 走运行时声明节点，没有 host API 回落这回事）")
+        return
+
+    cfg = AppConfig(
+        session_base={"model": "x", "base_url": "x", "voice": "x", "api_key": "x",
+                      "workspace_id": "", "reconnect_backoff": [1],
+                      "max_new_sessions_per_minute": 10, "final_silence_s": 1.0},
+        directions={"mine": Direction(source_lang="zh", target_lang="en", output_audio=True)},
+        chatbox={}, merger={}, overlay={},
+        # ⚠️ 故意不写 device_name —— 复刻真机那份配置（只有回退链）
+        output={"audio": {"enabled": True, "device": ["voicemeeter input"],
+                          "sample_rate": 48000}},
+    )
+
+    statuses: list[tuple[str, str]] = []
+    asked: list[tuple[str, object]] = []
+
+    class RecordingVirtualMic(RealVirtualMic):
+        def open(self) -> bool:
+            # 复刻真机：首选（WASAPI 那条）打不开，同名回落能开
+            for i, dev in enumerate([self._device_index, *self._device_fallbacks]):
+                if i == 0:
+                    self._on_status("warn", f"虚拟声卡 #{dev} 打不开：-9999")
+                    continue
+                self._open_device_index = dev
+                self._on_status("warn", f"虚拟声卡 #{self._device_index} 打不开，"
+                                        f"已回落到同名设备 #{dev}")
+                return True
+            self._on_status("error", f"打开虚拟声卡失败（#{self._device_index}）")
+            return False
+
+    orig_pick, orig_vm = E.pick_output_device, E.VirtualMic
+    orig_fb = platform.output_device_fallbacks
+
+    def _fb(name, exclude=None):
+        asked.append((name, exclude))
+        return [31]                       # 同名输出设备在别的 host API 下的条目
+
+    E.pick_output_device = lambda patterns=None: (  # noqa: ARG005
+        40, "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)", 48000)
+    E.VirtualMic = RecordingVirtualMic
+    platform.output_device_fallbacks = _fb           # type: ignore[assignment]
+    try:
+        engine = Engine(cfg=cfg, direction="mine", source="mic", sinks=set(),
+                        events=EngineEvents(on_status=lambda lvl, msg: statuses.append((lvl, msg))))
+        engine._setup_virtualmic(cfg.output["audio"])
+    finally:
+        E.pick_output_device, E.VirtualMic = orig_pick, orig_vm
+        platform.output_device_fallbacks = orig_fb   # type: ignore[assignment]
+
+    assert asked, "回退链分支没有去算同名回落候选（这就是那个 bug）"
+    assert asked[0][1] == 40, f"算候选时应排除首选设备本身：{asked[0]!r}"
+    vm = engine.virtualmic
+    assert vm is not None, "首选打不开但同名回落可用时，译音输出不该被禁用"
+    assert vm._open_device_index == 31, f"没有回落到 #31：{vm._open_device_index}"
+    assert any("已回落到同名设备 #31" in m for _, m in statuses), statuses
+    print("  回退链档也算同名回落候选（#40 打不开 → 回落 #31，译音输出仍可用）OK")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
     print("test_virtualmic:")
@@ -497,4 +640,6 @@ if __name__ == "__main__":
     test_overflow_drops_whole_sentences_only()
     test_playing_sentence_not_dropped()
     test_engine_marks_sentence_boundaries()
+    test_engine_uses_injected_audio_sink()
+    test_fallback_computed_in_auto_chain_branch()
     print("ALL PASSED")

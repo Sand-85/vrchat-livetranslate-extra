@@ -1,0 +1,274 @@
+"""UI 构建布局：从 ``vlt.gui`` 提取的 Tk 控件构造代码。
+
+⚠️ 本模块 **不许** ``import vlt.gui``（防循环引用）。
+"""
+from __future__ import annotations
+
+import tkinter as tk
+from tkinter import ttk
+
+from . import ui_tk
+from . import gui_voice
+from .i18n import t
+from .platform import IS_WINDOWS
+from .paths import BUNDLE_DIR
+from .ui_text import (
+    SOURCE_LANGS, TARGET_LANGS,
+    _lang_label,
+)
+from .ui_theme import (
+    ACCENT, BORDER, PANEL, SURFACE, TEXT,
+)
+from .ui_tk import _combo_width, _char_width_for
+
+
+def apply_ui_font(root) -> None:
+    """按当前平台重绑界面字体常量。"""
+    ui_tk.apply_ui_font(root)
+    # 同步 gui 模块全局（延迟导入避免循环）
+    import vlt.gui as _g
+    for attr in ("FONT", "FONT_SMALL", "FONT_META", "FONT_UI", "FONT_STATUS",
+                 "FONT_BOLD_SM", "FONT_BOLD_MD", "FONT_BOLD_LG"):
+        setattr(_g, attr, getattr(ui_tk, attr))
+
+
+def build_ui(gui) -> None:
+    """构建完整界面。"""
+    gui._root = tk.Tk()
+    gui._root.title(t("VRChat 实时同传"))
+    gui._root.geometry("940x600")
+    gui._root.minsize(928, 460)
+    gui._root.configure(bg=PANEL)
+    apply_ui_font(gui._root)
+    set_window_icon(gui)
+    gui._apply_theme()
+    build_controls(gui)
+    build_output_row(gui)
+    gui._build_room_row()
+    _divider(gui)
+    gui._build_chat()
+    _divider(gui)
+    gui._build_input_row()
+    gui._build_status()
+    gui._build_settings_dialog()
+    _apply_dark_titlebar(gui)
+    gui._root.protocol("WM_DELETE_WINDOW", gui._on_close)
+    gui._update_direction_langs()
+    gui._fit_window_width()
+    gui._check_api_key()
+    gui._poll()
+    gui._start_device_scan()
+    gui._update_check_job = gui._root.after(3000, gui._schedule_update_check)
+    gui._check_pending_update_at_startup()
+    gui._schedule_version_changed_hint()
+    # ↓ 本仓库增强：启动后延迟拉「本账号自定义音色」与「范本样本更新」
+    # ⚠️ 都用 `after()` **延迟**触发，别在这里直接起线程：它们持着 GUI 的绑定方法，
+    #    而 CI 那些「真开窗口」的用例不跑 mainloop → `after` 永不触发（干净）；
+    #    真跑时启动几秒后才联网，也避开启动高峰。（之前直接起线程，把 Tk 拆卸竞态
+    #    `Tcl_AsyncDelete` 的间歇红放大了。）
+    gui._root.after(4000, gui._kick_tts_voice_list)   # 拉本账号自定义音色（只读、免费）
+    gui._root.after(4500, gui._kick_sample_check)     # 查范本样本更新（只读、几 KB）
+
+
+def fit_window_width(gui) -> None:
+    """按当前界面语言定窗口宽度。"""
+    from . import i18n as _i18n_mod
+    try:
+        gui._root.update_idletasks()
+        need = gui._root.winfo_reqwidth() + 8
+        want = max(940, need)
+        screen = int(gui._root.winfo_screenwidth() or 0)
+        if screen:
+            want = min(want, max(760, screen - 16))
+        height = max(600, gui._root.winfo_reqheight())
+        gui._root.geometry(f"{want}x{height}")
+        gui._root.minsize(min(want, need), 460)
+        if want > 940:
+            print(f"[ui] 界面语言 {_i18n_mod.current_language()}：文案较宽，"
+                  f"窗口按需求开到 {want}px（基准 940 / 需求 {need}）", flush=True)
+        if need > want:
+            print(f"[ui] ⚠️ 屏幕只有 {screen}px，内容需要 {need}px 装不下，"
+                  f"窗口开到 {want}px", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ui] ⚠️ 窗口宽度自适应失败：{type(exc).__name__}: {exc}", flush=True)
+
+
+def set_window_icon(gui) -> None:
+    """窗口图标。"""
+    assets = BUNDLE_DIR / "assets"
+    try:
+        if IS_WINDOWS:
+            ico = assets / "app.ico"
+            if ico.exists():
+                gui._root.iconbitmap(default=str(ico)); return
+        png = assets / "app.png"
+        if png.exists():
+            gui._icon_img = tk.PhotoImage(file=str(png))
+            gui._root.iconphoto(True, gui._icon_img); return
+        print(f"[gui] ⚠️ 没找到窗口图标（{assets}）", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[gui] ⚠️ 设置窗口图标失败：{exc}", flush=True)
+
+
+def _apply_dark_titlebar(gui, win=None) -> None:
+    """Windows 深色标题栏。"""
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+        w = win if win is not None else gui._root
+        w.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(w.winfo_id())
+        value = ctypes.c_int(1)
+        for attr in (20, 19):
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)) == 0:
+                break
+    except Exception:
+        pass
+
+
+def _divider(gui) -> None:
+    tk.Frame(gui._root, bg=BORDER, height=1, bd=0,
+             highlightthickness=0).pack(fill=tk.X)
+
+
+def _vsep(parent) -> None:
+    ttk.Separator(parent, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y,
+                                                    padx=12, pady=5)
+
+
+def _indicator_kw() -> dict:
+    return dict(bg=PANEL, fg=TEXT, activebackground=PANEL,
+                activeforeground="#ffffff", selectcolor=SURFACE,
+                highlightthickness=0, bd=0, font=ui_tk.FONT_UI)
+
+
+def _attach_edit_menu(gui, widget) -> None:
+    """给文本输入控件挂右键菜单。"""
+    try:
+        menu = tk.Menu(widget, tearoff=0, bg=SURFACE, foreground=TEXT,
+                       activebackground=ACCENT, activeforeground="#ffffff", bd=0)
+        for label, action in ((t("剪切"), "<<Cut>>"), (t("复制"), "<<Copy>>"),
+                              (t("粘贴"), "<<Paste>>"), (t("全选"), "<<SelectAll>>")):
+            menu.add_command(label=label,
+                             command=lambda a=action: widget.event_generate(a))
+        widget._edit_menu = menu
+        def _popup(event):
+            try:
+                widget.focus_set()
+                menu.tk_popup(event.x_root, event.y_root)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[ui] ⚠️ 右键菜单失败：{exc}", flush=True)
+            finally:
+                menu.grab_release()
+        widget.bind("<Button-3>", _popup, add="+")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ui] ⚠️ 挂右键菜单失败：{exc}", flush=True)
+
+
+# ================================================================ 第一行：会话控制
+
+def build_controls(gui) -> None:
+    """第一行 = 开/停 | 方向 | 语言对。"""
+    ctrl = ttk.Frame(gui._root, padding=(14, 12, 14, 8))
+    ctrl.pack(fill=tk.X)
+    gui._settings_btn = ttk.Button(ctrl, text=t("⚙ 设置"),
+                                    command=gui._open_settings)
+    gui._settings_btn.pack(side=tk.RIGHT)
+    gui._sponsor_btn = ttk.Button(ctrl, text=t("☕ 赞助"),
+                                   command=gui._open_sponsor)
+    gui._sponsor_btn.pack(side=tk.RIGHT, padx=(0, 8))
+    gui._start_btn = ttk.Button(ctrl, text=t("开始翻译"), style="Accent.TButton",
+                                 command=gui._start)
+    gui._start_btn.pack(side=tk.LEFT, padx=(0, 8))
+    gui._stop_btn = ttk.Button(ctrl, text=t("停止翻译"), command=gui._stop,
+                                state=tk.DISABLED)
+    gui._stop_btn.pack(side=tk.LEFT)
+    _vsep(ctrl)
+    ttk.Label(ctrl, text=t("方向:")).pack(side=tk.LEFT)
+    dir_frame = ttk.Frame(ctrl)
+    dir_frame.pack(side=tk.LEFT)
+    gui._direction_var = tk.StringVar(
+        value=str((gui._cfg.ui or {}).get("direction", "mine")))
+    if gui._direction_var.get() not in ("mine", "theirs", "dual"):
+        gui._direction_var.set("mine")
+    radio_kw = dict(variable=gui._direction_var,
+                    command=gui._on_direction_change, **_indicator_kw())
+    tk.Radiobutton(dir_frame, text=t("我说"), value="mine",
+                   **radio_kw).pack(side=tk.LEFT, padx=(8, 0))
+    tk.Radiobutton(dir_frame, text=t("别人说"), value="theirs",
+                   **radio_kw).pack(side=tk.LEFT, padx=(10, 0))
+    tk.Radiobutton(dir_frame, text=t("双向同时"), value="dual",
+                   **radio_kw).pack(side=tk.LEFT, padx=(10, 0))
+    _vsep(ctrl)
+    gui._source_combo = ttk.Combobox(
+        ctrl, values=[_lang_label(k) for k in SOURCE_LANGS], state="readonly",
+        width=_combo_width([_lang_label(k) for k in SOURCE_LANGS]))
+    gui._source_combo.pack(side=tk.LEFT)
+    gui._source_combo.bind("<<ComboboxSelected>>", gui._on_lang_change)
+    ttk.Label(ctrl, text="→", style="Dim.TLabel").pack(side=tk.LEFT, padx=6)
+    gui._target_combo = ttk.Combobox(
+        ctrl, values=[_lang_label(k) for k in TARGET_LANGS], state="readonly",
+        width=_combo_width([_lang_label(k) for k in TARGET_LANGS]))
+    gui._target_combo.pack(side=tk.LEFT)
+    gui._target_combo.bind("<<ComboboxSelected>>", gui._on_lang_change)
+
+
+# ================================================================ 第二行：输出面
+
+def build_output_row(gui) -> None:
+    """第二行 = 输出勾选 + key 状态入口。"""
+    out_frame = ttk.Frame(gui._root, padding=(14, 0, 14, 10))
+    out_frame.pack(fill=tk.X)
+    gui._key_slot = ttk.Frame(out_frame)
+    gui._key_slot.pack(side=tk.RIGHT, padx=(0, 4))
+    gui._key_chip = ttk.Label(gui._key_slot, text="", style="Chip.TLabel")
+    gui._key_btn = ttk.Button(gui._key_slot, text="", style="ChipWarn.TButton",
+                               command=gui._open_qianwen_signup)
+    gui._key_chip.pack()
+    ttk.Label(out_frame, text=t("输出:"), style="Dim.TLabel").pack(side=tk.LEFT)
+    gui._chatbox_var = tk.BooleanVar(
+        value=bool((gui._cfg.ui or {}).get("chatbox", True)))
+    gui._overlay_var = tk.BooleanVar(
+        value=bool((gui._cfg.ui or {}).get("overlay", False)))
+    _audio_cfg = ((gui._cfg.output.get("audio") or {})
+                  if isinstance(gui._cfg.output, dict) else {})
+    gui._vmic_var = tk.BooleanVar(value=bool(_audio_cfg.get("enabled", False)))
+    ik = _indicator_kw()
+    tk.Checkbutton(out_frame, text="chatbox", variable=gui._chatbox_var,
+                   command=gui._on_chatbox_toggle, **ik).pack(side=tk.LEFT, padx=(6, 0))
+    # 气泡显示**原文 / 译文**（互斥二选一，只影响 chatbox 气泡）。chatbox 没勾时置灰 ——
+    # 与下面「🎙 原声」按钮同一套双保险：控件默认态是 NORMAL，不显式刷一次就会看着
+    # 能点、点了没用（见 voice_mode_btn 那段注释）。宽度按两种文案里更宽的那个申请，
+    # 否则切到「原文」时中/日/俄文案会被裁（test_i18n 的固定宽度守卫会抓）。
+    gui._chatbox_text_btn = ttk.Button(
+        out_frame, text="",
+        width=max(_char_width_for(t("🌐 气泡: 译文"), ui_tk.FONT_UI, 6),
+                  _char_width_for(t("📝 气泡: 原文"), ui_tk.FONT_UI, 6)),
+        command=gui._on_chatbox_text_toggle)
+    gui._chatbox_text_btn.pack(side=tk.LEFT, padx=(6, 0))
+    gui._refresh_chatbox_text_btn()
+    tk.Checkbutton(out_frame, text=t("手腕屏"), variable=gui._overlay_var,
+                   command=gui._on_overlay_toggle, **ik).pack(side=tk.LEFT, padx=(10, 0))
+    tk.Checkbutton(out_frame, text=t("译音输出"), variable=gui._vmic_var,
+                   command=gui._save_audio_flag, **ik).pack(side=tk.LEFT, padx=(10, 0))
+    # 原声/译音切换按钮（依赖 proxy；无 proxy 时禁用）
+    from .ui_tk import FONT_UI as _FONT_UI
+    gui._voice_mode_btn = ttk.Button(
+        out_frame, text=t("🎙 原声"), width=max(_char_width_for(t("🎙 原声"), _FONT_UI, 6),
+                                                  _char_width_for(t("🗣 译音"), _FONT_UI, 6)),
+        command=lambda: gui_voice.toggle_voice_mode(
+            gui._voice_ctx, vmic_get=lambda: bool(gui._vmic_var.get()),
+            set_status=gui._set_status, refresh_btn=gui._refresh_voice_mode_btn))
+    gui._voice_mode_btn.pack(side=tk.LEFT, padx=(10, 0))
+    gui._voice_ctx.voice_mode_btn = gui._voice_mode_btn  # 同步到 ctx
+    # ★ 建完立刻对齐一次档位/可用态，**不能**等到有人点它才刷新：
+    #   本仓库当前 `_proxy` 恒为 None（Linux 永远无 proxy；Windows 的麦克风代理尚未接线），
+    #   而 `refresh_voice_mode_btn` 对「无 proxy」的判定是**禁用**。少了这一行，按钮会以
+    #   NORMAL 出厂，成了一颗看着能点、点了只 `return` 的死按钮（Linux 实测）。
+    gui._refresh_voice_mode_btn()
+    gui._desktop_var = tk.BooleanVar(
+        value=bool((gui._cfg.ui or {}).get("desktop_overlay", False)))
+    tk.Checkbutton(out_frame, text=t("桌面字幕"), variable=gui._desktop_var,
+                   command=gui._on_desktop_toggle, **ik).pack(side=tk.LEFT, padx=(10, 0))

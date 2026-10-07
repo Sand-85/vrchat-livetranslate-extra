@@ -118,65 +118,11 @@ class QueueAudioSource:
                         type(exc).__name__, exc)
 
 
-class SoundDeviceMicSource(QueueAudioSource):
-    """麦克风采集（sounddevice / PortAudio）——**两个平台共用**。
-
-    Windows 走 WASAPI、Linux 走 ALSA（pipewire-alsa），但 sounddevice 的接口一致，
-    所以实现共用；差别只在**设备怎么指定**：
-
-    * Linux 用**名字**（`sd.RawInputStream` 接受字符串）—— 我们的设备表来自
-      pw-dump，索引与 PortAudio 根本不是一回事，不能混用；
-    * Windows 用 **PortAudio 索引** —— 由 `vlt/platform/win.py: open_mic` 经
-      `resolve_device_name(name, "input")` 解析得到，与 v0.3.x 的打开口径一致
-      （同名端点并存时，选中的物理端点才不会漂）。
-
-    所以这里两种都能收：`str | int | None`。
-    """
-
-    label = "mic"
-
-    def __init__(self, loop, device: str | int | None, *, rate: int = 16000,
-                 channels: int = 1, blocksize: int = 1600,
-                 fallbacks: "list[int] | tuple[int, ...]" = ()) -> None:
-        super().__init__(loop, rate=rate, channels=channels)
-        # ⚠️ 不能用 `device or None`：PortAudio 的索引 0 是合法设备，
-        #    被 `or` 判成假值就悄悄回落默认设备了。
-        self._device = None if device in (None, "") else device
-        self._blocksize = blocksize
-        #: 首选设备打不开时按序再试的候选（Windows：同名设备的其它 host API 条目）
-        self._fallbacks = tuple(int(f) for f in fallbacks if f != self._device)
-
-    def _pump(self, stop: threading.Event) -> None:
-        import sounddevice as sd
-
-        def callback(indata, frames, time_info, status):   # noqa: ANN001
-            if status:
-                log.debug("[mic] callback status: %s", status)
-            self._emit(bytes(indata))
-
-        # 候选顺序：首选 → 同名回落（见 `platform/win.py: same_name_fallbacks`）。
-        # 每一次失败都留痕 —— 「麦克风没声音」最难查的就是「到底开的是哪个设备、为什么没开成」。
-        candidates = [(self._device, False)] + [(f, True) for f in self._fallbacks]
-        last_exc: Exception | None = None
-        for dev, is_fallback in candidates:
-            try:
-                # `with` 退出即关流；而 close() 是「先置 stop → 再 join」，
-                # 所以关流时采集线程已经不再产生新数据 —— 顺序与 loopback 侧一致。
-                with sd.RawInputStream(samplerate=self.rate, channels=self.channels,
-                                       dtype="int16", blocksize=self._blocksize,
-                                       device=dev, callback=callback):
-                    if is_fallback:
-                        print(f"[mic] 首选设备 #{self._device} 打不开，"
-                              f"已回落到同名设备 #{dev}（{self.rate}Hz）", flush=True)
-                    stop.wait()
-                return
-            except Exception as exc:  # noqa: BLE001 — 换候选再试
-                last_exc = exc
-                print(f"[mic] 设备 #{dev} 打不开（{self.rate}Hz）：{exc}", flush=True)
-                continue
-        log.warning("[mic] 所有候选设备都打不开（共 %d 个）：%s", len(candidates), last_exc)
-        if last_exc is not None:
-            raise last_exc
+# `SoundDeviceMicSource` / `mic_channel_fallbacks` 已移到 `vlt/platform/win.py`（现在只服务 Windows）。
+# 理由：它们在 Linux 模块图里会 `import sounddevice` → PyInstaller 把 PortAudio 及其依赖
+# （libportaudio / libasound / libjack）收进包；而 Linux 麦克风已改走原生 `pw-record`，
+# 这些库既不需要、构建机也不必再装。放在 `win.py`（Linux 产物里被 `--exclude-module` 剔除）
+# 就能让 Linux 侧彻底不碰 PortAudio。
 
 
 def _mix_pcm16(chunks: list[bytes]) -> bytes:

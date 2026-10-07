@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: vlt_app
+title: VRChat 实时同传核心引擎与 GUI
+scope:
+    - vlt/
+source_files: []
+depends_on: []
+related_to:
+    - path: scripts
+    - path: tests

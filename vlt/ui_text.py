@@ -219,8 +219,26 @@ def _play_pcm_local(pcm_24k_mono: bytes) -> None:
 
     试听走本地扬声器，绝不进虚拟声卡 —— 否则对面会在 VRChat 里听到你的试听音。
     离线测试会把它打桩替换（CI 机器没有音频设备，也不该真出声）。
+
+    ⚠️ 平台差异：Linux 走 **`pw-cat --playback`**（PipeWire 原生，与采集同一条），
+    **不再经过 PortAudio** —— 这样 Linux 产物可以整个不打包 sounddevice/PortAudio，
+    少一个「缺可选包就静默失效」的隐藏依赖。Windows 仍走 sounddevice。
+    失败会抛出（调用方按「试听失败」处理），不静默。
     """
     if not pcm_24k_mono:
+        return
+    if platform.IS_LINUX:
+        import subprocess
+
+        res = subprocess.run(
+            ["pw-cat", "--playback", "--format=s16", "--rate=24000",
+             "--channels=1", "--raw", "-"],       # `--raw` 不能省：不给会按容器格式打开而没播出去
+            input=pcm_24k_mono, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            env=platform.child_env(), timeout=60)
+        if res.returncode != 0:
+            err = res.stderr.decode("utf-8", "replace").strip()
+            raise RuntimeError(f"pw-cat 播放失败：退出码 {res.returncode}"
+                               + (f"：{err}" if err else ""))
         return
     import numpy as np
     import sounddevice as sd

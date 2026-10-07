@@ -42,7 +42,8 @@ Linux 侧的实现依据（为什么这么做、哪些路试过不通）都在
    - 判断是否就绪：`XR_RUNTIME_JSON` 指向一个运行时清单，**或** `~/.config/openxr/1/active_runtime.json`
      存在（系统级路径也可能生效）。`./setup.sh` 只检查「装了哪些运行时」，**装了 ≠ 被选中**
 4. **Python 3.11** —— 只用 `setup.sh` 的话这条它会自己处理（有 `uv` 就自动拉一份 3.11）
-5. **`libportaudio`**（麦克风采集）：`pacman -S portaudio` / `apt install libportaudio2`
+5. ~~`libportaudio`~~ —— **Linux 已不需要**：麦克风走 PipeWire 原生 `pw-record`（见第 2 条），
+   不再经过 PortAudio。只有 **Windows 版**用 sounddevice/PortAudio。
 6. **一套中日韩字体**（`pacman -S noto-fonts-cjk` / `apt install fonts-noto-cjk`）。
    ⚠️ **AppImage 自 2026-10 起不再自带字体**，GUI 与手腕屏都靠宿主机 fontconfig 提供字形；
    缺字体时界面会是空壳/豆腐块。
@@ -64,7 +65,7 @@ chmod +x VRChatLiveTranslate-x86_64.AppImage
 ```
 
 - Python 解释器与全部 Python 依赖都打在包里 —— **不需要**装 Python、不需要跑 `./setup.sh`。
-  系统层仍由宿主机提供（见前置条件）：**PipeWire**（`pw-*` 命令行）、**portaudio**（麦克风）、
+  系统层仍由宿主机提供（见前置条件）：**PipeWire**（`pw-*` 命令行，麦克风也走它）、
   X11 基础库（XWayland）与一套中日韩字体
 - ⚠️ **不再自带字体**：需要宿主机自己有一套中日韩字体（见前置条件第 6 条）
 - 配置与日志写在 `~/.local/share/vrchat-livetranslate/`（AppImage 本体放哪都行，只读目录也能跑）
@@ -80,8 +81,8 @@ chmod +x VRChatLiveTranslate-x86_64.AppImage
 ./setup.sh
 ```
 
-它会：建 Python 3.11 虚拟环境 → 装依赖 → **体检系统依赖**（PipeWire 工具 / OpenXR 运行时 /
-libportaudio）→ 提示 API key 怎么配。
+它会：建 Python 3.11 虚拟环境 → 装依赖 → **体检系统依赖**（PipeWire 工具 / OpenXR 运行时）
+→ 提示 API key 怎么配（麦克风走 PipeWire 原生 `pw-record`，不再需要 libportaudio）。
 
 脚本**不会**改你的系统配置、**不会**重启任何服务。缺什么它只告诉你缺什么。
 
@@ -130,8 +131,8 @@ uv pip install --python .venv/bin/python -r requirements-linux.txt
 四步：模块导入 → 读 key（打码打印）→ **离线渲染一帧手腕屏贴图**（不连 VR）→
 用自带测试音频跑完整链路（中文 → 英文，打进 chatbox）。
 
-手腕屏的**通透性**（蓝框外是否透明、半透明底板对不对、文字是否实心）只有真机能看，
-自检脚本盖不到，单独跑一条：
+手腕屏的**通透性**与**颜色**（蓝框外是否透明、半透明底板对不对、文字是否实心、
+灰阶黑不黑得下去）只有真机能看，自检脚本盖不到，单独跑一条：
 
 ```bash
 python3 -m vlt.output.openxr_overlay --smoke 20 --alpha-test   # 戴着看 20 秒判定图
@@ -176,6 +177,11 @@ Linux 与 Windows 在这里**刻意不一样**：设置里的「音频设备」�
   同样不需要选输出设备；「输出」那一行的「译音输出」勾选框照旧是这条腿的总开关。
 - `config.yaml` 里的 `capture.loopback_device` 与 `output.audio.device_name` 在 Linux 上**被忽略**
   （键仍保留，Windows 侧照常生效），界面也不再把它们写出来。
+- **改「麦克风」后**：麦克风代理的**直通腿（VRChat 听到的原声）即时切换**，不用重开程序；
+  但**翻译输入**那条腿在点「开始翻译」时读定设备，运行中切换要**重开翻译**才生效（状态栏会说明）。
+- **多声道输入**（双声道 / 5.1 / 7.1）会**按设备原生声道数全采**，再降为单声道送模型 ——
+  不会只取第一路（见 `docs/平台约束记录.md` 第十五节）。
+- **「自动检测」= 当前系统默认输入源**：程序会把它解析成一个具体设备，走与手选**完全相同**的通路。
 
 ### 手腕屏位置怎么调
 
@@ -225,6 +231,35 @@ overlay:
 > 📌 **先起本程序，再起 VRChat**：设备只在程序运行期间存在，VRChat 的设备列表是在启动时枚举的。
 > 如果 VRChat 先启动了，去它的音频设置里刷新一下，或者把 `VLT Mic` 设成系统默认输入源。
 
+### 原声 / 译音一键切换（麦克风代理）
+
+「设置 → 音频 → 麦克风代理」默认**启用**。启用后：
+
+- **VRChat 的麦克风固定选 `VLT Mic`**，不用再在 VRChat 里来回切设备；
+- 主界面输出行出现一颗 **`🎙 原声` / `🗣 译音`** 按钮，一键决定「`VLT Mic` 里放什么」：
+  - **原声档**：你的真实麦克风**直通**虚拟麦（延迟 = 下面的「直通缓冲」，默认 150ms）；
+  - **译音档**：模型译音灌进虚拟麦（对方听到译音）。
+- 「译音输出」勾选框仍是译音那条腿的**总开关**：不勾时译音不进麦，
+  此时点「译音」会提示「译音档会无声」。
+- 译音档**只有「开始翻译」之后才能切**；**停止翻译会自动回落原声档**
+  （这条与 Windows 侧完全一致）。
+- 关掉「麦克风代理」= 回到旧行为：虚拟麦由翻译启停、没有一键切换。
+
+两个缓冲都在同一页可调（改完即时生效，不用重启）：
+
+| 参数 | 范围 | 说明 |
+|---|---|---|
+| 直通缓冲(ms) | 60–500 | 原声档的延迟 / 抗断续。⚠️ 下限 60ms —— 麦克风按设备原生率采集，一个输入块约 100ms，缓冲帽比一个块还小会把每块削掉大半（严重断续） |
+| 译音缓冲(ms) | 50–2000 | 译音档的起播线：攒够这么多才出声，越大越不容易断续、但延迟越高 |
+
+在 VRChat 里的验收：勾「译音输出」→「开始翻译」→ 把麦克风选 `VLT Mic` →
+点按钮切到「🗣 译音」，对方应当听到译音；切回「🎙 原声」对方就听到你的原声。
+
+> ⚠️ **虚拟麦的音量会被 WirePlumber 记住**（按 `media.name` 持久化）。如果哪天
+> `VLT Mic` 的输入电平莫名偏小，用 `wpctl status` 找到它、`wpctl set-volume <id> 1.0`
+> 改回来即可（原因与实测见 [docs/平台约束记录.md](平台约束记录.md)）。
+
+
 ### 桌面字幕（贴 VRChat 窗口的字幕窗）
 
 **不需要头显**（issue #11）：界面上勾「桌面字幕」，屏幕上会出现一块**无边框、鼠标穿透**的
@@ -259,7 +294,7 @@ overlay:
 
 | 配置项 | Windows | Linux |
 |---|---|---|
-| `capture.mic_device` | 设备名 | 设备名（`sounddevice` 按名打开） |
+| `capture.mic_device` | 设备名 | 设备名（映射到 PipeWire `node.name`，走 `pw-record`） |
 | `capture.loopback_device` | WASAPI loopback 设备名 | **忽略** —— 采集目标固定为 VRChat 自己的输出流（自动等待 VRChat 启动） |
 | `output.audio.device` / `device_name` | 虚拟声卡回退链（VoiceMeeter / VB-Cable） | **不用管** —— 程序自己声明 `vlt_mic_sink`，`device_name` 被忽略 |
 | `overlay.font` | `C:/Windows/Fonts/msyh.ttc` | **留空即可**，自动用 fontconfig 找中日韩字体 |
@@ -292,6 +327,7 @@ overlay:
 | 面板位置不对 | 锚点/角度不合适 | 用「设置 → 手腕屏」的滑块；注意左右手镜像规则 |
 | 面板外面多出一圈**不透明黑边** / 底板看着不透明 | 图层的 alpha 没生效（漏了 `BLEND_TEXTURE_SOURCE_ALPHA_BIT`）；旧版本有此问题 | 用带修复的版本；想确认就 `python3 -m vlt.output.openxr_overlay --smoke 20 --alpha-test`，那张判定图应当「蓝框外全透明、四块灰由淡到实、白字实心」 |
 | 面板半透明的地方整体发白 / 白字发光 | 未预乘 alpha 被当成预乘（漏了 `UNPREMULTIPLIED_ALPHA_BIT`） | 同上，用 `--alpha-test` 一眼看出来；两个 flag 在 `layer_alpha_flags()` 里一起给 |
+| 面板**黑不下去**：底板发灰、像蒙了一层灰，而白字看着正常（SteamVR 侧却是正常深黑） | 层纹理的**颜色空间错配**：交换链选成了线性格式，我们的 sRGB 像素被当线性值再编码一次 = 双重 gamma（暗端抬到 5 倍：12→61，亮端几乎不动） | 修复版会优先用 sRGB 格式（`pick_swapchain_format()`），拿不到就预线性化（`format_needs_linearize()`）。确认方法：`--alpha-test` 看**最下面一排灰阶**（0/12/32/64/128/192/255）——12 看着像 60、255 仍是白就是命中；日志里 `会话就绪：… format=0x…` 会写明协商到的格式 |
 | 面板过一会儿消失 | 见日志 `[overlay:xr][diag]` 心跳行 | 心跳会打出「已上传多少帧 / 上次成功多久前 / 会话状态 / 锚点追踪」，按它判断 |
 
 **开日志**：界面 →「导出日志压缩包」，或看 `logs/` 目录。

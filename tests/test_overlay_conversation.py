@@ -142,6 +142,8 @@ def test_gui_owns_single_wrist_panel() -> None:
             gui._root.after(200, lambda: wait_ready(tries + 1))
 
     gui._root.after(200, wait_ready)
+    _MAX_TEST_MS = 30_000
+    gui._root.after(_MAX_TEST_MS, gui._root.destroy)
     gui._root.mainloop()
 
     print(f"  引擎输出面={got['engine_sinks']} 手腕屏帧数={got['frames']} "
@@ -187,6 +189,8 @@ def test_overlay_starts_on_checkbox_immediately() -> None:
 
     try:
         gui._root.after(400, step)
+        _MAX_TEST_MS = 30_000
+        gui._root.after(_MAX_TEST_MS, gui._root.destroy)
         gui._root.mainloop()
     finally:
         if backup is not None:
@@ -232,6 +236,8 @@ def test_overlay_toggle_reverts_when_start_fails() -> None:
             g._root.after(100, g._on_close)
 
         g._root.after(400, step)
+        _MAX_TEST_MS = 30_000
+        g._root.after(_MAX_TEST_MS, g._root.destroy)
         g._root.mainloop()
     finally:
         platform.create_wrist_overlay = real  # type: ignore[assignment]

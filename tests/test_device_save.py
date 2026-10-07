@@ -83,17 +83,17 @@ def _set_device_combos(gui, mic: str = MIC, loop: str = LOOP, out: str = OUT) ->
     from vlt.i18n import t
 
     auto = t("自动检测")
-    gui._mic_names = [mic]                                              # noqa: SLF001
+    gui._names_holder["mic"] = [mic]                                    # noqa: SLF001 — 设备名唯一真源
     gui._mic_combo.configure(values=[auto, mic])                        # noqa: SLF001
     gui._mic_combo.set(mic)                                             # noqa: SLF001
     loop_combo = getattr(gui, "_loopback_combo", None)
     out_combo = getattr(gui, "_audio_out_combo", None)
     if loop_combo is None or out_combo is None:
         return                              # Linux：只有麦克风下拉，其余交给 _save_device_config 跳过
-    gui._loopback_names = [loop]                                        # noqa: SLF001
+    gui._names_holder["loop"] = [loop]                                  # noqa: SLF001
     loop_combo.configure(values=[auto, loop])
     loop_combo.set(loop)
-    gui._audio_out_names = [out]                                        # noqa: SLF001
+    gui._names_holder["out"] = [out]                                    # noqa: SLF001
     out_combo.configure(values=[auto, out])
     out_combo.set(out)
 
@@ -319,6 +319,59 @@ def test_simulated_linux_env_writes_mic_only() -> None:
     print("  模拟 Linux（两个下拉为 None）：不崩、只写麦克风、其余键原样 OK")
 
 
+def test_device_save_after_real_scan() -> None:
+    """★ 核心回归（2026-10）：**不预先注入名字表**，走真实设备扫描 → 选设备 → 必须存进去。
+
+    曾经的形态：`gui` 另存一份 `_mic_names` 镜像，只有队列化的 `_on_device_scan_result`
+    会刷新它；而启动扫描是同步路径、不经过那里，镜像永远是空的 —— `sync_from_gui` 每次
+    同步都用空镜像把刚扫到的名字清掉 → 改麦克风下拉静默存成 `mic_device: ''` → 永远用
+    系统默认（表现：AppImage 与源码都一样；10-06 起的 gui 拆分引入）。
+
+    这条用例桩掉 `platform.device_backend()` 给出假设备，让 **GUI 构造期的真扫描** 填表，
+    再按下拉选一项保存；并断言一次 `_sync_audio_ctx()` 不会清空名字表。
+    """
+    before = _prepare()
+    gui = None
+    import vlt.platform as _plat
+
+    class _FakeBackend:
+        def query_devices(self):                             # noqa: ANN201
+            return [
+                {"name": "Fake Mic A", "max_input_channels": 2, "max_output_channels": 0,
+                 "default_samplerate": 48000.0},
+                {"name": "Fake Speaker", "max_input_channels": 0, "max_output_channels": 2,
+                 "default_samplerate": 48000.0},
+            ]
+
+        def query_loopback_devices(self):                    # noqa: ANN201
+            return [{"index": 1, "name": "Fake Speaker [Loopback]",
+                     "defaultSampleRate": 48000, "maxInputChannels": 2}]
+
+    orig_backend = _plat.device_backend
+    _plat.device_backend = lambda: _FakeBackend()            # type: ignore[assignment]
+    try:
+        gui = _make_gui()                                   # 构造期真扫描 → 填 _names_holder
+        assert gui._names_holder["mic"] == ["Fake Mic A"], \
+            f"启动扫描没填进名字表：{gui._names_holder['mic']}"
+        gui._sync_audio_ctx()                               # 曾经这一下就把名字表清空了
+        assert gui._names_holder["mic"] == ["Fake Mic A"], \
+            "同步后名字表被清空 —— `_names_holder` 又被别的名字表覆盖了"
+
+        from vlt.ui_tk import combo_values
+        vals = combo_values(gui._mic_combo)
+        assert any("Fake Mic A" in v for v in vals), f"下拉里没有假麦克风：{vals}"
+        gui._mic_combo.set(next(v for v in vals if "Fake Mic A" in v))
+        gui._on_device_change()
+        cap = (yaml.safe_load(CONFIG.read_text(encoding="utf-8")) or {}).get("capture") or {}
+        assert cap.get("mic_device") == "Fake Mic A", f"选了假麦克风却没存进去（原 bug）：{cap}"
+    finally:
+        _plat.device_backend = orig_backend                 # type: ignore[assignment]
+        CONFIG.write_text(before, encoding="utf-8")
+        if gui is not None:
+            _destroy(gui)
+    print("  真扫描 → 选设备 → 落盘（名字表不被同步清空）OK")
+
+
 if __name__ == "__main__":
     print("test_device_save:")
     test_yaml_scalar_quotes_when_needed()
@@ -328,4 +381,5 @@ if __name__ == "__main__":
     test_linux_branch_writes_mic_only()
     test_simulated_linux_env_writes_mic_only()
     test_missing_sections_are_created()
+    test_device_save_after_real_scan()
     print("ALL PASSED")
