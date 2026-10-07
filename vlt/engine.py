@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 from .config import AppConfig, Direction
 from .devices import enumerate_mic_devices, resolve_device_name
-from . import endpoints
+from . import latency as latency, endpoints
 from . import platform
 from .platform.audio import MixedAudioSource
 from .platform.base import LoopbackTarget
@@ -547,10 +547,17 @@ class _VoiceSlot:
     必须串行的原因），但下一段的首包被藏在前一段的播放里。
     """
 
-    __slots__ = ("text", "_lock", "_chunks", "_done", "truncated", "error")
+    __slots__ = ("text", "_lock", "_chunks", "_done", "truncated", "error",
+                 "t_created", "t_synth", "t_connect", "t_first", "t_synth_done",
+                 "t_write", "t_write_done", "sent")
 
     def __init__(self, text: str) -> None:
         self.text = text
+        # 埋点时间线（只是一串 float，几个 monotonic 调用≈纳秒级；是否打印看 VLT_LATENCY_TRACE）
+        self.t_created = time.monotonic()
+        self.t_synth = self.t_connect = self.t_first = None
+        self.t_synth_done = self.t_write = self.t_write_done = None
+        self.sent = 0
         self._lock = threading.Lock()
         self._chunks: list[bytes] = []
         self._done = False
@@ -991,6 +998,8 @@ class Engine:
         self._stop_event.set()
 
     def _thread_run(self) -> None:
+        # 抗抖动：引擎循环被系统「饿着」时表现为偶发卡顿（这段本身几乎不吃 CPU）
+        platform.bump_thread_priority("above")
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
@@ -1613,19 +1622,33 @@ class Engine:
             slot.finish()
 
     def _synth_slot_blocking(self, slot: _VoiceSlot) -> None:
+        slot.t_synth = time.monotonic()
+
+        def _stage(name: str, t: float) -> None:
+            if name == "connect":
+                slot.t_connect = t
+            elif name == "first":
+                slot.t_first = t
+
+        kw = self._speak_kwargs()
+        kw["on_stage"] = _stage
         try:
-            for pcm24 in synthesize_stream(slot.text, **self._speak_kwargs()):
+            for pcm24 in synthesize_stream(slot.text, **kw):
+                if slot.t_first is None:
+                    slot.t_first = time.monotonic()
                 slot.append(pcm24)
         except TtsStreamTruncated:
             slot.truncated = True                    # 已拿到的分片照样念（少半句，不整句丢）
         except Exception as exc:                     # noqa: BLE001
             slot.error = f"{type(exc).__name__}: {exc}"
         finally:
+            slot.t_synth_done = time.monotonic()
             slot.finish()
 
     def _drain_slot_to_mic(self, slot: _VoiceSlot) -> None:
         """把 slot 的分片**按到达顺序**推进虚拟声卡（在写入线程里跑，调用方持有出声锁）。"""
         sent = 0
+        slot.t_write = time.monotonic()
         self._push_sfx_open()
         while True:
             chunk, finished = slot.take(sent)
@@ -1637,6 +1660,25 @@ class Engine:
             time.sleep(VOICE_SLOT_POLL_S)
         self._push_sfx_close()
         self._virtualmic.end_sentence()
+        slot.t_write_done = time.monotonic()
+        slot.sent = sent
+        # ⚠️ 埋点绝不能把主流程搞挂：读不到就跳过（用例会传极简的假 slot）
+        if latency.flag_on():
+            try:
+                latency.log(
+                    f"段「{str(getattr(slot, 'text', ''))[:12]}」",
+                    队=latency.ms(getattr(slot, "t_created", None), getattr(slot, "t_write", None)),
+                    连接=latency.ms(getattr(slot, "t_synth", None), getattr(slot, "t_connect", None)),
+                    首包=latency.ms(getattr(slot, "t_connect", None), getattr(slot, "t_first", None)),
+                    合成=latency.ms(getattr(slot, "t_synth", None), getattr(slot, "t_synth_done", None)),
+                    写卡=latency.ms(getattr(slot, "t_write", None), getattr(slot, "t_write_done", None)),
+                    总=latency.ms(getattr(slot, "t_created", None), getattr(slot, "t_write_done", None)),
+                    片=sent,
+                    结果=("失败" if getattr(slot, "error", None) else
+                          ("半截" if getattr(slot, "truncated", False) else "ok")),
+                )
+            except Exception:                            # noqa: BLE001
+                pass
 
     async def _voice_speak_worker(self) -> None:
         """单写者：按排队顺序把各段写出去；合成由 `_synth_slot` 并发提前做掉。

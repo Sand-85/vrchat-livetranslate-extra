@@ -30,7 +30,8 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Iterator
+import time
+from typing import Callable, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
@@ -286,6 +287,7 @@ def synthesize_stream(
     speech_rate: float | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
     endpoint: str | None = None,
+    on_stage: Callable[[str, float], None] | None = None,
 ) -> Iterator[bytes]:
     """流式合成（SSE）：边生成边 yield 24k 单声道 s16le 的 PCM 分片。
 
@@ -308,10 +310,20 @@ def synthesize_stream(
     req = _build_request(text, voice=voice, model=model, api_key=api_key, language=language,
                          seed=seed, instruction=instruction, speech_rate=speech_rate,
                          streaming=True, endpoint=endpoint)
+
+    def _stage(name: str) -> None:
+        """埋点钩子（默认 None → 什么都不做）；分阶段取时间，用来分辨「连接握手」与「服务端首包」。"""
+        if on_stage is not None:
+            try:
+                on_stage(name, time.monotonic())
+            except Exception:                            # noqa: BLE001
+                pass
+
     got = 0
     acc = bytearray()          # 已发出的音频（用于识别末尾的"整段汇总"分片）
     try:
         with _get_opener().open(req, timeout=timeout) as resp:
+            _stage("connect")
             ctype = str(resp.headers.get("Content-Type", "") or "")
             if "event-stream" not in ctype:              # 服务端降级成了整段响应
                 _note(f"服务端没按 SSE 回（Content-Type={ctype!r}）→ 退回整段合成")
@@ -327,6 +339,8 @@ def synthesize_stream(
                     # 若在这里就把 got 加上，会被后续的「中途断流」路径误报成「已保留 1 个分片」。
                     pcm = _decode_to_24k_mono(raw)
                     got += 1
+                    if got == 1:
+                        _stage("first")
                     yield pcm
             else:
                 for line in resp:

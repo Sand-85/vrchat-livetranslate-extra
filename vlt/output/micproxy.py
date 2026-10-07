@@ -52,11 +52,14 @@ from typing import Callable
 from ..devices import resolve_device_name
 from .. import platform
 from .virtualmic import VirtualMic, pick_output_device
+from ..platform import bump_thread_priority
 
 #: 直通缓冲默认容量（毫秒）。必须 ≥ 一个麦克风输入块（~100ms），见模块头说明。
 DEFAULT_PASSTHROUGH_MS = 150
 #: 麦克风采集块大小（帧，@16k 名义 = 100ms）；实际块时长随设备原生采样率由 open_mic 决定。
 MIC_BLOCKSIZE = 1600
+
+_OUT_PRIO_DONE = False      # 音频回调线程优先级只提一次
 #: 欠载告警的最小汇报间隔（秒）。
 UNDERRUN_REPORT_S = 5.0
 
@@ -421,6 +424,10 @@ class MicProxy:
         return False
 
     def _out_callback(self, outdata: bytearray, frames: int, time_info, status) -> None:
+        global _OUT_PRIO_DONE
+        if not _OUT_PRIO_DONE:                # 音频回调优先级只提一次
+            _OUT_PRIO_DONE = bump_thread_priority("highest")
+
         need = frames * 2 * 2
         if status:
             pass
@@ -435,6 +442,7 @@ class MicProxy:
 
     # ------------------------------------------------------------------ 麦克风直通
     def _mic_thread_run(self) -> None:
+        bump_thread_priority("above")   # 抗抖动（同引擎线程）
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:

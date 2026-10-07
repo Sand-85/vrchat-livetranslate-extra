@@ -59,6 +59,18 @@ def backend() -> Any:
     return mod
 
 
+
+def bump_thread_priority(level: str = "above") -> bool:
+    """把**当前线程**提升优先级（Windows 真做；其它平台 no-op，返回 False）。
+
+    调用点一律走这里，不直接 import 平台模块 —— 与 `device_backend()` 同一约定。
+    """
+    try:
+        fn = getattr(backend(), "bump_thread_priority", None)
+        return bool(fn(level)) if fn is not None else False
+    except Exception:                                    # noqa: BLE001
+        return False
+
 def device_backend() -> Any:
     """设备枚举后端（`query_devices` / `query_loopback_devices`）。"""
     return backend()

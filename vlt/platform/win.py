@@ -23,6 +23,31 @@ log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 设备枚举
 
+
+_THREAD_PRIORITY = {"idle": -15, "below": -1, "normal": 0, "above": 1, "highest": 2}
+
+
+def bump_thread_priority(level: str = "above") -> bool:
+    """提升**当前线程**优先级（ctypes 直调 kernel32）。
+
+    音频回调 / 引擎循环被「饿着」时会偶发卡顿，而它们几乎不吃 CPU（实测重采样 72µs/块
+    ≈ 单核 0.4%）—— 瓶颈是**调度抖动**，不是吞吐。任何失败都吞掉：优先级只是锦上添花，
+    绝不能把音频回调搞挂。
+    """
+    try:
+        import ctypes
+
+        prio = _THREAD_PRIORITY.get(level, 1)
+        k32 = ctypes.windll.kernel32                     # type: ignore[attr-defined]
+        # ⚠️ 必须声明原型：默认按 32 位 int 传参，而 GetCurrentThread() 的伪句柄是 -2，
+        # 在 Win64 上会被截成 0xFFFFFFFE（无效句柄）→ SetThreadPriority 静默失败。
+        k32.GetCurrentThread.restype = ctypes.c_void_p
+        k32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        k32.SetThreadPriority.restype = ctypes.c_int
+        return bool(k32.SetThreadPriority(k32.GetCurrentThread(), prio))
+    except Exception:                                    # noqa: BLE001
+        return False
+
 def query_devices() -> list[dict]:
     """sounddevice 的设备表 —— **只保留 Windows 已启用（WASAPI）那一套**。
 
