@@ -35,6 +35,7 @@ _i18n.detect_system_language = lambda: "zh"
 
 import vlt.config as cfg_mod                                        # noqa: E402
 import vlt.gui as gui_mod                                           # noqa: E402
+import vlt.gui_voicelab as vl_mod                                   # noqa: E402  （增强方法的新家）
 from vlt import voice_lab as vl                                     # noqa: E402
 from vlt.gui import TranslationGUI                                  # noqa: E402
 
@@ -316,12 +317,15 @@ def _gui():
     cfg_path.write_text((ROOT / "config.example.yaml").read_text(encoding="utf-8"),
                         encoding="utf-8")
     old = (cfg_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG, gui_mod.APP_DIR,
-           gui_mod._play_pcm_local)
+           gui_mod._play_pcm_local, vl_mod.APP_DIR, vl_mod._play_pcm_local)
     cfg_mod.DEFAULT_CONFIG = cfg_path
     gui_mod.DEFAULT_CONFIG = cfg_path
     gui_mod.APP_DIR = tmp / "app"
+    # 增强方法已搬进 vlt/gui_voicelab.py → 用到这两个模块级名字的打桩点要跟着挪
+    vl_mod.APP_DIR = tmp / "app"
     PLAYED.clear()
     gui_mod._play_pcm_local = lambda pcm: PLAYED.append(pcm)         # type: ignore[assignment]
+    vl_mod._play_pcm_local = gui_mod._play_pcm_local                 # type: ignore[assignment]
     gui = None
     try:
         gui = TranslationGUI(headless=True)
@@ -336,7 +340,7 @@ def _gui():
             except Exception:                                        # noqa: BLE001
                 pass
         cfg_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG, gui_mod.APP_DIR, \
-            gui_mod._play_pcm_local = old
+            gui_mod._play_pcm_local, vl_mod.APP_DIR, vl_mod._play_pcm_local = old
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
