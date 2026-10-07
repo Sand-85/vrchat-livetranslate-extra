@@ -821,9 +821,10 @@ class TranslationGUI(VoicelabMixin):
     # ── 轮询 / 气泡 / 状态 ──
     def _poll(self):
         gui_chat.setup_poll_ctx(self._chat_ctx, self)
-        _ov = [self._overlay_out]; _dov = [self._desktop_out]
-        gui_chat.poll(self._chat_ctx, self._root, self._set_status, self._add_text, self._refresh_status, self._stats, [self._pending_starts], _ov, _dov, on_voice_lab=lambda _it: self._on_lab_done(_it[1], _it[2], _it[3], _it[4]))
-        self._pending_starts = [self._pending_starts][0]; self._overlay_out = _ov[0]; self._desktop_out = _dov[0]
+        # ⚠️ 手腕屏/桌面字幕实例**不在这里传**：它们在「开始翻译」后才建，而 poll 在构建期
+        #    就起跑了。早先传单元素 list 容器且从不写回 → 两个 tick() 永不执行（6083052 回归，
+        #    桌面字幕收不到内容 / 拖不动 / 配置热重载失效）。现在由 setup_poll_ctx 绑活引用。
+        gui_chat.poll(self._chat_ctx, self._root, self._set_status, self._add_text, self._refresh_status, self._stats, on_voice_lab=lambda _it: self._on_lab_done(_it[1], _it[2], _it[3], _it[4]))
         c = self._chat_ctx
         self._room_status_next = c.room_status_next; self._gate_level_tick = c.gate_level_tick
         if c.engines_ref is not self._engines: self._engines = c.engines_ref; self._engine_dirs = c.engine_dirs_ref

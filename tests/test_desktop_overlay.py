@@ -1332,6 +1332,81 @@ def test_update_entries_keeps_room_label() -> None:
     print("  4 元组条目（房间昵称）不再被丢，且昵称真的画进了桌面字幕 OK")
 
 
+def test_gui_poll_ticks_out_created_after_build() -> None:
+    """★ 回归 6083052：桌面字幕/手腕屏**晚于 poll 起跑**才创建，也必须被每跳 tick。
+
+    用户实测症状：字幕窗能正常显示，但**收不到原文/译文、拖不动、改配置不生效** ——
+    这三件事恰好都在 `DesktopOverlay.tick()` 里做（出图 / 跟随 / 热重载）。
+    根因：gui 拆分时把实例塞进单元素 list 容器交给 poll，却**从没写回** → poll 永远
+    读到构建期的 None（poll 每 50ms 用同一个容器自排，自排那一跳不会重读 gui 的属性）。
+    这条用例只盯「建窗晚于 _poll」这一条：先把假实例挂上，再让构建期起的那条 poll 链
+    自己跑 —— **绝不能再调 gui._poll()**（重调会重建容器，把 bug 掩盖过去）。
+
+    本仓库口径「测试别弹窗口」：建完就 withdraw()，窗口对象在、事件循环照跑，但不可见。
+    """
+    import time as _time
+
+    os.environ.setdefault("DASHSCOPE_API_KEY", "sk" + "-ws-" + "deskalpha0123456789abcd")
+
+    import vlt.config as _cfg_mod
+    import vlt.gui as _gui_mod
+    import vlt.i18n as _i18n
+    from vlt import gui_chat
+
+    _make_gui_sandbox()
+    saved = (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG, _i18n.detect_system_language)
+    _cfg_mod.DEFAULT_CONFIG = GUI_SANDBOX
+    _gui_mod.DEFAULT_CONFIG = GUI_SANDBOX
+    _i18n.detect_system_language = lambda: "zh"
+
+    from vlt.gui import TranslationGUI
+
+    class _FakeOut:
+        def __init__(self) -> None:
+            self.ticks = 0
+
+        def tick(self) -> None:
+            self.ticks += 1
+
+    gui = None
+    try:
+        gui = TranslationGUI()          # 构建期已跑过一次 _poll（那时两个实例都还是 None）
+        gui._root.withdraw()            # 不弹可见窗口（本仓库测试口径）
+        if gui._update_check_job is not None:
+            gui._root.after_cancel(gui._update_check_job)
+            gui._update_check_job = None
+        gui._root.update()
+
+        # 「开始翻译」之后才建窗：只把实例挂上去，**不碰** poll 链
+        fake_ov, fake_dov = _FakeOut(), _FakeOut()
+        gui._overlay_out = fake_ov
+        gui._desktop_out = fake_dov
+
+        # 推 Tk 事件循环 0.3s（poll 50ms 一跳）：让构建期那条链自己跑到 tick
+        end = _time.monotonic() + 0.3
+        while _time.monotonic() < end:
+            gui._root.update()
+            _time.sleep(0.01)
+
+        assert fake_dov.ticks > 0, (
+            "桌面字幕晚于 _poll 创建后一次都没被 tick —— 容器没写回？"
+            "（症状：字幕收不到内容 / 拖不动 / 热重载失效）")
+        assert fake_ov.ticks > 0, "手腕屏晚于 _poll 创建后没被 tick"
+    finally:
+        if gui is not None:
+            try:
+                gui_chat.cancel_poll(gui._chat_ctx, gui._root)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                gui._root.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+        (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG,
+         _i18n.detect_system_language) = saved
+    print("  poll→tick 活引用：建窗晚于 _poll 也每跳被 tick（桌面字幕 + 手腕屏）OK")
+
+
 if __name__ == "__main__":
     print("test_desktop_overlay:")
     test_compute_position_nine_anchors()
@@ -1362,5 +1437,7 @@ if __name__ == "__main__":
     test_drag_moves_window_and_snaps_to_anchor()
     test_own_window_excluded_from_game_search()
     test_gui_alpha_slider_reads_its_own_section_only()
+    test_gui_poll_ticks_out_created_after_build()
     test_update_entries_keeps_room_label()
     print("ALL PASSED")
+
