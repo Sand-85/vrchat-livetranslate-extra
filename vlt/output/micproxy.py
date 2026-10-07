@@ -217,6 +217,14 @@ class TranslatedSink:
     def opened(self) -> bool:
         return self._p.opened
 
+    @property
+    def active(self) -> bool:
+        """代理现在是不是「译音」档 —— 只有译音档，推进来的译音才会真的从虚拟麦出声。
+
+        原声档下数据只会滞留在缓冲里（超限还被整句丢），引擎据此可以**不谎报「已出声」**。
+        """
+        return self._p.mode == MODE_TRANSLATED
+
     def push(self, pcm_48k_stereo: bytes) -> None:
         buf = self._p._translated
         if buf is not None:

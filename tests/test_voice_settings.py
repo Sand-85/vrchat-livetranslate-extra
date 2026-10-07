@@ -522,6 +522,41 @@ def test_preview_full_thread_roundtrip() -> None:
     print("  ✓ 端到端：线程合成播放 + _poll 回主线程恢复按钮并报完成")
 
 
+def test_preview_tts_custom_voice_uses_own_model() -> None:
+    """打字侧试听**自定义音色**：先还原真 id，再用**它自己的** target_model。
+
+    真机证据：下拉里显示的是短名，而账号里的设计族(vd)/复刻族(vc)音色**不认内置模型** ——
+    以前写死 `qwen3-tts-flash` 去合成 → 400 `InvalidParameter: Invalid voice specified`，
+    用户看到的就是「点试听没声音」。这条用例把「真 id + 自己的模型」钉死。
+    """
+    from vlt import voice_lab as vl
+
+    clone_id = "qwen-tts-vc-my_clip_4x-voice-20261007121947169-ee85"
+    with _gui_with_config(_example_body()) as (gui, mod, _cfg):
+        gui._tts_custom = [vl.VoiceInfo(voice=clone_id, name="my_clip_4x",
+                                        target_model=vl.CLONE_TARGET_MODEL, kind="clone")]
+        gui._refresh_tts_voice_combo()
+        assert "my_clip_4x" in gui._tts_voice_combo.cget("values"), \
+            f"自定义音色没进下拉：{gui._tts_voice_combo.cget('values')!r}"
+        gui._tts_voice_var.set("my_clip_4x")          # 用户选的是下拉里那个短名
+        with _stubbed_tts(mod) as (calls, played):
+            gui._on_preview_tts_voice()
+            end = time.monotonic() + 5.0
+            while time.monotonic() < end and any(
+                    th.name == "vlt-voice-preview" for th in threading.enumerate()):
+                time.sleep(0.02)
+            _pv = _take_voice_preview(gui)
+            assert _pv is not None, "没收到试听结果（队列里只有状态消息？）"
+            kind, voice, err = _pv[1:]
+            assert (kind, voice, err) == ("tts", clone_id, ""), f"{(kind, voice, err)!r}"
+            assert calls["syn"][0]["voice"] == clone_id, \
+                f"必须还原成真 id（短名发给 API 服务端不认）：{calls['syn']!r}"
+            assert calls["syn"][0]["model"] == vl.CLONE_TARGET_MODEL, \
+                f"自定义音色必须用它自己的模型（写死内置模型 → 400）：{calls['syn']!r}"
+            assert played == [b"\x01\x00\x02\x00"], "合成音频未交给本地播放"
+    print("  ✓ 打字侧试听自定义音色：还原真 id + 用它自己的 vc 模型（不再写死内置模型）")
+
+
 class _FakeSseResp:
     """假 SSE 响应：可迭代逐行、可当上下文管理器（和 urllib 的返回对象同形）。"""
 
@@ -678,6 +713,7 @@ def main() -> int:
         test_preview_generic_failure_reports_reason,
         test_preview_voice_guards,
         test_preview_full_thread_roundtrip,
+        test_preview_tts_custom_voice_uses_own_model,
         test_synthesize_omni_parses_sse_and_payload,
         test_synthesize_omni_surfaces_server_error,
     ]

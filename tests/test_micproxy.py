@@ -200,6 +200,23 @@ def test_translated_sink_push_and_end_sentence():
     print("  TranslatedSink 垫片 push/end_sentence/close OK")
 
 
+def test_translated_sink_active_reflects_mode():
+    """`TranslatedSink.active` 如实反映档位 —— 引擎靠它决定「不谎报已出声」。
+
+    原声档下引擎推进来的译音不会出声（只滞留/超限被丢），所以引擎必须能问出这一条：
+    以前没有这个信号，用户看到「已出声 1.4s」却一个字都没听到。
+    """
+    p = _make_proxy_with_buffer()
+    sink = p.translated_sink
+    assert sink.active is False, "默认是原声档 → active 必须为 False"
+    p.set_translation_active(True)
+    assert p.set_mode(MODE_TRANSLATED) is True
+    assert sink.active is True, "切到译音档后 active 必须为 True"
+    assert p.set_mode(MODE_PASSTHROUGH) is True
+    assert sink.active is False, "切回原声档后必须立刻变回 False"
+    print("  TranslatedSink.active 随档位如实变化 OK")
+
+
 # ---------------------------------------------------------------- 档位切换
 
 def test_set_mode_rejects_translated_when_inactive():
@@ -604,6 +621,7 @@ if __name__ == "__main__":
     test_translated_buffer_prime_drain_reset()
     test_translated_buffer_set_buffer_ms()
     test_translated_sink_push_and_end_sentence()
+    test_translated_sink_active_reflects_mode()
     test_set_mode_rejects_translated_when_inactive()
     test_set_mode_clears_both_buffers()
     test_set_translation_active_false_forces_passthrough()

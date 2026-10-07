@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import queue
 import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
@@ -98,6 +99,10 @@ class ChatCtx:
     on_download_done_fn: Optional[Callable] = None
     on_download_error_fn: Optional[Callable] = None
     on_voice_preview_done_fn: Optional[Callable] = None
+    # 「音色」页的队列结果（`("voice_lab", …)`）。⚠️ **必须存在 ctx 上**，不能只当 poll 的
+    # 局部参数：`poll` 每 50ms 靠 `root.after` 自排，自排那一跳只带位置参数 —— 曾经把它当纯
+    # 参数，第二跳起恒为 None，音色页所有结果被静默丢弃（按钮一直灰 = 整页卡死）。
+    on_voice_lab_fn: Optional[Callable] = None
     refresh_room_status_fn: Optional[Callable] = None
     sync_gate_level_fn: Optional[Callable] = None
     refresh_gate_level_fn: Optional[Callable] = None
@@ -134,13 +139,20 @@ def build_chat(parent, ctx: ChatCtx, on_mousewheel_fn) -> Any:
 
 
 def build_input_row(parent, ctx: ChatCtx, cfg,
-                    attach_edit_menu_fn) -> None:
+                    attach_edit_menu_fn,
+                    send_fn: Callable | None = None,
+                    enter_fn: Callable | None = None) -> None:
     """打字输入行：不想开麦时用键盘替代麦克风，回车即发。
 
     它替代的是**麦克风**，所以只在方向含「我说」时可用（没会话时置灰，
     省得用户按了回车却没反应、以为坏了）。
 
     *attach_edit_menu_fn* 用于给 Entry 绑定右键编辑菜单（由 gui.py 提供）。
+    *send_fn* / *enter_fn* 是「发送」按钮与回车的回调，由 ``gui.py`` 传入它自己的
+    ``_send_typed`` / ``_on_text_enter``（本模块**不认识** GUI 的私有方法，也不知道
+    engines / engine_dirs / set_status 从哪来）。⚠️ 不传的兜底会调用本模块的
+    ``send_typed(ctx)`` / ``on_text_enter(ctx)`` —— 那**缺** engines/engine_dirs/set_status，
+    必抛 TypeError；所以真正建界面时务必传。
     """
     if not (cfg.text_input or {}).get("enabled", True):
         return                       # 配置里关掉了：整行不建
@@ -152,14 +164,14 @@ def build_input_row(parent, ctx: ChatCtx, cfg,
                                style="Key.TEntry")
     ctx.text_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
     ctx.text_entry.bind("<Return>",
-                        lambda _e: on_text_enter(ctx))
+                        enter_fn or (lambda _e: on_text_enter(ctx)))
     ctx.text_entry.bind("<Escape>",
                         lambda _e: ctx.text_var.set(""))
     attach_edit_menu_fn(ctx.text_entry)
     ctx.send_btn = ttk.Button(
         row, text=t("发送"),
         width=_char_width_for(t("发送"), ui_tk.FONT_UI, 8),
-        command=lambda: send_typed(ctx))
+        command=send_fn or (lambda: send_typed(ctx)))
     ctx.send_btn.pack(side=tk.LEFT)
     ttk.Label(row, text=t("回车发送 · Esc 清空"),
               style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
@@ -490,22 +502,55 @@ def poll(ctx: ChatCtx, root: tk.Misc,
          pending_starts_holder: list,
          overlay_out_holder: list,
          desktop_out_holder: list,
-        on_voice_lab=None,) -> None:
-    """主轮询：从队列读取消息并分发到各处理器（每 50ms 一次）。
+         on_voice_lab=None,) -> None:
+    """主轮询的外壳：跑一轮主体，然后把自己每 50ms 重排一次。
+
+    ⚠️ 这一层有两个坑，别再埋回去：
+
+    1. `on_voice_lab` **必须存到 `ctx` 上**再派发（见 ``ChatCtx.on_voice_lab_fn``）。
+       `poll` 靠 `root.after` 自排自己，自排那一跳只带位置参数 —— 曾经把它当纯局部参数，
+       第二跳起恒为 `None`，于是「音色」页所有网络结果（列表 / 生成 / 复刻 / 试听）
+       **被静默丢弃**：按钮一直灰、状态永远停在「正在……」，整页卡死。
+    2. 回调抛异常**不许把轮询打死**：以前自排写在异常路径之后，一处 handler 抛异常
+       就永久断掉 after 链，状态栏 / 聊天区 / 房间状态全部静默冻结。这里兜住、留痕，照常重排。
 
     *pending_starts_holder* / *overlay_out_holder* / *desktop_out_holder*
     是单元素 ``list``，充当可变引用容器（gui.py 的薄壳 ``self._xxx``
     可能是任意类型，用 list 统一兜底）。
     """
+    if on_voice_lab is not None:
+        ctx.on_voice_lab_fn = on_voice_lab
+    try:
+        _poll_once(ctx, set_status_fn, add_text_fn, refresh_status_fn, stats,
+                   pending_starts_holder, overlay_out_holder, desktop_out_holder)
+    except Exception:                       # noqa: BLE001 —— 见上面第 2 条
+        traceback.print_exc()
+        print("[gui] ⚠️ 轮询本轮异常（已跳过，下一轮继续）——细节见上面的堆栈", flush=True)
+    # ⚠️ 把 on_voice_lab 一路带下去：即使有人重新组装 ctx，也不至于又丢一次
+    ctx.poll_job = root.after(50, lambda: poll(
+        ctx, root, set_status_fn, add_text_fn, refresh_status_fn,
+        stats, pending_starts_holder, overlay_out_holder,
+        desktop_out_holder, on_voice_lab=ctx.on_voice_lab_fn))
+
+
+def _poll_once(ctx: ChatCtx,
+               set_status_fn: Callable,
+               add_text_fn: Callable,
+               refresh_status_fn: Callable,
+               stats: dict,
+               pending_starts_holder: list,
+               overlay_out_holder: list,
+               desktop_out_holder: list) -> None:
+    """轮询的**单次**主体：把队列里的消息全部派发掉，再刷新热重载 / 电平条。"""
     try:
         while True:
             item = ctx.q.get_nowait()
             kind = item[0]
             if kind == "voice_lab":
                 # 音色页的网络结果（创建 / 列表 / 删除）都回这里收尾，界面线程不动网络。
-                # 处理函数由调用方（gui.TranslationGUI）传进来 —— 本模块不认识 GUI 的私有方法。
-                if on_voice_lab is not None:
-                    on_voice_lab(item)
+                # 处理函数由调用方（gui.TranslationGUI）存在 ctx 上 —— 本模块不认识 GUI 的私有方法。
+                if ctx.on_voice_lab_fn is not None:
+                    ctx.on_voice_lab_fn(item)
             elif kind == "text":
                 add_text_fn(item[2], item[3], item[4], who=item[1])
                 if ctx.push_overlay_fn:
@@ -609,8 +654,3 @@ def poll(ctx: ChatCtx, root: tk.Misc,
             ctx.sync_gate_level_fn()
         if ctx.canvas is not None and ctx.refresh_gate_level_fn:
             ctx.refresh_gate_level_fn()
-
-    ctx.poll_job = root.after(50, lambda: poll(
-        ctx, root, set_status_fn, add_text_fn, refresh_status_fn,
-        stats, pending_starts_holder, overlay_out_holder,
-        desktop_out_holder))
