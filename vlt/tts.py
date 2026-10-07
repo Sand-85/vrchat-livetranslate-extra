@@ -29,6 +29,10 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import http.client
+import ssl
+import threading
 import json
 import time
 from typing import Callable, Iterator
@@ -64,12 +68,150 @@ LANG_NAMES = {
 _opener = None
 
 
+_DEFAULT_OPENER = None        # 模块自建的那个 opener（被替换过就不走连接池，见 _pool_allowed）
+# ---------------------------------------------------------------- 连接复用
+# 为什么要（2026-10-07 实测）：每段 TTS 都要重付一次 DNS+TCP+TLS ≈ **520ms**，
+# 占「第一句开口」的一大半。复用同一条连接后这段只剩发送/首字节。
+# 注意：本模块的取舍是**直连、不走代理**（见 `_get_opener`），池化连接同样直连。
+_POOL: dict[tuple[str, str, int], tuple[object, float]] = {}
+_POOL_LOCK = threading.Lock()
+_POOL_IDLE_MAX_S = 20.0        # 空闲超过这么久就丢掉（服务端多半已关，留着反而多一次失败重连）
+
+
+def _pool_key(url: str) -> tuple[tuple[str, str, int], str]:
+    """把 URL 拆成 (池键=(scheme,host,port), 请求路径)。纯函数，离线可测。"""
+    u = urlsplit(url)
+    scheme = (u.scheme or "https").lower()
+    host = u.hostname or ""
+    port = u.port or (443 if scheme == "https" else 80)
+    path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+    return (scheme, host, port), path
+
+
+def _open_conn(url: str, timeout: float):
+    """取一条连接：优先复用池里那条新的，否则新建。返回 (conn, path, key)。"""
+    key, path = _pool_key(url)
+    with _POOL_LOCK:
+        held = _POOL.pop(key, None)
+    if held is not None:
+        conn, used_at = held
+        if time.monotonic() - used_at <= _POOL_IDLE_MAX_S:
+            return conn, path, key
+        _close_quiet(conn)
+    scheme, host, port = key
+    if scheme == "https":
+        conn = http.client.HTTPSConnection(host, port, timeout=timeout,
+                                           context=ssl.create_default_context())
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    return conn, path, key
+
+
+def _close_quiet(conn: object) -> None:
+    try:
+        conn.close()                                       # type: ignore[attr-defined]
+    except Exception:                                      # noqa: BLE001
+        pass
+
+
+def _release_conn(key: tuple[str, str, int], conn: object, *, reusable: bool) -> None:
+    """把连接放回池（只留一条/主机）；不可复用就关掉。"""
+    if not reusable:
+        _close_quiet(conn)
+        return
+    with _POOL_LOCK:
+        old = _POOL.pop(key, None)
+        _POOL[key] = (conn, time.monotonic())
+    if old is not None:
+        _close_quiet(old[0])
+
+
+def _post_pooled(req, timeout: float):
+    """用池化连接发一个 urllib Request，返回 (resp, conn, key)。
+
+    连接层异常（被服务端悄悄掐掉是最常见的）→ 丢连接、**重连一次**并留痕；
+    仍失败就抛出去，由调用方回退到 urllib（禁静默降级：失败与回退都要能查）。
+    """
+    url = req.full_url
+    body = req.data
+    headers = {k: v for k, v in req.headers.items()
+               if k.lower() not in ("host", "content-length", "connection")}
+    last: Exception | None = None
+    for attempt in (1, 2):
+        conn, path, key = _open_conn(url, timeout)
+        try:
+            conn.request("POST", path, body=body, headers=headers)
+            resp = conn.getresponse()
+            if resp.status >= 400:
+                # 服务端明确答复：不是连接问题，交给调用方按既有口径处理（不当成「该重连」）
+                _release_conn(key, conn, reusable=not resp.will_close)
+                raise _PooledStatus(resp)
+            return resp, conn, key
+        except _PooledStatus:
+            raise
+        except (http.client.HTTPException, OSError) as exc:
+            last = exc
+            _release_conn(key, conn, reusable=False)
+            if attempt == 1:
+                _note(f"复用连接失效（{type(exc).__name__}: {exc}）→ 重连一次")
+                continue
+            raise
+    raise last if last else TtsError("连接失败")
+
+
+class _PooledStatus(Exception):
+    """池化路径拿到 ≥400 的答复（内部信号，不对外）。"""
+
+    def __init__(self, resp) -> None:                      # noqa: ANN001
+        super().__init__(f"HTTP {resp.status}")
+        self.resp = resp
+
+
+
+@contextlib.contextmanager
+def _open_response(req, timeout: float, *, reuse_conn: bool):
+    """打开响应：优先**池化复用**（每段省一次 DNS+TCP+TLS ≈ 500ms）；任何连接层问题都回退 urllib。
+
+    回退与重连都要留痕（本仓库约定：禁静默降级）。`reuse_conn=False` 时行为与以前**完全一致**。
+    """
+    if reuse_conn and _pool_allowed():
+        resp = None
+        conn = key = None
+        try:
+            resp, conn, key = _post_pooled(req, timeout)
+        except _PooledStatus as st:                        # ≥400：不是连接问题
+            resp = st.resp
+        except Exception as exc:                           # noqa: BLE001
+            _note(f"连接复用不可用（{type(exc).__name__}: {exc}）→ 本次回退直连")
+        if resp is not None:
+            try:
+                yield resp
+            finally:
+                reusable = bool(key is not None and not getattr(resp, "will_close", True))
+                if key is not None:
+                    _release_conn(key, conn, reusable=reusable)
+            return
+    with _get_opener().open(req, timeout=timeout) as r:
+        yield r
+
+
+
 def _get_opener():
     """直连 opener（禁用系统代理）——与 textin 同一取舍：国内端点走代理是纯负担。"""
-    global _opener
+    global _opener, _DEFAULT_OPENER
     if _opener is None:
         _opener = build_opener(ProxyHandler({}))
+        _DEFAULT_OPENER = _opener
     return _opener
+
+
+def _pool_allowed() -> bool:
+    """是否允许走连接池。
+
+    规则：**opener 被替换过就不池化** —— 替换 opener 的调用方（用例的假 opener、或别的接管
+    HTTP 层的代码）期望自己看到每一个请求；池化会绕过它，反而更难查。
+    """
+    return _opener is None or _opener is _DEFAULT_OPENER
 
 
 class TtsError(RuntimeError):
@@ -241,6 +383,7 @@ def synthesize(
     speech_rate: float | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
     endpoint: str | None = None,
+    reuse_conn: bool = True,
 ) -> bytes:
     """整段合成：等到全部音频生成完才返回（首字延迟 ≈ 整段耗时，1.6~1.9s）。
 
@@ -255,7 +398,7 @@ def synthesize(
                          seed=seed, instruction=instruction, speech_rate=speech_rate,
                          endpoint=endpoint)
     try:
-        with _get_opener().open(req, timeout=timeout) as r:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as r:
             body = r.read().decode("utf-8", "replace")
     except HTTPError as exc:
         raise TtsError(f"HTTP {exc.code}：{_http_error_detail(exc) or exc.reason}") from exc
@@ -288,6 +431,7 @@ def synthesize_stream(
     timeout: float = DEFAULT_TIMEOUT_S,
     endpoint: str | None = None,
     on_stage: Callable[[str, float], None] | None = None,
+    reuse_conn: bool = True,
 ) -> Iterator[bytes]:
     """流式合成（SSE）：边生成边 yield 24k 单声道 s16le 的 PCM 分片。
 
@@ -322,7 +466,7 @@ def synthesize_stream(
     got = 0
     acc = bytearray()          # 已发出的音频（用于识别末尾的"整段汇总"分片）
     try:
-        with _get_opener().open(req, timeout=timeout) as resp:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as resp:
             _stage("connect")
             ctype = str(resp.headers.get("Content-Type", "") or "")
             if "event-stream" not in ctype:              # 服务端降级成了整段响应

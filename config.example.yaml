@@ -90,9 +90,9 @@ capture:
   # 界面「⚙ 设置 → 输入门限」里有滑块 + 实时电平条，可以边放歌边拖到合适位置。
   # 只影响「听别人」这条腿；麦克风（自己说话）不受影响。
   gate_enabled: true
-  gate_db: -45.0
+  gate_db: -50.0
   gate_hold_ms: 500
-  gate_preroll_ms: 250
+  gate_preroll_ms: 300
 
 # 每个方向一条独立会话
 directions:
@@ -287,6 +287,14 @@ desktop_overlay:
 output:
   audio:
     enabled: false           # 总开关（与 direction 的 output_audio 是「与」关系——两边都 true 才出声）
+    # B 模式（音源 B：本地 TTS 出声）的分段策略 —— 决定「多早开口」：
+    #   segment_tts       : 不等终版，一出现完整分句就先合成（默认 true，实测可提前 ~3.5s 开口）
+    #   segment_min_chars : 太短的片段先攒着（默认 4，避免念「嗯。」这种碎片）
+    #   segment_early     : 更早开口（默认 false）：允许在软边界（逗号/顿号/空格）或 12 字处
+    #                       先切一刀。开口更早，但一句会念得更碎 —— 只想要极限低延迟时才开。
+    segment_tts: true
+    segment_min_chars: 4
+    segment_early: false
     # ⚠️ 下面这条回退链是 **Windows 专用**（VB-Cable / VoiceMeeter 这类**事先装好**的虚拟声卡）。
     #    Linux 上**不用配**：程序运行时会自己声明一对 PipeWire 节点
     #    （`vlt_mic_sink` / `vlt_mic_source`，VRChat 里选显示名 "VLT Mic"），退出时自动销毁。
@@ -321,6 +329,10 @@ text_input:
   # 生效条件：上面「输出」里勾了「译音输出」（或 output.audio.enabled=true）且方向含「我说」。
   # 没开译音时这一步自动跳过，只出文字。
   tts:
+    # reuse_conn：复用到 TTS 服务的连接（默认 true）。
+    #   实测每段省一次 DNS+TCP+TLS ≈ 500ms，是「第一句开口」里最大的一笔。
+    #   连接被服务端掐掉时会自动重连一次（并留痕）；设为 false = 每次新建连接（旧行为）。
+    reuse_conn: true
     enabled: true
     model: qwen3-tts-flash   # 也可换 qwen3-tts-instruct-flash
     voice: Cherry            # 多语言音色（中/英/日实测都能读）；界面「⚙ 设置 → 音色」可选

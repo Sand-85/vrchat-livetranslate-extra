@@ -42,7 +42,10 @@ from .tts import DEFAULT_VOICE as DEFAULT_TTS_VOICE
 from .tts import TtsError, TtsStreamTruncated, synthesize, synthesize_stream
 
 ROOT = Path(__file__).resolve().parent.parent
-CHUNK_BYTES = 3200          # 100ms @16kHz s16le mono
+CHUNK_BYTES = 1280          # 40ms @16kHz s16le mono
+# 2026-10-07：100ms → 40ms。这一项同时决定**上送分块**和**采集设备块**（4 处 blocksize=），
+# 所以两边一起变细：实测每块少攒 60ms，采集侧 likewise —— 合起来约 -60~-100ms 输入延迟。
+# 代价：websocket 消息数 ×2.5（本地开销可忽略；额度按连接数算，与消息数无关）。
 # 音频流静默超过这个时长 = 上一句说完了（给虚拟麦打句尾标记的兜底触发）
 SENTENCE_GAP_S = 0.6
 # 收尾时排空 chatbox 的**墙钟**预算（不是「轮数」）。为什么不写轮数：排空速度由令牌桶的
@@ -61,7 +64,11 @@ VOICE_DUP_WINDOW_S = 1.0
 # **~3.5s**（判停 + 响应结束）。等到终版才合成 = 白等这 3.5s —— 真机端到端 4~5s 就是这么来的。
 # 切段只认**分句符号**、且只念已经在累计文本里 verbatim 出现过的部分，所以不会念错。
 VOICE_SEGMENT_SPLIT = "。！？；，!?;,."      # 中英都认（译文是**目标语言**）
+# 软边界（只在 `output.audio.segment_early: true` 时启用）：逗号/顿号/空格 —— 能更早开口，
+# 代价是把一个长句念得更碎。默认**不开**：不开时行为与以前逐位相同（见用例的等价性检查）。
+VOICE_SEGMENT_SPLIT_SOFT = "，,、; "
 VOICE_SEGMENT_MIN_CHARS = 4                 # 太短的片段先攒着（别念「嗯。」这种碎片）
+VOICE_SEGMENT_EARLY_MAX_CHARS = 12              # segment_early 开时的硬切长度上限（字）
 
 # B 模式出声流水线：允许几段**同时合成**（往虚拟声卡写永远只有一个写者、按顺序）。
 # 实测（2026-10-01）服务端接受 3 路并发且首包不退化（2 路 617/637ms；3 路 620/588/635ms），
@@ -84,7 +91,9 @@ def _common_prefix_len(a: str, b: str) -> int:
 
 def voice_segment_from_partial(confirmed: str, spoken: str, *,
                                split: str = VOICE_SEGMENT_SPLIT,
-                               min_chars: int = VOICE_SEGMENT_MIN_CHARS) -> str | None:
+                               min_chars: int = VOICE_SEGMENT_MIN_CHARS,
+                               soft: bool = False,
+                               soft_max_chars: int = VOICE_SEGMENT_EARLY_MAX_CHARS) -> str | None:
     """从**流式分片**的累计译文里切出「现在就能合成」的一段（相对已念过的 `spoken`）。
 
     返回 None = 现在还不用念（还没到分句边界 / 太短 / 模型改写了已念过的部分）。
@@ -98,6 +107,9 @@ def voice_segment_from_partial(confirmed: str, spoken: str, *,
     2. 累计文本必须**以 `spoken` 为前缀**（含标点与空白）—— 模型一旦改写已念过的部分就停下，
        既不重念也不猜（实测前缀不会被改写，这条是护栏）；
     3. 新片段（去掉空白后）短于 `min_chars` 先攒着 —— 避免把「嗯。」「对，」这种碎片单独合成。
+
+    `soft=True`（`output.audio.segment_early`）时额外允许在**软边界**（逗号/顿号/空格）
+    或 `soft_max_chars` 长度处切开 —— 开口更早，但一句会念得更碎。默认关闭 = 行为与以前相同。
     """
     text = (confirmed or "").strip()
     if not text:
@@ -106,6 +118,11 @@ def voice_segment_from_partial(confirmed: str, spoken: str, *,
         return None
     fresh = text[len(spoken):]
     cut = max((fresh.rfind(ch) for ch in split), default=-1)
+    if cut < 0 and soft:
+        # 软边界（需 segment_early: true）：先试逗号/顿号/空格；再不行就到长度上限硬切一刀。
+        cut = max((fresh.rfind(ch) for ch in VOICE_SEGMENT_SPLIT_SOFT), default=-1)
+        if cut < 0 and len(fresh.strip()) >= max(2, int(soft_max_chars)):
+            cut = max(2, int(soft_max_chars)) - 1        # 到长度上限切一刀（含该字）
     if cut < 0:
         return None
     seg = fresh[:cut + 1]
@@ -154,9 +171,10 @@ VRCHAT_RECHECK_S = 3.0
 # 取值口径（dBFS，0 = 满量程；RMS 比峰值严，正常近处说话的块大致落在 -30~-20）：
 #   越高（越接近 0）= 过滤越狠，只留贴近耳边的人；越低 = 越宽松，远处的人也翻。
 INPUT_GATE_DEFAULT_ENABLED = True
-INPUT_GATE_DEFAULT_DB = -45.0
+INPUT_GATE_DEFAULT_DB = -50.0          # 2026-10-07：-45 → -50（更宽松 = 更早开闸；代价是更易收环境噪声）
 INPUT_GATE_DEFAULT_HOLD_MS = 500.0     # 超阈值后，回落多久内仍继续送（防句中断裂）
-INPUT_GATE_DEFAULT_PREROLL_MS = 250    # 开闸时补发的、越阈值之前的音频（防丢句首）
+INPUT_GATE_DEFAULT_PREROLL_MS = 300    # 开闸时补发的、越阈值之前的音频（防丢句首）
+# ↑ 2026-10-07：250 → 300（与更宽松的门限配套，保证句首辅音更稳）
 INPUT_GATE_MIN_DB = -70.0
 INPUT_GATE_MAX_DB = -10.0
 LEVEL_FLOOR_DB = -120.0                # 电平下限（纯数字静音时用它，避免 log10(0)）
@@ -868,6 +886,8 @@ class Engine:
         d = self._cfg.directions.get(self._direction)
         return dict(
             voice=str(tts_cfg.get("voice") or DEFAULT_TTS_VOICE),
+            # 连接复用（默认开）：每段省一次 DNS+TCP+TLS ≈ 500ms；关掉即回到「每次新连接」
+            reuse_conn=bool(tts_cfg.get("reuse_conn", True)),
             model=str(tts_cfg.get("model") or DEFAULT_TTS_MODEL),
             api_key=str(self._cfg.session_base.get("api_key") or ""),
             language=(d.target_lang if d else None),
@@ -1566,7 +1586,9 @@ class Engine:
             min_chars = int(audio_cfg.get("segment_min_chars", VOICE_SEGMENT_MIN_CHARS))
         except (TypeError, ValueError):
             min_chars = VOICE_SEGMENT_MIN_CHARS
-        seg = voice_segment_from_partial(text, self._voice_spoken, min_chars=min_chars)
+        # 更早开口（默认关）：开了才用软边界/长度上限切，否则与以前逐位相同
+        seg = voice_segment_from_partial(text, self._voice_spoken, min_chars=min_chars,
+                                         soft=bool(audio_cfg.get("segment_early", False)))
         if not seg or not seg.strip():
             return
         # ⚠️ 游标按**原文切片**推进（含前导空白），只把 strip 后的文本交给 TTS：

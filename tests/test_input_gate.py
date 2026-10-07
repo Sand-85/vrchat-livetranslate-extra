@@ -9,11 +9,11 @@ VRChat 把人声混成**一路**输出，远处玩家声音小、本来就听不
 三条「不切坏句子」的保证，每条都有用例守着：
 
 ① **hold**：超阈值后回落 500ms 内仍继续送 —— 说话句中的停顿、句尾渐弱不被切碎；
-② **preroll**：开闸时补发越阈值之前的 250ms —— 句首辅音/起音不丢；
+② **preroll**：开闸时补发越阈值之前的 300ms —— 句首辅音/起音不丢；
 ③ **只作用于 loopback**：麦克风腿（自己说话）绝不走这个门限（接线用例守着）。
 
 已知代价（写在用例里，不遮）：远处小声的人说完、近处的人紧接着开口时，
-小声尾巴的最近 250ms 会被当作句首 preroll 补发一次 —— 250ms 不足以成句，
+小声尾巴的最近 300ms 会被当作句首 preroll 补发一次 —— 该长度不足以成句，
 换来的是近处说话开头不掉字。
 
 ## 离线可跑
@@ -42,7 +42,7 @@ sys.path.insert(0, str(TESTS))
 from _cfgbox import sandbox_config  # noqa: E402
 sandbox_config(reset=True)
 
-CHUNK = 0.1          # 每块时长（秒）：3200B @16kHz s16le mono
+CHUNK = 0.04         # 每块时长（秒）：1280B @16kHz s16le mono（2026-10-07：100ms→40ms）
 
 
 def _tone(amp: int, marker: int) -> bytes:
@@ -97,7 +97,7 @@ def test_rms_reflects_energy_not_single_spike() -> None:
     峰值 -32dB，而不是压到"没有"。所以：
 
     - 远处玩家小声说话 = **整块**都小 → RMS 一直低 → 被门限拦住（本功能的主用途）；
-    - 单个满幅尖刺（按键/爆音）→ RMS ≈ -33 dBFS，**仍高于默认门限 -45**
+    - 单个满幅尖刺（按键/爆音）→ RMS ≈ -33 dBFS，**仍高于默认门限 -50**
       → 会开一次闸（100ms 块 + 500ms hold ≈ 0.6s）。这是已知代价：门限治"小声"，
       不治"瞬态噪声"；若被爆音频繁误开，把门限调高（例如 -35）即可。
     """
@@ -111,9 +111,9 @@ def test_rms_reflects_energy_not_single_spike() -> None:
     peak_db = 20 * math.log10(30000 / 32768.0)
     expect = peak_db - 10 * math.log10(1600)
     assert abs(db - expect) < 0.5, f"RMS 应只按占空比衰减：实测 {db:.1f} vs 预期 {expect:.1f}"
-    assert db > -45, "单点尖刺的 RMS 高于默认门限（已知代价：尖刺能开一次闸）"
+    assert db > -50, "单点尖刺的 RMS 高于默认门限（已知代价：尖刺能开一次闸）"
     # 整块小声（远处说话）：RMS 就是低 —— 这正是被拦住的对象
-    assert chunk_level_db(_tone(100, 0)) < -45
+    assert chunk_level_db(_tone(100, 0)) < -50
     print(f"  占空比口径：单点尖刺 {db:.1f} dBFS（峰值 {peak_db:.1f}）；整块小声被拦 OK")
 
 
@@ -123,8 +123,8 @@ def test_gate_settings_defaults_and_valid_values() -> None:
     """字段缺省 = 默认值；合法值原样采用。"""
     from vlt.engine import input_gate_settings
 
-    assert input_gate_settings(None) == (True, -45.0, 500.0, 250)
-    assert input_gate_settings({}) == (True, -45.0, 500.0, 250)
+    assert input_gate_settings(None) == (True, -50.0, 500.0, 300)
+    assert input_gate_settings({}) == (True, -50.0, 500.0, 300)
     assert input_gate_settings({"gate_enabled": False, "gate_db": -60,
                                "gate_hold_ms": 0, "gate_preroll_ms": 0}) == (False, -60.0, 0.0, 0)
     print("  缺省 / 合法取值 OK")
@@ -139,14 +139,14 @@ def test_gate_settings_invalid_values_fall_back_with_warning() -> None:
         got = input_gate_settings({"gate_enabled": "yes", "gate_db": "loud",
                                    "gate_hold_ms": -1, "gate_preroll_ms": "x"})
     out = buf.getvalue()
-    assert got == (True, -45.0, 500.0, 250), f"非法值没有回落默认：{got}"
+    assert got == (True, -50.0, 500.0, 300), f"非法值没有回落默认：{got}"
     for key in ("capture.gate_db", "capture.gate_hold_ms", "capture.gate_preroll_ms",
                 "capture.gate_enabled"):
         assert key in out, f"{key} 非法时没有留痕：{out!r}"
     # 超出物理范围也要拦（+5dBFS 比满量程还响，肯定是被手改坏了）
     buf2 = io.StringIO()
     with contextlib.redirect_stdout(buf2):
-        assert input_gate_settings({"gate_db": 5})[1] == -45.0
+        assert input_gate_settings({"gate_db": 5})[1] == -50.0
     assert "capture.gate_db" in buf2.getvalue()
     print("  非法值留痕 + 回落默认 OK")
 
@@ -171,14 +171,16 @@ def test_gate_opens_and_replays_preroll_in_order() -> None:
     """★ 开闸：按**原顺序**补发 preroll + 当前块（不丢句首、不乱序）。"""
     from vlt.engine import _LevelGate
 
-    g = _LevelGate(enabled=True, threshold_db=-45.0, hold_ms=500.0, preroll_ms=250)
+    g = _LevelGate(enabled=True, threshold_db=-50.0, hold_ms=500.0, preroll_ms=300)
     quiet = [_tone(100, m) for m in range(1, 4)]           # 3 块 ≈ -50dB
     for i, c in enumerate(quiet):
         assert g.feed(c, now=i * CHUNK, dur_s=CHUNK) == []
-    assert len(g._preroll) == 2, f"preroll 250ms 只该留最近 2 块：{len(g._preroll)}"  # noqa: SLF001
+    # 3 块 × 40ms = 120ms < 300ms preroll → 三块都该留着（2026-10-07：块 100ms→40ms 后重算）
+    assert len(g._preroll) == 3, f"preroll 300ms 该留全部 3 块（共 120ms）：{len(g._preroll)}"  # noqa: SLF001
     loud = _tone(3277, 9)                                  # ≈ -20dB
     out = g.feed(loud, now=0.3, dur_s=CHUNK)
-    assert [_mark(c) for c in out] == [2, 3, 9], \
+    # 40ms 块 + 300ms preroll → 3 块（共 120ms）都在 preroll 里，按原序补发
+    assert [_mark(c) for c in out] == [1, 2, 3, 9], \
         f"开闸补发顺序不对：{[_mark(c) for c in out]}"
     assert g.is_open and g.opened == 1 and g.replay_count == 1
     nxt = _tone(3277, 10)
@@ -240,7 +242,9 @@ def test_near_and_far_players_scenario() -> None:
     """★ 场景验收（用户要的效果）：远处小声的玩家整段不上送；近处的人一句不落。"""
     from vlt.engine import _LevelGate
 
-    g = _LevelGate(enabled=True, threshold_db=-45.0, hold_ms=500.0, preroll_ms=250)
+    THRESH, HOLD, PREROLL = -45.0, 500.0, 250.0           # 该用例自己的参数（下面按它推导期望值）
+    g = _LevelGate(enabled=True, threshold_db=THRESH, hold_ms=HOLD, preroll_ms=PREROLL)
+    window = max(1, int(PREROLL / (CHUNK * 1000)))        # 开闸补发窗口折算成块数（向下取整，与实现一致）
     far = [_tone(90, m) for m in range(1, 16)]            # 1.5s 远处小声（≈-51dB）
     near = [_tone(3277, m) for m in range(16, 26)]        # 1.0s 近处正常（≈-20dB）
     sent: list[bytes] = []
@@ -249,11 +253,14 @@ def test_near_and_far_players_scenario() -> None:
         sent += g.feed(c, now=t, dur_s=CHUNK)
         t += CHUNK
     marks = [_mark(c) for c in sent]
-    leaked = [m for m in marks if 1 <= m <= 13]
+    # 远处小块里，**开闸补发窗口内**的那几块会被合法重放（这是 preroll 的设计），
+    # 窗口按该用例自己的参数推导 —— 免得以后调块长/调 preroll 就假红。
+    leaked = [m for m in marks if 1 <= m <= len(far) - window]
     assert not leaked, f"远处小声的音频被上送了（markers={leaked}）"
     assert set(range(16, 26)) <= set(marks), "近处玩家的话有块被漏掉"
     # 已知代价：开闸时补发小声尾巴的最近 250ms（此处 marker 14/15），换近处句首不掉字
-    assert marks[:2] == [14, 15], f"没按预期补发句首 preroll：{marks[:4]}"
+    assert marks[:window] == list(range(len(far) - window + 1, len(far) + 1)), \
+        f"没按预期补发句首 preroll（应有最近 {window} 块）：{marks[:window + 2]}"
     ratio = (len(far) - 2) / len(far) * 100
     print(f"  近/远场景：远处 1.5s 中 {ratio:.0f}% 的音频被拦（仅补发 250ms 句首）OK")
 
@@ -325,7 +332,7 @@ def test_engine_gate_disabled_and_legacy_config() -> None:
 
     legacy = Engine(cfg=_cfg(), direction="theirs", source="loopback",
                     sinks=set(), events=EngineEvents())
-    assert (legacy.input_gate.enabled, legacy.input_gate.threshold_db) == (True, -45.0)
+    assert (legacy.input_gate.enabled, legacy.input_gate.threshold_db) == (True, -50.0)
     off = Engine(cfg=_cfg(gate_enabled=False), direction="theirs", source="loopback",
                  sinks=set(), events=EngineEvents())
     assert off.input_gate.enabled is False
