@@ -266,55 +266,6 @@ def test_desktop_sliders_save_own_keys_only_when_touched() -> None:
           f"(字号 {NEW_FONT}/{NEW_SRC_FONT}、面板 {NEW_W}x{NEW_H}) / 热重载真的变 OK")
 
 
-def test_wrist_page_falls_back_to_fewer_columns_when_narrow() -> None:
-    """★ 设置内容区放不下时，手腕屏页必须**降列**而不是硬撑被裁（列的判据是实测）。
-
-    这一页是从主界面搬进设置弹窗的：主界面俄语下宽 1273px，设置窗固定 760px ——
-    首轮就踩了三列滑块顶破内容区（实测 768 > 756，最右边那列的值标签被裁）。
-    做法：把 `SETTINGS_WIDTH` 压到 420（比任何语言都要窄得多）再建界面，
-    列数必须自动降下来，网格需求宽度不许超过同一套公式算出的内容区。
-
-    ⚠️ 只测「网格需求宽度」这个**未映射时也可靠**的量：真显示设置窗再量控件在
-    Windows CI 上会把 Tcl 搞崩（`Tcl_AsyncDelete: async handler deleted by the wrong thread`
-    —— 设置窗会拉起电平探针线程，反复开关窗时踩到），别那么测。
-    """
-    import vlt.config as _cfg_mod
-    import vlt.i18n as _i18n
-    import vlt.gui as _gui_mod
-
-    _make_gui_sandbox()
-    saved = (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG, _i18n.detect_system_language,
-             _gui_mod.SETTINGS_WIDTH)
-    _cfg_mod.DEFAULT_CONFIG = GUI_SANDBOX
-    _gui_mod.DEFAULT_CONFIG = GUI_SANDBOX
-    _gui_mod.SETTINGS_WIDTH = 420            # 比五种语言里最窄的还窄
-    _i18n.detect_system_language = lambda: "zh"
-
-    from vlt.gui import TAB_INSET_X, TranslationGUI
-
-    gui = None
-    try:
-        gui = TranslationGUI()
-        if gui._update_check_job is not None:
-            gui._root.after_cancel(gui._update_check_job)
-            gui._update_check_job = None
-        gui._root.update_idletasks()
-        budget = 420 - 2 * TAB_INSET_X - 24       # 与 vlt/gui.py 里同一套算法
-        got = int(gui._tune_grid.winfo_reqwidth())
-        cols = len({int(c.grid_info()["column"]) for c in gui._tune_grid.winfo_children()})
-        assert got <= budget, (f"内容区只有 {budget}px，滑块网格却要 {got}px（列数没降下来）")
-        assert cols == 1, f"窄到 420px 时该降到 1 列，实际 {cols} 列"
-    finally:
-        if gui is not None:
-            try:
-                gui._root.destroy()
-            except Exception:  # noqa: BLE001
-                pass
-        (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG, _i18n.detect_system_language,
-         _gui_mod.SETTINGS_WIDTH) = saved
-    print("  内容区变窄时手腕屏页自动降列（420px → 1 列，不越界）OK")
-
-
 def test_settings_sliders_really_schedule_save() -> None:
     """★ 回归 6083052：设置页的滑块必须真的把「落盘」排上 —— 只改内存/只改标签不算。
 
@@ -389,6 +340,61 @@ def test_settings_sliders_really_schedule_save() -> None:
         (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG,
          _i18n.detect_system_language) = saved
     print("  设置页滑块走真实防抖链路：桌面 + 手腕屏都真的写进了 config.yaml OK")
+
+
+def test_wrist_page_falls_back_to_fewer_columns_when_narrow() -> None:
+    """★ 设置内容区放不下时，手腕屏页必须**降列**而不是硬撑被裁（列的判据是实测）。
+
+    这一页是从主界面搬进设置弹窗的：主界面俄语下宽 1273px，设置窗固定 760px ——
+    首轮就踩了三列滑块顶破内容区（实测 768 > 756，最右边那列的值标签被裁）。
+    做法：把设置窗宽压到 420（比任何语言都要窄得多）再建界面，
+    列数必须自动降下来，网格需求宽度不许超过同一套公式算出的内容区。
+    ⚠️ 宽度现在是「基准值 × DPI 缩放」的运行时有效值：这里的基准取自
+    `ui_theme.SETTINGS_WIDTH`，同时把缩放钉成 1.0，免得宿主 DPI（≈100dpi → ×1.04）
+    把 420 再放大、把这条例子的前提冲掉。
+
+    ⚠️ 只测「网格需求宽度」这个**未映射时也可靠**的量：真显示设置窗再量控件在
+    Windows CI 上会把 Tcl 搞崩（`Tcl_AsyncDelete: async handler deleted by the wrong thread`
+    —— 设置窗会拉起电平探针线程，反复开关窗时踩到），别那么测。
+    """
+    import vlt.config as _cfg_mod
+    import vlt.i18n as _i18n
+    import vlt.gui as _gui_mod
+    import vlt.gui_layout as _layout_mod
+    import vlt.ui_theme as _ui_theme_mod
+
+    _make_gui_sandbox()
+    saved = (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG, _i18n.detect_system_language,
+             _ui_theme_mod.SETTINGS_WIDTH, _layout_mod._dpi_scale)
+    _cfg_mod.DEFAULT_CONFIG = GUI_SANDBOX
+    _gui_mod.DEFAULT_CONFIG = GUI_SANDBOX
+    _ui_theme_mod.SETTINGS_WIDTH = 420       # 比五种语言里最窄的还窄
+    _layout_mod._dpi_scale = lambda gui: 1.0   # 钉死缩放，别让宿主 DPI 干扰
+    _i18n.detect_system_language = lambda: "zh"
+
+    from vlt.gui import TAB_INSET_X, TranslationGUI
+
+    gui = None
+    try:
+        gui = TranslationGUI()
+        if gui._update_check_job is not None:
+            gui._root.after_cancel(gui._update_check_job)
+            gui._update_check_job = None
+        gui._root.update_idletasks()
+        budget = 420 - 2 * TAB_INSET_X - 24       # 与 vlt/gui.py 里同一套算法
+        got = int(gui._tune_grid.winfo_reqwidth())
+        cols = len({int(c.grid_info()["column"]) for c in gui._tune_grid.winfo_children()})
+        assert got <= budget, (f"内容区只有 {budget}px，滑块网格却要 {got}px（列数没降下来）")
+        assert cols == 1, f"窄到 420px 时该降到 1 列，实际 {cols} 列"
+    finally:
+        if gui is not None:
+            try:
+                gui._root.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+        (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG, _i18n.detect_system_language,
+         _ui_theme_mod.SETTINGS_WIDTH, _layout_mod._dpi_scale) = saved
+    print("  内容区变窄时手腕屏页自动降列（420px → 1 列，不越界）OK")
 
 
 if __name__ == "__main__":

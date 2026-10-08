@@ -437,7 +437,13 @@ class TranslationGUI(VoicelabMixin):
     # ── 手腕屏微调 ──
     def _ov_fn(self): return self._cfg.overlay if isinstance(self._cfg.overlay, dict) else {}
     def _build_tune_page(self, body) -> None:
-        gui_desktop.build_tune_page(body, self._desktop_ctx, self._ov_fn(), overlay_fn=self._ov_fn, settings_width=SETTINGS_WIDTH)
+        self._wire_desktop_ctx()
+        self._wire_desktop_ctx()
+        # 内容区可用宽按**有效**设置窗宽算（HiDPI 下窗口更宽，滑块能多留一列）——
+        # 有效值在 build_settings_dialog 开头由 apply_settings_metrics 挂上。
+        _m = getattr(self, "_settings_metrics", None)
+        settings_width = _m.width if _m is not None else SETTINGS_WIDTH
+        gui_desktop.build_tune_page(body, self._desktop_ctx, self._ov_fn(), overlay_fn=self._ov_fn, settings_width=settings_width)
         for a in ("anchor_combo", "tracker_var", "tune_panel_w", "anchor_label_to_key", "tune_values",
                   "tune_vars", "tune_lbls", "tune_units", "tune_grid", "ov_save_job"):
             setattr(self, f"_{a}", getattr(self._desktop_ctx, a))

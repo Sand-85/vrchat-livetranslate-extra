@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 # 界面字体族：**不能写死** "Microsoft YaHei UI"。
 # 那个族在 Linux 上不存在，Tk 会静默回落到没有中日韩字形的 `fixed` ——
 #   1) 中文靠逐字 fontconfig 回落渲染，实测**每次 measure() 要 0.3 秒**，
@@ -78,6 +80,11 @@ QIANWEN_SIGNUP_URL = "https://www.qianwenai.com/"
 # ---- 设置弹窗（分页）----
 # 宽度**固定**：每页的长说明都按 SETTINGS_WRAP 换行，于是各语言的窗宽一致，
 # 不会因为俄语文案长就忽然变宽（也不再靠「窗口自然撑大 → 超出屏幕」）。
+#
+# ⚠️ 这里几个是 **100% 缩放（scale=1.0）的基准值**。HiDPI 下整套要按同一个
+#    几何缩放因子放大（口径与字号一致：Windows 声明 Per-Monitor DPI 后 Tk 会放大字号，
+#    Linux 的 Tk scaling 本来就放大字号）——见 `settings_metrics()` 与
+#    `vlt/gui_settings.py: apply_settings_metrics()`。**不在 import 期钉死**（issue #61 同源）。
 SETTINGS_WIDTH = 760
 SETTINGS_WRAP = 660            # 长说明的换行宽 = 窗宽 - 左右留白(40) - 滚动条(~12) - 余量
 SETTINGS_MIN_H = 360           # 再小的屏也至少给这么多高（内容靠页面滚动兜底）
@@ -99,3 +106,30 @@ PANEL_H_MIN, PANEL_H_MAX = 120, 900    # 面板高（px）
 SETTINGS_CHROME_H = 66         # tab 条 + 页面上下留白：算窗高时在内容高度上加这一份
 # 每页内容 frame 的左右内边距（内容区位置固定，不随标签条动）
 TAB_INSET_X = 20
+
+
+@dataclass(frozen=True)
+class SettingsMetrics:
+    """设置弹窗在某个缩放档下的有效尺寸（单位 px）。"""
+    width: int
+    wrap: int
+    min_h: int
+    max_h: int
+    chrome_h: int
+
+
+def settings_metrics(scale: float = 1.0) -> SettingsMetrics:
+    """按几何缩放因子把设置弹窗的基准尺寸换算成有效值。
+
+    `scale` 由 `vlt/gui_layout` 的 `_resolve_scale()`（内部走 `_dpi_scale()` 或
+    `ui.scale` 覆盖）给出，范围 [1, 3]。这里再夹一道，防止别处传进越界值。
+    **纯函数**（不碰 Tk），便于离线测试。
+    """
+    s = max(1.0, min(3.0, float(scale)))
+    return SettingsMetrics(
+        width=int(round(SETTINGS_WIDTH * s)),
+        wrap=int(round(SETTINGS_WRAP * s)),
+        min_h=int(round(SETTINGS_MIN_H * s)),
+        max_h=int(round(SETTINGS_MAX_H * s)),
+        chrome_h=int(round(SETTINGS_CHROME_H * s)),
+    )

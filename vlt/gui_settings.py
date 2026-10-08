@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tkinter import font as tkfont
 from typing import Any
@@ -25,6 +25,7 @@ from tkinter import ttk
 
 from . import __version__, endpoints, i18n, platform
 from . import config as _config_mod
+from . import ui_theme as _ui_theme
 from .config_io import (
     _write_config_text,
     _yaml_set_in_text,
@@ -87,12 +88,42 @@ class SettingsCtx:
 
 # ================================================================ 弹窗生命周期
 
+def apply_settings_metrics(gui) -> None:
+    """按 `gui._dpi_scale` 把设置弹窗的**有效尺寸**重绑到本模块全局。
+
+    口径与字体一致（issue #61）：`gui_settings` 里所有 `wraplength=SETTINGS_WRAP` /
+    `SETTINGS_WIDTH` 取的都是这些**模块级名字**，在函数体内读取 —— 重绑即生效，
+    不是 import 期快照。基准值定义在 `vlt/ui_theme.py`，这里只存「当前档」的有效值。
+
+    必须在 `build_settings_dialog()` 建页之前调用（那时才知道弹窗要开多大）。
+    同时把这份有效值挂到 `gui._settings_metrics`，供 gui.py 构「手腕屏」页时取用。
+
+    ⚠️ **屏幕夹取必须在建页之前做**：窄屏上放大后的宽度装不下时，换行宽也得同步收窄，
+    否则长说明会按超宽的 `wraplength` 排版、建完就横向溢出被裁（换行宽是建页时定死的，
+    事后改不回来）。
+    """
+    global SETTINGS_WIDTH, SETTINGS_WRAP, SETTINGS_MIN_H, SETTINGS_MAX_H, SETTINGS_CHROME_H
+    s = max(1.0, float(getattr(gui, "_dpi_scale", 1.0)))
+    m = _ui_theme.settings_metrics(s)
+    try:
+        screen_w = int(gui._root.winfo_screenwidth() or 0)
+    except Exception:  # noqa: BLE001
+        screen_w = 0
+    if screen_w and m.width > screen_w - 16:
+        w = max(320, screen_w - 16)
+        m = replace(m, width=w, wrap=max(160, m.wrap - (m.width - w)))
+    SETTINGS_WIDTH, SETTINGS_WRAP = m.width, m.wrap
+    SETTINGS_MIN_H, SETTINGS_MAX_H, SETTINGS_CHROME_H = m.min_h, m.max_h, m.chrome_h
+    gui._settings_metrics = m
+
+
 def build_settings_dialog(gui) -> None:
     """低频设置收进弹窗：**分页**（常规 / 音频 / 词库 / 房间 / 关于）+ 固定尺寸 + 每页可滚。
 
     弹窗**先建好再 withdraw**，且各页的控件**一次性全建齐**（不做「切到那页才建」的
     懒加载）：控件属性必须在弹窗不可见时也随即可用。
     """
+    apply_settings_metrics(gui)          # 先按 DPI 定有效尺寸，再建页（wrap 等在函数内读取）
     win = tk.Toplevel(gui._root)
     win.title(t("设置"))
     win.configure(bg=PANEL)
@@ -216,12 +247,31 @@ def size_settings_window(gui, ctx: SettingsCtx | None = None) -> None:
         need = max((inner.winfo_reqheight() for _c, inner, _s in pages),
                    default=0)
         screen_h = int(win.winfo_screenheight() or 0)
+        screen_w = int(win.winfo_screenwidth() or 0)
         cap = min(SETTINGS_MAX_H, screen_h - 90) if screen_h else SETTINGS_MAX_H
         h = max(SETTINGS_MIN_H, min(need + SETTINGS_CHROME_H, cap))
-        ctx.size = (SETTINGS_WIDTH, h)
-        win.geometry(f"{SETTINGS_WIDTH}x{h}")
-        print(f"[ui] 设置弹窗 {SETTINGS_WIDTH}x{h}"
+        # ⚠️ min_h 也随 DPI 放大（360×s），小屏+高 DPI 下会超过屏幕 —— 再夹一道，
+        #    否则弹窗比屏幕还高，底部内容连滚动条都够不到。
+        if screen_h:
+            h = min(h, max(240, screen_h - 90))
+        # 宽度随 DPI 放大后也要夹到屏幕内（基准 760 时一般不需要，HiDPI 下会）
+        w = SETTINGS_WIDTH
+        if screen_w:
+            w = max(320, min(w, screen_w - 16))
+        ctx.size = (w, h)
+        win.geometry(f"{w}x{h}")
+        print(f"[ui] 设置弹窗 {w}x{h}"
               f"（最高一页需 {need}px，屏高 {screen_h}px）", flush=True)
+        # ⚠️ 极窄屏 + 超高档（宽度被屏幕夹住后）可能装不下某些定宽控件
+        #    （`width=34` 的 Entry、按字符宽算的下拉——它们随字号一起变大）。页面只能纵向
+        #    滚动，横向装不下就会**被裁且够不到**，所以给一行可见告警，让用户去调 `ui.scale`。
+        need_w = max((inner.winfo_reqwidth() for _c, inner, _s in pages), default=0)
+        avail_w = w - 16                    # 弹窗边框/滚动条占掉的横向余量（约）
+        if need_w > avail_w:
+            print(f"[ui] ⚠️ 设置弹窗宽 {w}px 装不下最宽的一页（需 {need_w}px，"
+                  f"可用 {avail_w}px）—— 屏幕 {screen_w}px 配当前缩放偏小，"
+                  f"可在 config.yaml 调低 ui.scale（当前档 {getattr(gui, '_dpi_scale', 1.0):.2f}）",
+                  flush=True)
     except Exception as exc:  # noqa: BLE001
         ctx.size = (SETTINGS_WIDTH, SETTINGS_MAX_H)
         win.geometry(f"{SETTINGS_WIDTH}x{SETTINGS_MAX_H}")

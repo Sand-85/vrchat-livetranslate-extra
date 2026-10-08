@@ -21,6 +21,9 @@ from .ui_theme import (
 )
 from .ui_tk import _combo_width, _char_width_for
 
+# 「1 点」在 96dpi 下等于多少像素 —— Tk `tk scaling` 的基准值（也是 `ui.scale: 1.0` 的锚点）。
+_DPI_PT = 96.0 / 72.0
+
 
 def apply_ui_font(root) -> None:
     """按当前平台重绑界面字体常量。"""
@@ -80,24 +83,61 @@ def _enable_windows_dpi_awareness() -> None:
             pass
 
 
-def _windows_dpi_scale(gui) -> float:
-    """取 Tk 自己算出的 DPI 缩放（1.0 = 100%）。非 Windows 恒返回 1.0。
+def _dpi_scale(gui) -> float:
+    """取 Tk 自己算出的 DPI 缩放（1.0 = 100%）。**两端同口径**。
 
-    声明 DPI 感知后 Tk 会把 `tk scaling` 按真实屏幕 DPI 重算（点→像素换算），
-    字号因此自动变大变清晰；但窗口/弹窗的几何尺寸是**像素**，不按同比例放大就会
-    显得整窗变小、文案挤在一起。这里按同一比例放大基准尺寸，两者口径才一致。
+    缩放因子的物理含义：把「用户看到的界面」整体放大多少倍。字号本来就会被 Tk 按
+    `tk scaling`（点→像素）自动放大，这里的因子专门用来同步放大**像素口径**的窗口几何，
+    两者才一致（否则 HiDPI 下字大窗小、文案挤在一起）。
 
-    ⚠️ 只在 Windows 生效：Linux 上 Tk scaling 反映的是 Xft.dpi（HiDPI 下也可能
-    >1.333），跟着缩放就等于**改变了 Linux 既有的窗口几何口径** —— 那不是本改动的
-    目的，也会让两岸行为分叉。非 Windows 一律返回 1.0，几何逐字保持原样。
+    - Windows：声明 Per-Monitor DPI 感知后 Tk 会把 `tk scaling` 按真实屏幕 DPI 重算
+      （不声明则恒为虚拟化的 96dpi → 因子恒 1.0）。所以调本函数**之前**必须先
+      `_enable_windows_dpi_awareness()`。
+    - Linux：`tk scaling` 反映 Xft.dpi / X 屏 DPI（Wayland 经 XWayland 亦然），本来就
+      在放大字号，于是这里跟着放大几何 —— 与 Windows 同一套口径，两端不再分叉。
+
+    失败静默回 1.0（界面照常起）。夹到 [1, 3]：<1 缩小没有意义（那会让字更挤），
+    >3 已远超任何真实缩放置信区间。
     """
-    if not IS_WINDOWS:
-        return 1.0
     try:
-        s = float(gui._root.tk.call("tk", "scaling")) / (96.0 / 72.0)
+        s = float(gui._root.tk.call("tk", "scaling")) / _DPI_PT
     except Exception:  # noqa: BLE001
         return 1.0
     return max(1.0, min(3.0, s))
+
+
+def _apply_scale(gui) -> float:
+    """确定并**落实**界面缩放因子：`ui.scale: auto`（默认）跟随系统 DPI，或显式数值覆盖。
+
+    显式数值的语义是**整体缩放**（字号 + 几何一起放大）：除了几何按 `s` 算，还会把 Tk 的
+    点→像素换算 `tk scaling` 设为 `s × 96/72`，于是 `FONT*` 那些「点」字号也按 `s` 渲染。
+
+    为什么显式值必须连字号一起改：`auto` 在 Windows 上靠 DPI 感知让 Tk 放大字号、我们再
+    同倍放大几何，两者本来就同倍；但在一台「屏 DPI 正常、却想要更大界面」的机器上
+    （典型：Linux 合成器没把缩放传给 X，Tk 只看到 ~100dpi，或就是想放大），只放大几何
+    会得到一个「窗口很大、字还是小」的错配 —— 这正是 `ui.scale` 要修的场景。
+
+    显式场景：
+      · 合成器没把缩放传给 X（XWayland / xwayland-satellite 报 96~100dpi）而显示确实是
+        HiDPI → `ui.scale: 1.5` 让整个界面（含字号）放大；
+      · 想临时把界面调大/调小 → 任意数值；
+      · 想固定缩放（不受系统 DPI 影响）→ 任意数值，例如 150% 的屏上写 `1.0` 强制回到 100%
+        （**显式值是绝对的**：几何与字号都按该数，不再看系统 DPI）。
+    非法/取不到的值一律回落 `auto`。
+    """
+    ui = getattr(gui._cfg, "ui", None)
+    raw = ui.get("scale") if isinstance(ui, dict) else None
+    if raw not in (None, "", "auto", "Auto", "AUTO"):
+        try:
+            s = max(1.0, min(3.0, float(raw)))
+        except (TypeError, ValueError):
+            return _dpi_scale(gui)
+        try:
+            gui._root.tk.call("tk", "scaling", s * _DPI_PT)
+        except Exception:  # noqa: BLE001
+            pass
+        return s
+    return _dpi_scale(gui)
 
 
 def build_ui(gui) -> None:
@@ -105,7 +145,7 @@ def build_ui(gui) -> None:
     _enable_windows_dpi_awareness()
     gui._root = tk.Tk()
     gui._root.title(t("VRChat 实时同传"))
-    gui._dpi_scale = _windows_dpi_scale(gui)
+    gui._dpi_scale = _apply_scale(gui)
     if gui._dpi_scale > 1.0:
         gui._root.geometry(f"{int(940 * gui._dpi_scale)}x{int(600 * gui._dpi_scale)}")
     else:
@@ -144,7 +184,7 @@ def build_ui(gui) -> None:
 
 
 def fit_window_width(gui) -> None:
-    """按当前界面语言定窗口宽度。"""
+    """按当前界面语言定窗口宽度（各尺寸都按 `gui._dpi_scale` 同比例放大）。"""
     from . import i18n as _i18n_mod
     s = max(1.0, float(getattr(gui, "_dpi_scale", 1.0)))
     base_w = int(940 * s)
@@ -156,8 +196,19 @@ def fit_window_width(gui) -> None:
         if screen:
             want = min(want, max(int(760 * s), screen - 16))
         height = max(int(600 * s), gui._root.winfo_reqheight())
+        screen_h = int(gui._root.winfo_screenheight() or 0)
+        if screen_h:
+            # 装不下时也别把窗开得比屏幕还高（缩放后更容易发生）
+            height = min(height, max(int(460 * s), screen_h - 90))
         gui._root.geometry(f"{want}x{height}")
-        gui._root.minsize(min(want, need), int(460 * s))
+        # ⚠️ minsize 必须夹到屏幕可用区以内：缩放后 928×s 可能比小屏还宽，
+        #    否则窗口连缩小都做不到（用户没法把它拖回屏内）。s=1.0 时行为不变。
+        min_w, min_h = min(want, need), int(460 * s)
+        if screen:
+            min_w = min(min_w, max(320, screen - 16))
+        if screen_h:
+            min_h = min(min_h, max(240, screen_h - 90))
+        gui._root.minsize(min_w, min_h)
         if want > base_w:
             print(f"[ui] 界面语言 {_i18n_mod.current_language()}：文案较宽，"
                   f"窗口按需求开到 {want}px（基准 {base_w} / 需求 {need}）", flush=True)
