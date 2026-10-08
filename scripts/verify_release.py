@@ -40,6 +40,7 @@ import os
 import re
 import subprocess
 import sys
+import shutil
 import tempfile
 import time
 from ctypes import wintypes
@@ -59,6 +60,7 @@ WORK = Path(tempfile.mkdtemp(prefix="verify_release_"))
 
 ok: list[str] = []
 bad: list[str] = []
+skipped: list[str] = []
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -76,15 +78,37 @@ def sha256(p: Path) -> str:
 
 print(f"== 复核 {TAG} ==")
 print(f"下载目录：{WORK}")
-r = subprocess.run(["gh", "release", "download", TAG, "--dir", str(WORK)],
-                   capture_output=True, text=True, encoding="utf-8", errors="replace")
-if r.returncode != 0:
+# ⚠️ 必须显式 --repo + --pattern。`gh release download` 默认按**当前目录的 origin 远端**
+#    推断仓库，而本仓库的 origin 是**上游**（我们自己的在 mine 远端）→ 不加 --repo 会下到
+#    **上游**同名 tag 的资产（上游还带 AppImage，两个文件混进同一目录），再拿**我们仓库**的
+#    digest 去对账，必然不一致 —— 实测踩到过：sha 校验自己把自己判红，白查一轮。
+_dl = None
+for _try in range(1, 4):
+    r = subprocess.run(["gh", "release", "download", TAG, "--repo", REPO_SLUG,
+                        "-p", "VRChatLiveTranslate.exe", "--dir", str(WORK), "--clobber"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode == 0 and list(WORK.glob("*.exe")):
+        _dl = r
+        break
+    print(f"  下载第 {_try} 次没成功（{(r.stderr or '').strip()[:80]}），重试…")
+    time.sleep(4)
+if _dl is None:
     print("gh release download 失败：", r.stderr)
     raise SystemExit(2)
 
 exes = list(WORK.glob("*.exe"))
-check("附件齐了（exe）", bool(exes),
+check("附件齐了（exe，且只有自己仓库的那一个）", len(exes) == 1,
       f"{[p.name + ' ' + f'{p.stat().st_size:,}B' for p in exes]}")
+
+# 尺寸也要和服务端对一次账：下载被截断/半途重试时，sha 会莫名其妙地不符，
+# 先比尺寸能一眼区分「下载坏了」和「产物真的不是构建的那份」。
+_want_size = subprocess.run(
+    ["gh", "api", f"repos/{REPO_SLUG}/releases/tags/{TAG}",
+     "--jq", '.assets[] | select(.name=="VRChatLiveTranslate.exe") | .size'],
+    capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
+check("附件尺寸 == 服务端 size（排除下载被截断）",
+      bool(_want_size) and exes and exes[0].stat().st_size == int(_want_size),
+      f"服务端 {_want_size or '?'}B / 本地 {exes[0].stat().st_size if exes else 0:,}B")
 
 exe = exes[0]
 mine = sha256(exe)
@@ -106,12 +130,39 @@ print("  跑 --self-test（可能要十几秒）…")
 #    本地跑过 GUI 测试后，测试里那个假 key 可能还留在会话环境里，一跑自检就是 401
 #    （实测踩过：复核因此从 9/9 掉到 7/9，白白怀疑了一遍产物）。
 #    剥掉它，应用就会去用自己那份真凭据。
-_env = {k: v for k, v in os.environ.items() if k != "DASHSCOPE_API_KEY"}
-if _env != dict(os.environ):
-    print("  （本机环境里有 DASHSCOPE_API_KEY，已剥掉后运行 —— 用应用自己保存的凭据）")
-r = subprocess.run([str(exe), "--self-test"], capture_output=True, text=True,
-                   encoding="utf-8", errors="replace", timeout=300, env=_env)
+def _run_selftest(env: dict) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run([str(exe), "--self-test"], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=420, env=env)
+
+
+# key 的来源在本仓库是**用户级环境变量**（Windows 上存在注册表 HKCU\Environment，进程不一定
+# 继承得到）。以前这里无条件**剥掉**环境里的 key（防测试残留的假 key），结果是：本机真 key 恰恰
+# 就在环境变量里 → 自检报「找不到 API key」→ 又被当成产物问题。现在改成两段式：
+#   ① 先用**当前环境**（含会话里可能存在的 key）跑；
+#   ② 若它明确报「找不到 API key」，再从**注册表**取一把重跑一次 —— 两条路都留痕。
+r = _run_selftest(dict(os.environ))
 out = (r.stdout or "") + (r.stderr or "")
+# ⚠️ 判据只用 **ASCII 片段**：打包 exe 的 stdout 走的是本地代码页（中文机器上是 GBK），
+#    上面按 utf-8 读出来是「�Ҳ��� API key」这种乱码 —— 拿中文子串去判断会**永远匹配不上**，
+#    于是「从注册表补一把 key 重跑」那一段从不生效（实测踩到：换了 key 机制后仍报找不到 key）。
+if "DASHSCOPE_API_KEY" in out or "API key" in out:
+    import winreg
+    _k = None
+    for _hive, _sub in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                        (winreg.HKEY_LOCAL_MACHINE,
+                         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+        try:
+            with winreg.OpenKey(_hive, _sub) as _kk:
+                _k = winreg.QueryValueEx(_kk, "DASHSCOPE_API_KEY")[0]
+                break
+        except OSError:
+            continue
+    if _k:
+        print("  （环境里没有可用的 key → 从注册表取到一把，重跑自检）")
+        r = _run_selftest({**os.environ, "DASHSCOPE_API_KEY": _k})
+        out = (r.stdout or "") + (r.stderr or "")
+    else:
+        print("  ⚠️ 环境与注册表都没有 DASHSCOPE_API_KEY —— 自检无法进行（跳过=未验证）")
 check("--self-test 退出码 0", r.returncode == 0, f"rc={r.returncode}")
 check("--self-test 打出 GUI_SELFTEST_OK", "GUI_SELFTEST_OK" in out,
       out.strip().splitlines()[-1][:90] if out.strip() else "(无输出)")
@@ -141,11 +192,21 @@ check("启动日志版本行 = 本次 tag 且标明打包 exe",
 #    源码字符串一个字都搜不到（实测连 v0.0.1 就有的「西班牙语」「赞助」也是 0 命中，
 #    拿它当判据会得出「功能没打包进去」的假结论）。必须先解包再搜。
 unpacked = WORK / f"{exe.name}_extracted"
-xtractor = next((p for p in [
-    Path(os.environ.get("LOCALAPPDATA", "")) / "Temp/qrvenv/Scripts/pyinstxtractor-ng.exe",
-] if p.exists()), None)
+# 解包器的发现顺序：PATH → 本仓库 venv → 旧的一次性环境（历史路径，留着兜底）。
+# 以前只写死最后一个，工具一旦不在了就永远「跳过=未验证」。
+_cands = [
+    shutil.which("pyinstxtractor-ng"),
+    shutil.which("pyinstxtractor-ng.exe"),
+    str(ROOT / ".venv" / "Scripts" / "pyinstxtractor-ng.exe"),
+    str(Path(os.environ.get("LOCALAPPDATA", "")) / "Temp/qrvenv/Scripts/pyinstxtractor-ng.exe"),
+]
+xtractor = next((Path(p) for p in _cands if p and Path(p).exists()), None)
 if xtractor is None:
-    check("exe 内含新增的「俄语」选项", False, "找不到 pyinstxtractor-ng，无法解包核对（跳过=未验证）")
+    # 缺工具 = **未验证**，不是发布缺陷 —— 别记成 ❌（那会让整轮复核看着像产物坏了）。
+    print("  ⚠️ 跳过「exe 内含新增符号」核对：找不到 pyinstxtractor-ng")
+    print("     装它：.venv/Scripts/python.exe -m pip install pyinstxtractor-ng")
+    unverified = [f"exe 内含「{nd}」（缺 pyinstxtractor-ng，本轮未验证）" for nd in NEEDLES]
+    skipped.extend(unverified)
 else:
     # ⚠️ 这个工具**没有** -o 选项（只有 filename / -d / -i），传 -o 会被它忽略参数直接失败；
     #    而且它按 **cwd** 落产物（`<exe名>_extracted/`），必须用 cwd= 指定目录，
@@ -190,17 +251,43 @@ class BITMAPINFOHEADER(ctypes.Structure):
                 ("biClrImportant", wintypes.DWORD)]
 
 
+# ⚠️ 句柄类参数**必须**声明原型：Windows 64 位下 HICON / HDC / HBITMAP / HGDIOBJ 是指针，
+#    不声明时 ctypes 按 32 位 C int 传 → `ctypes.ArgumentError: argument 4: OverflowError:
+#    int too long to convert`（实测就在 DrawIconEx 上炸）。这与 vlt/platform/win.py 里
+#    GetCurrentThread() 伪句柄 -2 被截断是**同一个坑**：宁多写几行 argtypes/restype。
+user32.GetDC.restype = wintypes.HDC
+user32.GetDC.argtypes = [wintypes.HWND]
+user32.ReleaseDC.restype = ctypes.c_int
+user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+user32.DrawIconEx.restype = wintypes.BOOL
+user32.DrawIconEx.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.HICON,
+                              ctypes.c_int, ctypes.c_int, wintypes.UINT, wintypes.HICON,
+                              wintypes.UINT]
+gdi32.CreateCompatibleDC.restype = wintypes.HDC
+gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+gdi32.SelectObject.restype = wintypes.HGDIOBJ
+gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+gdi32.GetDIBits.restype = ctypes.c_int
+gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
+                            ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+gdi32.DeleteDC.argtypes = [wintypes.HDC]
+
+
 def hicon_to_rgba(hicon, size: int) -> Image.Image:
     hdc_screen = user32.GetDC(0)
     hdc = gdi32.CreateCompatibleDC(hdc_screen)
     bmp = gdi32.CreateCompatibleBitmap(hdc_screen, size, size)
     old = gdi32.SelectObject(hdc, bmp)
     user32.DrawIconEx(hdc, 0, 0, hicon, size, size, 0, None, 0x0003)  # DI_NORMAL
+    # （hicon 由调用方保证是 HICON / int 句柄；原型已声明，64 位不再被截断）
     bi = BITMAPINFOHEADER()
     bi.biSize, bi.biWidth, bi.biHeight = ctypes.sizeof(bi), size, -size
     bi.biPlanes, bi.biBitCount, bi.biCompression = 1, 32, 0
     buf = ctypes.create_string_buffer(size * size * 4)
-    gdi32.GetDIBits(hdc, bmp, 0, size, buf, ctypes.byref(bi), 0)
+    gdi32.GetDIBits(hdc, bmp, 0, size, ctypes.byref(buf), ctypes.byref(bi), 0)
     gdi32.SelectObject(hdc, old)
     gdi32.DeleteObject(bmp)
     gdi32.DeleteDC(hdc)
