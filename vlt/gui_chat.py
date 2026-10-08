@@ -117,8 +117,8 @@ class ChatCtx:
     sync_gate_level_fn: Optional[Callable] = None
     refresh_gate_level_fn: Optional[Callable] = None
     # 开始/停止按钮控制（stop_done 事件需要恢复按钮态）
-    start_btn_fn: Optional[Callable] = None        # (state) -> None
-    stop_btn_fn: Optional[Callable] = None         # (state) -> None
+    # 开始/停止单按钮控制：stop_done 事件 + 「引擎全部退出」兜底都要把按钮态刷回 idle
+    power_state_fn: Optional[Callable] = None          # (state) -> None
 
 
 # ================================================================ UI 构建
@@ -557,8 +557,7 @@ def setup_poll_ctx(ctx: ChatCtx, gui) -> None:
     c.on_download_error_fn = gui._on_download_error; c.on_voice_preview_done_fn = gui._on_voice_preview_done
     c.refresh_room_status_fn = gui._refresh_room_status_label; c.sync_gate_level_fn = gui._sync_gate_level_probe
     c.refresh_gate_level_fn = gui._refresh_gate_level
-    c.start_btn_fn = lambda s: gui._start_btn.configure(state=s)
-    c.stop_btn_fn = lambda s: gui._stop_btn.configure(state=s)
+    c.power_state_fn = gui._set_power_state
 
 
 def poll(ctx: ChatCtx, root: tk.Misc,
@@ -663,10 +662,10 @@ def _poll_once(ctx: ChatCtx,
             elif kind == "stop_done":
                 # 引擎收尾完成 → 恢复「开始翻译」
                 _, elapsed, n_engines, incomplete = item
-                if ctx.start_btn_fn:
-                    ctx.start_btn_fn(tk.NORMAL)
-                if ctx.stop_btn_fn:
-                    ctx.stop_btn_fn(tk.DISABLED)
+                # 引擎收尾完成 → 单按钮刷回 idle
+                # （超时也要放开，宁可让用户再点一次也不能把界面锁死）
+                if ctx.power_state_fn:
+                    ctx.power_state_fn("idle")
                 print(f"[gui] 停止收尾完成：{n_engines} 个引擎，"
                       f"用时 {elapsed:.2f}s"
                       + ("（有引擎超时未退出，仍在关设备）"
@@ -686,10 +685,8 @@ def _poll_once(ctx: ChatCtx,
     pending_starts = ctx.pending_starts_fn() if ctx.pending_starts_fn else 0
     if (pending_starts == 0 and engines
             and all(not e.running for e in engines)):
-        if ctx.start_btn_fn:
-            ctx.start_btn_fn(tk.NORMAL)
-        if ctx.stop_btn_fn:
-            ctx.stop_btn_fn(tk.DISABLED)
+        if ctx.power_state_fn:
+            ctx.power_state_fn("idle")
         if ctx.last_status_level != "error":
             set_status_fn("info", t("已停止"))
         # gui.py 薄壳负责清空 engines / engine_dirs

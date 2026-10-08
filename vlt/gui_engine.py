@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-import tkinter as tk
+from .output.micproxy import MODE_TRANSLATED
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -54,8 +54,8 @@ class EngineCtx:
     desktop_dragging: bool = False
 
     # ── 控件引用 ──
-    start_btn: Any = None            # ttk.Button
-    stop_btn: Any = None             # ttk.Button
+    power_btn: Any = None            # ttk.Button（单按钮开关；headless 下为 None）
+    power_state_fn: Optional[Callable] = None    # ("idle"|"running"|"stopping") -> None
 
     # ── Tk 变量 ──
     direction_var: Any = None        # tk.StringVar（翻译方向）
@@ -143,6 +143,7 @@ def bind_gui_callbacks(ctx: EngineCtx, gui) -> None:
     c.sync_gate_probe_fn = gui._sync_gate_level_probe; c.stop_gate_probe_fn = gui._stop_gate_probe
     c.maybe_replace_on_exit_fn = gui._maybe_replace_on_exit
     c.destroy_root_fn = lambda: gui._root.destroy(); c.save_ui_state_fn = gui._save_ui_state
+    c.power_state_fn = gui._set_power_state  # 开始/停止单按钮的唯一刷新入口
     c.cancel_poll_fn = lambda: gui_chat.cancel_poll(gui._chat_ctx, gui._root)
     c.proxy_fn = lambda: gui._proxy          # 现取：代理会被设置页重开/关闭，实例会变
 
@@ -157,6 +158,17 @@ def _proxy_of(ctx: EngineCtx):
         print(f"[proxy] ⚠️ 读取麦克风代理失败（按「无代理」处理，译音输出回落到引擎自建）："
               f"{type(exc).__name__}: {exc}", flush=True)
         return None
+
+
+def set_power_state(ctx: EngineCtx, state: str) -> None:
+    """刷主界面那个「开始/停止」单按钮。回调缺失（headless / 老 ctx）时静默跳过。"""
+    if ctx.power_state_fn is None:
+        return
+    try:
+        ctx.power_state_fn(state)
+    except Exception as exc:              # noqa: BLE001
+        print(f"[gui] ⚠️ 刷新开始/停止按钮失败（忽略）：{type(exc).__name__}: {exc}",
+              flush=True)
 
 
 def notify_proxy_translation(ctx: EngineCtx, active: bool) -> None:
@@ -289,14 +301,23 @@ def start(ctx: EngineCtx) -> bool:
 
     # 先告诉代理「翻译开始了」：译音档只在翻译运行时允许切，顺序反了会被拒
     notify_proxy_translation(ctx, True)
+    # 开始翻译就默认走「译音」档（用户要求：勾了译音输出，对方就该听到译音）。
+    # ⚠️ 只在**译音真的会有声音**时才切：勾选框没勾 / 方向不含「我说的话」时
+    #    want_audio 是 False，切过去等于让对方听静音 —— 比原声更糟，所以不切。
+    if want_audio:
+        _p_mode = _proxy_of(ctx)
+        if _p_mode is not None:
+            if _p_mode.set_mode(MODE_TRANSLATED):
+                print("[proxy] 开始翻译 → 默认档位切到「译音」"
+                      "（可在主界面「原声/译音」按钮切回）", flush=True)
+            else:
+                print("[proxy] ⚠️ 开始翻译时默认切「译音」失败"
+                      "（保持原档位；主界面按钮仍可手动切）", flush=True)
     # 启动第一个引擎（后续引擎由 start_engine 错开 300ms 调度）
     start_engine(ctx, 0)
 
     # 按钮态
-    if ctx.start_btn:
-        ctx.start_btn.configure(state=tk.DISABLED)
-    if ctx.stop_btn:
-        ctx.stop_btn.configure(state=tk.NORMAL)
+    set_power_state(ctx, "running")
     if ctx.set_text_input_enabled_fn:
         ctx.set_text_input_enabled_fn(d in ("mine", "dual"))
 
@@ -630,19 +651,13 @@ def stop(ctx: EngineCtx) -> None:
     if not engines:
         # 没有引擎在手：但可能还有上一次的收尾在飞（只有 on_close 这条重复调用路径会走到）
         if ctx.stop_done_evt and ctx.stop_done_evt.is_set():
-            if ctx.start_btn:
-                ctx.start_btn.configure(state=tk.NORMAL)
-            if ctx.stop_btn:
-                ctx.stop_btn.configure(state=tk.DISABLED)
+            set_power_state(ctx, "idle")
         if ctx.set_status_fn:
             ctx.set_status_fn("info", t("已停止"))
         return
 
     # 收尾期间禁掉「开始翻译」：旧引擎还在关麦克风/虚拟声卡，立刻重启会抢设备
-    if ctx.start_btn:
-        ctx.start_btn.configure(state=tk.DISABLED)
-    if ctx.stop_btn:
-        ctx.stop_btn.configure(state=tk.DISABLED)
+    set_power_state(ctx, "stopping")
     if ctx.set_status_fn:
         ctx.set_status_fn("info", t("正在停止…"))
 

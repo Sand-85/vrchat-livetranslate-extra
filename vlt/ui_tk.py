@@ -246,6 +246,27 @@ def apply_theme(root) -> None:
                   background=[("pressed", ACCENT_ACTIVE), ("active", ACCENT_HOVER),
                               ("disabled", "#22374f")],
                   foreground=[("disabled", "#6b87ab")])
+        # 单按钮开关（主窗第一行「开始翻译 ⇄ 停止翻译」）：**同一个控件**在两种状态间换外观。
+        # ⚠️ 两个样式必须逐字同尺寸 —— 字体与内边距都取下面这两份常量。
+        # 曾经的写法是蓝底用 Primary.TButton（粗体 + padding (20,9)）、红底用 Danger.TButton
+        # （常规字体 + padding (14,6)），于是点一下按钮就**变大 / 变小**（用户实测反馈
+        # 「按一下变大、按一下变小」）。改样式名的人请注意：这两个值的唯一真源在这里。
+        _POWER_FONT = FONT_BOLD_MD
+        _POWER_PAD = (20, 9)
+        style.configure("Power.TButton", background=ACCENT, foreground="#ffffff",
+                        font=_POWER_FONT, borderwidth=0, focusthickness=0,
+                        focuscolor=ACCENT, padding=_POWER_PAD)
+        style.map("Power.TButton",
+                  background=[("pressed", ACCENT_ACTIVE), ("active", ACCENT_HOVER),
+                              ("disabled", "#22374f")],
+                  foreground=[("disabled", "#6b87ab")])
+        style.configure("PowerDanger.TButton", background=DANGER, foreground="#ffffff",
+                        font=_POWER_FONT, borderwidth=0, focusthickness=0,
+                        focuscolor=DANGER, padding=_POWER_PAD)
+        style.map("PowerDanger.TButton",
+                  background=[("pressed", DANGER_ACTIVE), ("active", DANGER_HOVER),
+                              ("disabled", "#3a2726")],
+                  foreground=[("disabled", "#9c7a78")])
         # 反向动作按钮（房间的「断开连接」）：与「连接房间」同形状、**不同颜色** ——
         # 同一个位置在不同连接态下写着相反的动作，只靠文字区分容易点错，
         # 颜色是比文字快得多的提示（用户明确要求「断开用个别的颜色」）。

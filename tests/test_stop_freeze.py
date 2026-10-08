@@ -369,8 +369,7 @@ def test_gui_stop_does_not_block_main_thread() -> None:
 
     gui = TranslationGUI(headless=True)
     gui._root = _Root()                              # type: ignore[assignment]
-    gui._start_btn = _Widget()                       # type: ignore[assignment]
-    gui._stop_btn = _Widget()                        # type: ignore[assignment]
+    gui._power_btn = _Widget()                       # type: ignore[assignment]
     seen = _capture_statuses(gui)
     fake = _SlowEngine()
     gui._engines = [fake]                            # type: ignore[list-item]
@@ -384,18 +383,25 @@ def test_gui_stop_does_not_block_main_thread() -> None:
         f"gui._stop() 在界面线程上阻塞了 {elapsed:.2f}s"
         "（真机实测双向下 20.04s，等于窗口「未响应」）")
     assert fake.request_calls == 1, "没有向引擎下发停止信号"
-    assert gui._start_btn.kw.get("state") == "disabled", (
+    assert gui._power_btn.kw.get("state") == "disabled", (
         "收尾期间必须禁掉「开始翻译」：否则会与还在关设备的旧引擎抢麦克风/虚拟声卡")
+    assert gui._power_btn.kw.get("text") == t("停止翻译"), (
+        f"收尾期间单按钮文案应仍是「停止翻译」：{gui._power_btn.kw!r}")
+    assert gui._power_btn.kw.get("style") == "PowerDanger.TButton", (
+        f"收尾期间单按钮应是红底（Danger）：{gui._power_btn.kw!r}")
     assert not gui._engines, "引擎列表应当立刻移走（收尾由后台线程负责）"
     assert seen[-1][1] == t("正在停止…"), f"停止中应先提示「正在停止…」：{seen[-1]!r}"
 
     deadline = time.time() + 5.0
-    while time.time() < deadline and gui._start_btn.kw.get("state") != "normal":
+    while time.time() < deadline and gui._power_btn.kw.get("state") != "normal":
         gui._poll()
         time.sleep(0.05)
-    assert gui._start_btn.kw.get("state") == "normal", (
+    assert gui._power_btn.kw.get("state") == "normal", (
         "收尾完成后界面没恢复（用户会以为还卡着）")
-    assert gui._stop_btn.kw.get("state") == "disabled"
+    assert gui._power_btn.kw.get("text") == t("开始翻译"), (
+        f"收尾完成后单按钮文案应弹回「开始翻译」：{gui._power_btn.kw!r}")
+    assert gui._power_btn.kw.get("style") == "Power.TButton", (
+        f"收尾完成后单按钮应弹回蓝底（Primary）：{gui._power_btn.kw!r}")
     assert seen[-1] == ("info", t("已停止")), (
         f"正常收尾完成就该显示「已停止」，别把如实提示滥用成常态：{seen[-1]!r}")
     print(f"  gui._stop() 不阻塞 OK（{elapsed * 1000:.1f}ms 返回，后台收尾后自动恢复）")
@@ -416,8 +422,7 @@ def test_gui_stop_timeout_reports_honestly_in_status_bar() -> None:
 
     gui = TranslationGUI(headless=True)
     gui._root = _Root()                              # type: ignore[assignment]
-    gui._start_btn = _Widget()                       # type: ignore[assignment]
-    gui._stop_btn = _Widget()                        # type: ignore[assignment]
+    gui._power_btn = _Widget()                       # type: ignore[assignment]
     seen = _capture_statuses(gui)
     stuck = _StuckEngine()
     gui._engines = [stuck]                           # type: ignore[list-item]
@@ -429,14 +434,18 @@ def test_gui_stop_timeout_reports_honestly_in_status_bar() -> None:
         assert seen[-1][1] == t("正在停止…"), f"停止中应先提示「正在停止…」：{seen[-1]!r}"
 
         deadline = time.time() + 5.0
-        while time.time() < deadline and gui._start_btn.kw.get("state") != "normal":
+        while time.time() < deadline and gui._power_btn.kw.get("state") != "normal":
             gui._poll()
             time.sleep(0.05)
 
     assert stuck.wait_calls == 1, "后台线程没去等引擎收尾（超时路径根本没被走到）"
-    assert gui._start_btn.kw.get("state") == "normal", (
+    assert gui._power_btn.kw.get("state") == "normal", (
         "收尾超时后界面没恢复 —— 后台线程已经不再等了，一直禁着等于把界面永久锁死"
         "（用户只能重启应用）")
+    assert gui._power_btn.kw.get("text") == t("开始翻译"), (
+        f"收尾超时后单按钮文案应弹回「开始翻译」：{gui._power_btn.kw!r}")
+    assert gui._power_btn.kw.get("style") == "Power.TButton", (
+        f"收尾超时后单按钮应弹回蓝底（Primary）：{gui._power_btn.kw!r}")
     assert gui._stop_done_evt.is_set(), (
         "超时后必须置位：否则关窗路径 `_on_close` 会白等 CLOSE_WAIT_STOP_S")
     assert seen[-1][1] != t("已停止"), (

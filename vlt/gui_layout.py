@@ -32,6 +32,31 @@ def apply_ui_font(root) -> None:
         setattr(_g, attr, getattr(ui_tk, attr))
 
 
+def apply_power_state(btn, state: str) -> None:
+    """把主控制行那个「开始 / 停止」单按钮刷成 *state* 对应的外观。
+
+    文案 + 颜色 + 可用态是**同一个状态的三个面** —— 分三处各改一次必然漂移
+    （本项目踩过：只改文案忘了改样式，翻译中看着像「还能再点一次开始」）。
+
+    *state*：``"idle"`` 蓝底「开始翻译」；``"running"`` 红底「停止翻译」；
+    ``"stopping"`` 红底「停止翻译」但置灰（旧引擎还在关麦克风/虚拟声卡，放开会抢设备）。
+    """
+    if btn is None:
+        return                          # headless 下没有控件
+    if state == "running":
+        text, style, wstate = t("停止翻译"), "PowerDanger.TButton", tk.NORMAL
+    elif state == "stopping":
+        text, style, wstate = t("停止翻译"), "PowerDanger.TButton", tk.DISABLED
+    else:                               # 其它任何值（含 "idle"）→ 蓝底「开始翻译」，防御：绝不抛
+        text, style, wstate = t("开始翻译"), "Power.TButton", tk.NORMAL
+    try:
+        btn.configure(text=text, style=style, state=wstate)
+    except Exception as exc:            # noqa: BLE001
+        # 界面刷新失败不该把调用方（引擎启停）带崩，但**必须留痕**：
+        # 静默吞掉的话，症状是「按钮永远停在旧状态」，日志里一个字都没有。
+        print(f"[gui] ⚠️ 刷新开始/停止按钮失败：{type(exc).__name__}: {exc}", flush=True)
+
+
 def _enable_windows_dpi_awareness() -> None:
     """Windows 上声明 Per-Monitor DPI 感知（必须在创建 Tk root **之前**调用）。
 
@@ -229,12 +254,9 @@ def build_controls(gui) -> None:
     gui._sponsor_btn = ttk.Button(ctrl, text=t("☕ 赞助"),
                                    command=gui._open_sponsor)
     gui._sponsor_btn.pack(side=tk.RIGHT, padx=(0, 8))
-    gui._start_btn = ttk.Button(ctrl, text=t("开始翻译"), style="Primary.TButton",
-                                 command=gui._start)
-    gui._start_btn.pack(side=tk.LEFT, padx=(0, 8))
-    gui._stop_btn = ttk.Button(ctrl, text=t("停止翻译"), command=gui._stop,
-                                state=tk.DISABLED)
-    gui._stop_btn.pack(side=tk.LEFT)
+    gui._power_btn = ttk.Button(ctrl, text=t("开始翻译"), style="Power.TButton",
+                                command=gui._on_power)
+    gui._power_btn.pack(side=tk.LEFT)
     _vsep(ctrl)
     ttk.Label(ctrl, text=t("方向:")).pack(side=tk.LEFT)
     dir_frame = ttk.Frame(ctrl)

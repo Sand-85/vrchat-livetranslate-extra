@@ -154,7 +154,7 @@ _GATE_HINT = "只有响度超过门限的声音才会被翻译；改完立刻生
 _E2G = ["engines", "engine_dirs", "specs", "sinks", "pending_starts", "current",
     "auto_scroll", "closing", "overlay_out", "desktop_out", "desktop_dragging",
     "desktop_save_job", "desktop_alpha_touched", "start_job"]
-_G2E = ["start_btn", "stop_btn", "direction_var", "chatbox_var", "overlay_var",
+_G2E = ["power_btn", "direction_var", "chatbox_var", "overlay_var",
     "desktop_var", "vmic_var", "desktop_alpha_var", "desktop_alpha_lbl",
     "desktop_font_var", "desktop_srcfont_var", "desktop_w_var", "desktop_h_var", "desktop_drag_btn"]
 _DELEGATE_MAP = {
@@ -289,6 +289,7 @@ class TranslationGUI(VoicelabMixin):
             "level_hold": self._gate_level_hold, "hold_ms": self._gate_hold_ms,
             "preroll_ms": self._gate_preroll_ms, "engines": []}
         self._desktop_ctx = DesktopCtx(); self._chat_ctx = ChatCtx(); self._engine_ctx = EngineCtx()
+        self._power_state = "idle"      # 开始/停止单按钮态："idle" | "running" | "stopping"
         self._wire_desktop_ctx()
         # 本账号的自定义音色（设计族 + 复刻族）：后台拉一次，用于**打字译音下拉**与显示名
         self._tts_custom: list = []
@@ -561,6 +562,18 @@ class TranslationGUI(VoicelabMixin):
         # 落盘再回调到 _schedule_desktop_save；改完后把「动过」标志镜像回本类（供同步/测试读）。
         gui_desktop.on_desktop_alpha(self._desktop_ctx)
         self._desktop_alpha_touched = self._desktop_ctx.desktop_alpha_touched
+    def _on_power(self) -> None:
+        """主控制行那个单按钮的分发：翻译中就停，否则就开。"""
+        if self._power_state == "running":
+            self._stop()
+        elif self._power_state != "stopping":   # stopping：按钮已置灰，理论上点不到
+            self._start()
+
+    def _set_power_state(self, state: str) -> None:
+        """刷「开始/停止」单按钮（唯一入口；文案/颜色/可用态都由它一处决定）。"""
+        self._power_state = state
+        gui_layout.apply_power_state(getattr(self, "_power_btn", None), state)
+
     def _wire_desktop_ctx(self) -> None:
         """把设置页的「落盘 / 拖动」回调接到本类的薄壳上。
 

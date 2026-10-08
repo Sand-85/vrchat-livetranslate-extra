@@ -420,15 +420,15 @@ def _fake_engine_class():
 
 def _arm_engine_ctx(gui):                            # noqa: ANN001, ANN202
     """把 headless GUI 的 EngineCtx 武装到「能跑 start()/stop()」的最小可用状态。"""
+    gui._power_btn = _Widget()                       # 单按钮开关占位（_sync_engine_ctx 会拷进 ctx.power_btn）
     gui._sync_engine_ctx()
     ctx = gui._engine_ctx
+    ctx.power_state_fn = gui._set_power_state        # 单按钮刷新回调（bind_gui_callbacks 已绑，这里显式补一遍）
     ctx.direction_var = _Var("mine")
     ctx.chatbox_var = _Var(True)
     ctx.overlay_var = _Var(False)                    # 手腕屏/桌面字幕都不勾 → 两条腿直接短路
     ctx.desktop_var = _Var(False)
     ctx.vmic_var = _Var(True)                        # 「译音输出」勾上：这才有 audio_sink 的事
-    ctx.start_btn = _Widget()
-    ctx.stop_btn = _Widget()
     ctx.lang_pair = {"source": "zh", "target": "en"}
     ctx.refresh_api_key_fn = None                    # 别让用例去碰真实 key 解析
     ctx.start_room_fn = None
