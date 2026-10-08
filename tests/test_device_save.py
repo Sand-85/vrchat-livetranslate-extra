@@ -372,6 +372,52 @@ def test_device_save_after_real_scan() -> None:
     print("  真扫描 → 选设备 → 落盘（名字表不被同步清空）OK")
 
 
+def test_startup_scan_restores_saved_mic() -> None:
+    """★ 回归（2026-10）：启动后麦克风下拉必须显示**上次保存的设备**，不能总是「自动检测」。
+
+    根因：`gui_audio.start_device_scan` 调 `on_device_scan_result` 时硬写 `cfg=None`，
+    而「恢复上次选择」完全依赖 `cfg`（读 `cfg.output.capture.mic_device`）→ 下拉每次都被
+    设成自动。实际采集不受影响（代理/引擎直接读配置），所以只是 UI 显示 bug。本用例走
+    **构造期真扫描**（`_make_gui` → `_start_device_scan`）。
+    """
+    before = _prepare()
+    gui = None
+    import vlt.platform as _plat
+
+    class _FakeBackend:
+        def query_devices(self):                             # noqa: ANN201
+            return [
+                {"name": "Fake Mic A", "max_input_channels": 2, "max_output_channels": 0,
+                 "default_samplerate": 48000.0},
+                {"name": "Fake Speaker", "max_input_channels": 0, "max_output_channels": 2,
+                 "default_samplerate": 48000.0},
+            ]
+
+        def query_loopback_devices(self):                    # noqa: ANN201
+            return [{"index": 1, "name": "Fake Speaker [Loopback]",
+                     "defaultSampleRate": 48000, "maxInputChannels": 2}]
+
+    orig_backend = _plat.device_backend
+    _plat.device_backend = lambda: _FakeBackend()            # type: ignore[assignment]
+    try:
+        data = yaml.safe_load(before) or {}
+        data.setdefault("capture", {})["mic_device"] = "Fake Mic A"
+        CONFIG.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+        gui = _make_gui()                                   # 构造期真扫描
+        from vlt.i18n import t
+        got = gui._mic_combo.get()                          # noqa: SLF001
+        auto = t("自动检测")
+        assert got != auto, f"启动后麦克风下拉竟然是「{auto}」：{got!r}"
+        assert "Fake Mic A" in got, f"没恢复上次保存的麦克风：{got!r}"
+    finally:
+        _plat.device_backend = orig_backend                 # type: ignore[assignment]
+        CONFIG.write_text(before, encoding="utf-8")
+        if gui is not None:
+            _destroy(gui)
+    print("  启动扫描后下拉显示上次保存的麦克风（不是自动检测）OK")
+
+
 if __name__ == "__main__":
     print("test_device_save:")
     test_yaml_scalar_quotes_when_needed()
@@ -382,4 +428,5 @@ if __name__ == "__main__":
     test_simulated_linux_env_writes_mic_only()
     test_missing_sections_are_created()
     test_device_save_after_real_scan()
+    test_startup_scan_restores_saved_mic()
     print("ALL PASSED")

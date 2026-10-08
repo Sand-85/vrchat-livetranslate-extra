@@ -79,8 +79,13 @@ def sync_from_gui(ctx: AudioCtx, gui) -> None:
 
 
 def start_device_scan(ctx: AudioCtx, root: tk.Misc, headless: bool,
-                      scan_holder: dict) -> None:
+                      scan_holder: dict, cfg=None) -> None:
     """扫描设备（**主线程同步执行**）。
+
+    ⚠️ `cfg` **必须**透传：`on_device_scan_result` 的「恢复上次选择」完全依赖它
+    （读 `cfg.output.capture.mic_device`）。曾经这里写死 `cfg=None`，于是启动/刷新后
+    麦克风下拉**永远显示「自动检测」**，配置里选好的设备在 UI 上凭空消失
+    （实际采集不受影响 —— 代理/引擎直接读配置）。回归见 `tests/test_device_save.py`。
 
     为什么不用后台线程（**Windows 侧的理由**）：PortAudio 的初始化 / 销毁是**线程绑定**
     的（WASAPI 用 COM 单元）。sounddevice 在首次调用的那个线程里 Pa_Initialize，而它的
@@ -95,7 +100,7 @@ def start_device_scan(ctx: AudioCtx, root: tk.Misc, headless: bool,
         mics = enumerate_mic_devices()
         loops = [] if ctx.linux_fixed_audio else enumerate_loopback_devices()
         outs = [] if ctx.linux_fixed_audio else enumerate_audio_out_devices()
-        on_device_scan_result(ctx, cfg=None, mics=mics, loops=loops, outs=outs,
+        on_device_scan_result(ctx, cfg=cfg, mics=mics, loops=loops, outs=outs,
                               names_holder=scan_holder.get("names", {}),
                               scan_holder=scan_holder)
     except Exception as exc:                         # noqa: BLE001
@@ -105,12 +110,12 @@ def start_device_scan(ctx: AudioCtx, root: tk.Misc, headless: bool,
 
 
 def on_refresh_devices(ctx: AudioCtx, root: tk.Misc, engines: list,
-                       headless: bool, scan_holder: dict) -> None:
+                       headless: bool, scan_holder: dict, cfg=None) -> None:
     """用户点「刷新设备」：翻译在跑时先提醒，再扫描。"""
     if any(e.running for e in engines):
         if ctx.set_status_fn:
             ctx.set_status_fn("warn", t("建议停止翻译后再刷新设备列表"))
-    start_device_scan(ctx, root, headless, scan_holder)
+    start_device_scan(ctx, root, headless, scan_holder, cfg=cfg)
     if ctx.set_status_fn:
         ctx.set_status_fn("info", t("正在扫描设备…"))
 

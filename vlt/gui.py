@@ -621,9 +621,9 @@ class TranslationGUI(VoicelabMixin):
     # ── 设备选择（→ gui_audio）──
     def _sync_audio_ctx(self) -> None: gui_audio.sync_from_gui(self._audio_ctx, self)
     def _start_device_scan(self) -> None:
-        self._sync_audio_ctx(); gui_audio.start_device_scan(self._audio_ctx, self._root, self._headless, self._scan_holder); self._device_scan_pending = self._scan_holder["pending"]
+        self._sync_audio_ctx(); gui_audio.start_device_scan(self._audio_ctx, self._root, self._headless, self._scan_holder, cfg=self._cfg); self._device_scan_pending = self._scan_holder["pending"]
     def _on_refresh_devices(self) -> None:
-        self._sync_audio_ctx(); gui_audio.on_refresh_devices(self._audio_ctx, self._root, self._engines, self._headless, self._scan_holder)
+        self._sync_audio_ctx(); gui_audio.on_refresh_devices(self._audio_ctx, self._root, self._engines, self._headless, self._scan_holder, cfg=self._cfg)
     # ── 麦克风代理（MicProxy）：常驻虚拟声卡路由，与翻译解耦 ──
     def _proxy_audio_cfg(self) -> dict:
         """取 ``output.audio`` 这一段（含 proxy 子段）的**副本**；配置畸形时回落空 dict。"""
