@@ -711,9 +711,14 @@ class VoicelabMixin:
                     voice_lab.save_preview(APP_DIR, res.voice, res.preview_wav)
                 self._q.put(("voice_lab", "create", True, "", res))
             elif job == "list":
+                warn: list[tuple[str, str]] = []
                 rows = voice_lab.list_voices(api_key=kw["api_key"], base_url=kw["base_url"],
-                                             workspace_id=kw["workspace_id"])
-                self._q.put(("voice_lab", "list", True, "", rows))
+                                             workspace_id=kw["workspace_id"], warn=warn)
+                note = "" if not warn else t("音色族 {fam} 在本线路不可用（{msg}）—— 已跳过，"
+                                             "其它音色照常显示",
+                                             fam="／".join(f for f, _ in warn),
+                                             msg=(warn[0][1] or "").split("：", 1)[-1][:60])
+                self._q.put(("voice_lab", "list", True, note, rows))
             elif job == "audition":
                 # 试听已有音色：用测试文本现场合成一句（按字符计费，26 字 ≈ 0.003 元）。
                 # 端点按当前线路派生 —— 与「试听」同一条纪律，别回落到模块常量。
@@ -845,6 +850,8 @@ class VoicelabMixin:
 
         if job == "list":
             self._lab_voices = list(payload or [])
+            if msg:
+                self._lab_banner = str(msg)     # 某一族不可用的降级说明（见 list_voices）
             if self._lab_voices:
                 self._tts_custom = list(self._lab_voices)      # 与「打字译音」下拉共用同一批
                 self._refresh_tts_voice_combo()

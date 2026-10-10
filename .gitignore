@@ -9,6 +9,11 @@ __pycache__/
 logs/
 out/
 
+# 音色页的运行期数据（本账号自定义音色的显示名登记表、试听缓存）
+# —— 因账号/机器而异，不入库（丢了按 id 显示，不影响音色本身）
+voices/
+previews/
+
 # 覆盖率数据（coverage.py；scripts/run_tests.py --coverage 与 CI 会生成，不入库）
 .coverage
 .coverage.*

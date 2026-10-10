@@ -211,6 +211,30 @@ def test_list_and_error() -> bool:
     print(f"  family='clone' 只发一次且只回复刻族：{len(only)} 条  {'OK' if cond else '✗'}")
     ok &= cond
 
+    # 2026-10-09 实测场景：某线路把「声音设计」模型下架 → design 族 404 Model not exist。
+    # 单族不可用**不能**把整表搞空（原先会 —— 界面看起来像「音色全没了」，而克隆族其实好好的）。
+    err404 = {"code": "InvalidParameter", "message": "Model not exist."}
+    op_nf = FakeOpener([err404, clone_rows])
+    warn: list[tuple[str, str]] = []
+    rows_nf = vl.list_voices(api_key="sk-test", base_url="wss://maas.qianwenaiapi.com/x",
+                             opener=op_nf, warn=warn)
+    cond = (len(rows_nf) == 1 and rows_nf[0].kind == "clone" and len(warn) == 1
+            and warn[0][0] == "design" and "Model not exist" in warn[0][1])
+    print(f"  design 族 404 时仍列出 clone 族：{len(rows_nf)} 条 / warn {len(warn)} 条  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+
+    # 两族都挂时必须抛错（别把「全挂了」伪装成「没有音色」）
+    op_both = FakeOpener([err404, dict(err404)])
+    try:
+        vl.list_voices(api_key="sk-test", base_url="wss://maas.qianwenaiapi.com/x", opener=op_both)
+        print("  两族都失败时应当抛错 ✗")
+        ok = False
+    except vl.VoiceLabError as exc:
+        cond = "Model not exist" in str(exc)
+        print(f"  两族都失败时抛错（不伪装成空表）  {'OK' if cond else '✗'}")
+        ok &= cond
+
     op2 = FakeOpener([{"code": "InvalidApiKey", "message": "密钥无效 sk-abcdef"}])
     try:
         vl.list_voices(api_key="sk-test", base_url="wss://maas.qianwenaiapi.com/x", opener=op2)

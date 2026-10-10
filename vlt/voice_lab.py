@@ -76,6 +76,17 @@ TEST_TEXT = "こんにちは、私はSANDです。今から声のテストです
 #    SAND 用拉丁写法时不同音色会念成 サンド/センブ/サンデー/センド —— 要统一就写片假名 サンド。
 
 
+def _note(msg: str) -> None:
+    """兜底/降级路径的留痕（本仓库约定：**禁静默降级**，每一处降级都要能查）。
+
+    比 print 多一层保护：日志本身绝不能把主流程搞挂。
+    """
+    try:
+        print(f"[voice_lab] {msg}", flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class VoiceLabError(RuntimeError):
     """创建/查询音色失败。消息给用户看，带原因不带堆栈（与 tts.TtsError 同口径）。"""
 
@@ -356,30 +367,49 @@ def _voice_info(row: dict, family: str) -> VoiceInfo | None:
 
 def list_voices(*, api_key: str, base_url: str = "", workspace_id: str = "",
                 family: str = "all", url: str = "",
-                timeout: float = DEFAULT_TIMEOUT_S, opener=None) -> list[VoiceInfo]:  # noqa: ANN001
+                timeout: float = DEFAULT_TIMEOUT_S, opener=None,
+                warn: list[tuple[str, str]] | None = None) -> list[VoiceInfo]:  # noqa: ANN001
     """列出**本账号**的自定义音色。
 
     ⚠️ 两族**必须分开查**：`action=list` 按 `model` 隔离（用 `qwen-voice-design` 查不到
     复刻音色，反之亦然 —— 真机实测过）。默认 `family="all"` 两族都列，界面上才看得全。
+
+    ⚠️ **单族不可用不能拖垮整表**（实测 2026-10-09：某线路把声音设计模型下架，返回
+    `404 Model not exist.` —— 原先 `family="all"` 会因此整表抛错，界面看起来像「音色全没了」，
+    而克隆族其实好好的）。现在：`all` 模式下单族失败 → 跳过 + 记进 `warn`（禁静默降级）；
+    连续两族都失败才抛。调用方**明确只查一族**时保持原语义（照旧抛错，便于定位）。
     """
     if not (api_key or "").strip():
         raise VoiceLabError("还没配置 API key（见界面右上角「设置」）")
     fams = tuple(FAMILIES) if family == "all" else (family,)
     endpoint = url or customization_url(base_url, workspace_id)
     voices: list[VoiceInfo] = []
+    failures: list[tuple[str, str]] = []
     for fam in fams:
         model = FAMILIES.get(fam)
         if model is None:
             raise VoiceLabError(f"未知音色族：{fam!r}")
-        obj = _post({"model": model, "input": {"action": "list", "page_size": 50}},
-                    api_key=api_key, url=endpoint, timeout=timeout, opener=opener)
-        _check_error(obj)
+        try:
+            obj = _post({"model": model, "input": {"action": "list", "page_size": 50}},
+                        api_key=api_key, url=endpoint, timeout=timeout, opener=opener)
+            _check_error(obj)
+        except VoiceLabError as exc:
+            if len(fams) == 1:
+                raise                      # 只查一族：保持原语义，调用方要的就是这一族的成败
+            failures.append((fam, str(exc)))
+            _note(f"音色族 {fam} 列表失败，已跳过（另一族照常显示）：{exc}")
+            continue
         out = (obj.get("output") or {})
         rows = out.get("voice_list") or out.get("voices") or []
         for r in rows:
             info = _voice_info(r, fam)
             if info is not None:
                 voices.append(info)
+    if failures and not voices:
+        # 两族都失败：把原因原样抛出去（别把「全挂了」伪装成「没有音色」）
+        raise VoiceLabError("；".join(f"{f}：{m}" for f, m in failures))
+    if failures and warn is not None:
+        warn.extend(failures)
     return voices
 
 
