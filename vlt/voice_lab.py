@@ -49,11 +49,14 @@ FAMILIES: dict[str, str] = {"design": COSY_LIST_MODEL, "clone": CLONE_MODEL}
 #: 每族的 list 动作名不同：qwen 克隆族用 `list`，设计族（cosyvoice 管线）用 `list_voice`
 #: —— 2026-10-10 实测：用 `list` 查 voice-enrollment 会 `invalid action`。
 FAMILY_ACTIONS: dict[str, str] = {"design": "list_voice", "clone": "list"}
-#: **删除**走另一套（2026-10-10 实测）：设计族的音色在 `voice-enrollment` 下**列得出来但删不掉**
-#: （`action=delete` → `invalid action`；`delete_voice` → 要求一个猜不出的 `parameters`）。
-#: 用克隆族的模型 + `delete` 反而有效（拿不存在的 id 探过：报「音色不存在」而不是「动作无效」）。
-FAMILY_DELETE_MODELS: dict[str, str] = {"design": CLONE_MODEL, "clone": CLONE_MODEL}
-FAMILY_DELETE_ACTIONS: dict[str, str] = {"design": "delete", "clone": "delete"}
+#: **删除**的动作名与 id 字段名都和「列表」不同（2026-10-10 矩阵式实测，用不存在的 id 探的）：
+#:   设计族：`action="delete_voice"` + id 字段用 **`voice_id`**
+#:           （用 `voice` 会报「Required parameter parameters missing」——**误导性报错**；
+#:            换成 `voice_id` 立刻就报 `ResourceNotExist`，说明形状对了）
+#:   克隆族：`action="delete"` + id 字段用 `voice`
+FAMILY_DELETE_MODELS: dict[str, str] = {"design": COSY_LIST_MODEL, "clone": CLONE_MODEL}
+FAMILY_DELETE_ACTIONS: dict[str, str] = {"design": "delete_voice", "clone": "delete"}
+FAMILY_DELETE_ID_KEYS: dict[str, str] = {"design": "voice_id", "clone": "voice"}
 # 自定义音色的接口路径（与 tts 的多模态路径同一个网关，只是路径不同）
 CUSTOMIZATION_PATH = "/api/v1/services/audio/tts/customization"
 
@@ -541,9 +544,8 @@ def delete_voice(voice: str, *, api_key: str, base_url: str = "", workspace_id: 
                  timeout: float = DEFAULT_TIMEOUT_S, opener=None) -> None:      # noqa: ANN001
     """删除一条自定义音色（清理废弃候选，保持列表干净）。
 
-    ⚠️ 删除的 `model` **不一定**与列表同源：设计族（cosyvoice 管线）**列表**用 `voice-enrollment`，
-    但**删除**要用 `qwen-voice-enrollment` + `action=delete`（见 `FAMILY_DELETE_MODELS`）——
-    用列表那个模型删会 `invalid action`，实测过。
+    ⚠️ 删除的**动作名、模型、id 字段名**都可能与列表不同，见 `FAMILY_DELETE_*` 三张表 ——
+    这套是矩阵式实测出来的（形状不对时的报错很有误导性：id 字段写错会被报成「缺 parameters」）。
     """
     if not (api_key or "").strip():
         raise VoiceLabError("还没配置 API key（见界面右上角「设置」）")
@@ -552,8 +554,9 @@ def delete_voice(voice: str, *, api_key: str, base_url: str = "", workspace_id: 
     model = FAMILY_DELETE_MODELS.get(family, FAMILIES.get(family))
     if model is None:
         raise VoiceLabError(f"未知音色族：{family!r}")
+    id_key = FAMILY_DELETE_ID_KEYS.get(family, "voice")
     obj = _post({"model": model,
-                 "input": {"action": FAMILY_DELETE_ACTIONS.get(family, "delete"), "voice": voice,
+                 "input": {"action": FAMILY_DELETE_ACTIONS.get(family, "delete"), id_key: voice,
                            "target_model": target_model}},
                 api_key=api_key, url=url or customization_url(base_url, workspace_id),
                 timeout=timeout, opener=opener)
