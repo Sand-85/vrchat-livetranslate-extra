@@ -39,7 +39,7 @@ from . import tts                       # 试听要复用它的合成口径（�
 from .tts import _get_opener          # 与 tts.py 共用「直连、绕开系统代理」的同一份策略
 
 # 创建与合成必须用同一个模型；换模型就得重新炼（官方硬约束）。
-DEFAULT_TARGET_MODEL = "qwen3-tts-vd-2026-01-26"        # 声音设计（文字描述）
+DEFAULT_TARGET_MODEL = "cosyvoice-v3.5-flash"           # 声音设计（文字描述）；旧的 qwen3-tts-vd-* 全族已下架（2026-10-10 实测）
 CLONE_TARGET_MODEL = "qwen3-tts-vc-2026-01-22"          # 声音复刻（音频素材）
 DESIGN_MODEL = "qwen-voice-design"                      # 创建/列表/删除用哪个 model 字段
 CLONE_MODEL = "qwen-voice-enrollment"
@@ -140,6 +140,16 @@ class VoiceCreation:
 # ---------------------------------------------------------------- 纯函数（离线可测）
 
 
+def normalize_prefix(raw: str) -> str:
+    """把名字规范成 cosyvoice 创建时的 `prefix`：**只允许字母与数字**（下划线会被服务端拒）。
+
+    ⚠️ 与 `normalize_name` 的区别：后者允许下划线（qwen 系的 `preferred_name` 允许），
+    而 cosy 管线的 `prefix` 实测会被 `prefix should be english letter and number` 拒掉。
+    """
+    out = "".join(ch for ch in str(raw or "") if ch.isascii() and ch.isalnum())
+    return (out or "myvoice")[:16]
+
+
 def normalize_name(raw: str) -> str:
     """把用户输入的**音色名**规范成服务端接受的形态（字母数字下划线，≤16）。
 
@@ -183,21 +193,33 @@ def find_by_name(voices: list[VoiceInfo], name: str) -> VoiceInfo | None:
     取**最新**一条（`voice` 里带时间戳，最大的就是最近建的）：用户反复点「生成」时
     复用最近那个，而不是最老的那个。
     """
-    want = normalize_name(name)
-    hits = [v for v in voices if normalize_name(v.name or _name_of(v.voice)) == want]
+    def _key(raw: str) -> str:
+        # 忽略下划线与大小写：cosy 管线的 prefix 不允许下划线，id 里是 `clearauto`，
+        # 而配方 key 是 `clear_auto` —— 不归一化就永远对不上（实测踩过）。
+        return normalize_name(raw).replace("_", "").lower()
+
+    want = _key(name)
+    hits = [v for v in voices if _key(v.name or _name_of(v.voice)) == want]
     if not hits:
         return None
     return max(hits, key=lambda v: v.voice)
 
 
 def _name_of(voice: str) -> str:
-    """从 voice_id 反推名字：`qwen-tts-vd-<名字>-voice-<时间戳>-<hex>`。
+    """从 voice_id 反推名字。两种格式都要认（2026-10-10 实测）：
 
-    官方 id 里带 preferred_name，所以老音色即便列表不返回名字也能对上（本仓库实测）。
+    * qwen 系：`qwen-tts-vd-<名字>-voice-<时间戳>-<hex>`（官方 id 里带 preferred_name，
+      所以老音色即便列表不返回名字也能对上）；
+    * cosy 系（现用）：`cosyvoice-v3.5-flash-vd-<prefix>-<hex>` —— 不带 `voice` 段，
+      不单独认的话，配方 key 就永远匹配不上账号里的音色。
     """
     parts = str(voice or "").split("-")
     if len(parts) >= 5 and parts[-3] == "voice":
         return "-".join(parts[3:-3])
+    if len(parts) >= 4 and "vd" in parts:
+        i = parts.index("vd")
+        if 0 < i < len(parts) - 2:
+            return "-".join(parts[i + 1:-1])
     return ""
 
 
@@ -438,10 +460,10 @@ def create_voice(name: str, prompt: str, *, api_key: str, base_url: str = "",
     """
     if not (api_key or "").strip():
         raise VoiceLabError("还没配置 API key（见界面右上角「设置」）")
-    nm = normalize_name(name)
-    payload = {"model": DESIGN_MODEL,
-               "input": {"action": "create", "target_model": target_model,
-                         "preferred_name": nm,
+    nm = normalize_prefix(name)
+    payload = {"model": COSY_LIST_MODEL,
+               "input": {"action": "create_voice", "target_model": target_model,
+                         "prefix": nm,
                          "voice_prompt": normalize_prompt(prompt),
                          "preview_text": str(preview_text or TEST_TEXT)},
                "parameters": {"sample_rate": 24000, "response_format": "wav"}}
@@ -449,7 +471,9 @@ def create_voice(name: str, prompt: str, *, api_key: str, base_url: str = "",
                 timeout=timeout, opener=opener)
     _check_error(obj)
     out = (obj.get("output") or {})
-    voice = str(out.get("voice") or "")
+    # ⚠️ cosyvoice 管线（现用）返回 `voice_id`，qwen 系返回 `voice` —— 两个都得认，
+    # 否则创建其实成功了却报「没返回音色 id」（实测踩过，白建一条）。
+    voice = str(out.get("voice") or out.get("voice_id") or "")
     if not voice:
         raise VoiceLabError("服务端没返回音色 id（创建可能未生效，费用按官方「创建失败不计费」处理）")
     wav = b""

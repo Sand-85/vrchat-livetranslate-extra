@@ -154,13 +154,13 @@ def test_create_request_shape() -> bool:
                           base_url="wss://maas.qianwenaiapi.com/x", opener=op)
     url, payload = op.sent[0]
     inp = payload["input"]
-    cond = (payload["model"] == vl.DESIGN_MODEL and inp["action"] == "create"
+    cond = (payload["model"] == vl.COSY_LIST_MODEL and inp["action"] == "create_voice"
             and inp["target_model"] == vl.DEFAULT_TARGET_MODEL
-            and inp["preferred_name"] == "demo"
+            and inp["prefix"] == "demo"                       # cosy 管线用 prefix（字母数字）
             and inp["voice_prompt"] == "年轻女性，语速偏慢"
             and inp["preview_text"] == vl.TEST_TEXT)
     print(f"  请求体（model={payload['model']} / action={inp['action']} / "
-          f"名字={inp['preferred_name']}）  {'OK' if cond else '✗'}")
+          f"prefix={inp['prefix']}）  {'OK' if cond else '✗'}")
     ok &= cond
     cond = (res.voice.endswith("-abcd") and res.preview_wav == b"RIFFxy" and not res.reused)
     print(f"  解析返回值：voice 尾={res.voice[-5:]} 预览={len(res.preview_wav)}B  "
@@ -268,7 +268,7 @@ def test_reuse_avoids_spending() -> bool:
                       _voice_payload("qwen-tts-vd-new-voice-20261002120000-ffff")])
     res2 = vl.create_or_reuse("new", "年轻女性，语速偏慢", api_key="sk-test",
                               base_url="wss://maas.qianwenaiapi.com/x", opener=op2)
-    cond = (not res2.reused) and op2.actions() == ["list_voice", "create"]
+    cond = (not res2.reused) and op2.actions() == ["list_voice", "create_voice"]
     print(f"  没有同名：action 序列={op2.actions()} reused={res2.reused}  {'OK' if cond else '✗'}")
     ok &= cond
 
@@ -284,7 +284,7 @@ def test_reuse_avoids_spending() -> bool:
     op3 = _Boom()
     res3 = vl.create_or_reuse("x", "描述", api_key="sk-test",
                               base_url="wss://maas.qianwenaiapi.com/x", opener=op3)
-    cond = (not res3.reused) and op3.actions() == ["list_voice", "create"]
+    cond = (not res3.reused) and op3.actions() == ["list_voice", "create_voice"]
     print(f"  查询失败仍能建：action 序列={op3.actions()}  {'OK' if cond else '✗'}")
     ok &= cond
     return ok
