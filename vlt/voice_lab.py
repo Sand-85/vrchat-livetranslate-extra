@@ -147,7 +147,9 @@ def normalize_prefix(raw: str) -> str:
     而 cosy 管线的 `prefix` 实测会被 `prefix should be english letter and number` 拒掉。
     """
     out = "".join(ch for ch in str(raw or "") if ch.isascii() and ch.isalnum())
-    return (out or "myvoice")[:16]
+    # ⚠️ cosy 管线的 prefix 实测**不能超过 10 个字符**（`prefix should not be longer than 10
+    # characters`）；qwen 的 preferred_name 才是 16。截长了会被拒。
+    return (out or "myvoice")[:10]
 
 
 def normalize_name(raw: str) -> str:
@@ -220,6 +222,9 @@ def _name_of(voice: str) -> str:
         i = parts.index("vd")
         if 0 < i < len(parts) - 2:
             return "-".join(parts[i + 1:-1])
+    if len(parts) >= 4 and parts[0].startswith("cosyvoice"):
+        # 音频克隆：`cosyvoice-v3.5-flash-<prefix>-<hex>`（无 `vd` 段）
+        return "-".join(parts[3:-1])
     return ""
 
 
