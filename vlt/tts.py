@@ -29,7 +29,6 @@
 from __future__ import annotations
 
 import base64
-import contextlib
 import http.client
 import ssl
 import threading
@@ -168,31 +167,51 @@ class _PooledStatus(Exception):
 
 
 
-@contextlib.contextmanager
+class _Response:
+    """`with _open_response(...) as r` 的包装：用完把池化连接放回池；非池化路径照旧 close。
+
+    ⚠️ 刻意**不用 generator**（`@contextlib.contextmanager`）。generator 版本会把进程收尾时序
+    搅乱 —— 在跑 Tk 的用例（`tests/test_textin.py`）里表现为**断言全过、退出码却非 0**：
+    `Tcl_AsyncDelete: async handler deleted by the wrong thread`（偶发；换普通对象后 5/5 稳定）。
+    """
+
+    __slots__ = ("_resp", "_conn", "_key", "_pooled")
+
+    def __init__(self, resp, conn=None, key=None) -> None:   # noqa: ANN001
+        self._resp = resp
+        self._conn = conn
+        self._key = key
+        self._pooled = key is not None
+
+    def __enter__(self):                                     # noqa: ANN204
+        return self._resp
+
+    def __exit__(self, *exc) -> bool:                        # noqa: ANN002
+        if self._pooled:
+            reusable = not getattr(self._resp, "will_close", True)
+            _release_conn(self._key, self._conn, reusable=reusable)
+        else:
+            try:                                             # 与原来的 `with opener.open()` 一致
+                self._resp.close()
+            except Exception:                                # noqa: BLE001
+                pass
+        return False
+
+
 def _open_response(req, timeout: float, *, reuse_conn: bool):
-    """打开响应：优先**池化复用**（每段省一次 DNS+TCP+TLS ≈ 500ms）；任何连接层问题都回退 urllib。
+    """取响应：优先**池化复用**（每段省一次 DNS+TCP+TLS ≈ 500ms）；任何连接层问题都回退 urllib。
 
     回退与重连都要留痕（本仓库约定：禁静默降级）。`reuse_conn=False` 时行为与以前**完全一致**。
     """
     if reuse_conn and _pool_allowed():
-        resp = None
-        conn = key = None
         try:
             resp, conn, key = _post_pooled(req, timeout)
-        except _PooledStatus as st:                        # ≥400：不是连接问题
-            resp = st.resp
+            return _Response(resp, conn, key)
+        except _PooledStatus as st:                        # ≥400：不是连接问题（连接已在内部归还）
+            return _Response(st.resp)
         except Exception as exc:                           # noqa: BLE001
             _note(f"连接复用不可用（{type(exc).__name__}: {exc}）→ 本次回退直连")
-        if resp is not None:
-            try:
-                yield resp
-            finally:
-                reusable = bool(key is not None and not getattr(resp, "will_close", True))
-                if key is not None:
-                    _release_conn(key, conn, reusable=reusable)
-            return
-    with _get_opener().open(req, timeout=timeout) as r:
-        yield r
+    return _Response(_get_opener().open(req, timeout=timeout))
 
 
 

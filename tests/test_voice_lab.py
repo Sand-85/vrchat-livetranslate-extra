@@ -195,12 +195,14 @@ def test_list_and_error() -> bool:
     print(f"  两族都列（脏数据跳过）：设计 {rows[0].kind} / 复刻 {rows[1].kind}"
           f"（{vl._name_of(rows[1].voice)}）  {'OK' if cond else '✗'}")
     ok &= cond
-    cond = op.actions() == ["list", "list"]
-    print(f"  两族各发一次 list：action={op.actions()}  {'OK' if cond else '✗'}")
+    cond = op.actions() == ["list_voice", "list"]
+    print(f"  两族各发一次（设计=list_voice / 克隆=list）：action={op.actions()}  {'OK' if cond else '✗'}")
     ok &= cond
-    cond = "qwen-voice-enrollment" in json.dumps(op.sent[1][1]) and \
-           "qwen-voice-design" in json.dumps(op.sent[0][1])
-    print(f"  第二发的 model 是 enrollment 那族  {'OK' if cond else '✗'}")
+    cond = ("qwen-voice-enrollment" in json.dumps(op.sent[1][1])
+            and "voice-enrollment" in json.dumps(op.sent[0][1])
+            and "qwen-voice-design" not in json.dumps(op.sent[0][1]))
+    print(f"  设计族走 voice-enrollment（cosyvoice 管线）、克隆族走 qwen-voice-enrollment  "
+          f"{'OK' if cond else '✗'}")
     ok &= cond
 
     # 只查一族时不该多发请求（省钱：试听前只需确认复刻族里有没有同名的）
@@ -258,7 +260,7 @@ def test_reuse_avoids_spending() -> bool:
          "target_model": vl.DEFAULT_TARGET_MODEL}]}}])
     res = vl.create_or_reuse("clear_auto", "随便写点描述", api_key="sk-test",
                              base_url="wss://maas.qianwenaiapi.com/x", opener=op)
-    cond = res.reused and res.voice == same and op.actions() == ["list"]
+    cond = res.reused and res.voice == same and op.actions() == ["list_voice"]
     print(f"  同名已存在：action 序列={op.actions()} reused={res.reused}  {'OK' if cond else '✗'}")
     ok &= cond
 
@@ -266,7 +268,7 @@ def test_reuse_avoids_spending() -> bool:
                       _voice_payload("qwen-tts-vd-new-voice-20261002120000-ffff")])
     res2 = vl.create_or_reuse("new", "年轻女性，语速偏慢", api_key="sk-test",
                               base_url="wss://maas.qianwenaiapi.com/x", opener=op2)
-    cond = (not res2.reused) and op2.actions() == ["list", "create"]
+    cond = (not res2.reused) and op2.actions() == ["list_voice", "create"]
     print(f"  没有同名：action 序列={op2.actions()} reused={res2.reused}  {'OK' if cond else '✗'}")
     ok &= cond
 
@@ -282,7 +284,7 @@ def test_reuse_avoids_spending() -> bool:
     op3 = _Boom()
     res3 = vl.create_or_reuse("x", "描述", api_key="sk-test",
                               base_url="wss://maas.qianwenaiapi.com/x", opener=op3)
-    cond = (not res3.reused) and op3.actions() == ["list", "create"]
+    cond = (not res3.reused) and op3.actions() == ["list_voice", "create"]
     print(f"  查询失败仍能建：action 序列={op3.actions()}  {'OK' if cond else '✗'}")
     ok &= cond
     return ok

@@ -44,7 +44,11 @@ CLONE_TARGET_MODEL = "qwen3-tts-vc-2026-01-22"          # 声音复刻（音频�
 DESIGN_MODEL = "qwen-voice-design"                      # 创建/列表/删除用哪个 model 字段
 CLONE_MODEL = "qwen-voice-enrollment"
 # 两族是**分开的**：列表按 `model` 隔离（用 design 查是看不到复刻音色的，实测过）。
-FAMILIES: dict[str, str] = {"design": DESIGN_MODEL, "clone": CLONE_MODEL}
+COSY_LIST_MODEL = "voice-enrollment"      # 设计音色现在挂在它下面（action=list_voice）
+FAMILIES: dict[str, str] = {"design": COSY_LIST_MODEL, "clone": CLONE_MODEL}
+#: 每族的 list 动作名不同：qwen 克隆族用 `list`，设计族（cosyvoice 管线）用 `list_voice`
+#: —— 2026-10-10 实测：用 `list` 查 voice-enrollment 会 `invalid action`。
+FAMILY_ACTIONS: dict[str, str] = {"design": "list_voice", "clone": "list"}
 # 自定义音色的接口路径（与 tts 的多模态路径同一个网关，只是路径不同）
 CUSTOMIZATION_PATH = "/api/v1/services/audio/tts/customization"
 
@@ -95,7 +99,8 @@ class VoiceLabError(RuntimeError):
 class VoiceInfo:
     """本账号里的一条自定义音色（`action=list` 的条目）。
 
-    `kind` = 音色族：`"design"`（文字描述炼的）/ `"clone"`（音频素材复刻的）——
+    `kind` = 音色族：`"design"`（文字描述炼的；2026-10-10 起由 cosyvoice 管线承载）/
+    `"clone"`（音频素材复刻的）——
     两族**合成时必须用各自的 target_model**，所以这个字段不只是显示用。
     `status` = 服务端状态（复刻有审核，可能是 `UNDEPLOYED`）。
     """
@@ -353,10 +358,11 @@ def _check_error(obj: dict) -> None:
 
 def _voice_info(row: dict, family: str) -> VoiceInfo | None:
     """把列表里的一行翻成 `VoiceInfo`（脏数据返回 None，绝不 KeyError）。"""
-    if not isinstance(row, dict) or not row.get("voice"):
+    raw_id = row.get("voice") or row.get("voice_id") if isinstance(row, dict) else None
+    if not raw_id:
         return None
     return VoiceInfo(
-        voice=str(row.get("voice")),
+        voice=str(raw_id),
         name=str(row.get("preferred_name") or row.get("name") or ""),
         prompt=str(row.get("voice_prompt") or row.get("prompt") or ""),
         target_model=str(row.get("target_model") or ""),
@@ -390,7 +396,8 @@ def list_voices(*, api_key: str, base_url: str = "", workspace_id: str = "",
         if model is None:
             raise VoiceLabError(f"未知音色族：{fam!r}")
         try:
-            obj = _post({"model": model, "input": {"action": "list", "page_size": 50}},
+            obj = _post({"model": model,
+                         "input": {"action": FAMILY_ACTIONS.get(fam, "list"), "page_size": 50}},
                         api_key=api_key, url=endpoint, timeout=timeout, opener=opener)
             _check_error(obj)
         except VoiceLabError as exc:
