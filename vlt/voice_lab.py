@@ -49,6 +49,11 @@ FAMILIES: dict[str, str] = {"design": COSY_LIST_MODEL, "clone": CLONE_MODEL}
 #: 每族的 list 动作名不同：qwen 克隆族用 `list`，设计族（cosyvoice 管线）用 `list_voice`
 #: —— 2026-10-10 实测：用 `list` 查 voice-enrollment 会 `invalid action`。
 FAMILY_ACTIONS: dict[str, str] = {"design": "list_voice", "clone": "list"}
+#: **删除**走另一套（2026-10-10 实测）：设计族的音色在 `voice-enrollment` 下**列得出来但删不掉**
+#: （`action=delete` → `invalid action`；`delete_voice` → 要求一个猜不出的 `parameters`）。
+#: 用克隆族的模型 + `delete` 反而有效（拿不存在的 id 探过：报「音色不存在」而不是「动作无效」）。
+FAMILY_DELETE_MODELS: dict[str, str] = {"design": CLONE_MODEL, "clone": CLONE_MODEL}
+FAMILY_DELETE_ACTIONS: dict[str, str] = {"design": "delete", "clone": "delete"}
 # 自定义音色的接口路径（与 tts 的多模态路径同一个网关，只是路径不同）
 CUSTOMIZATION_PATH = "/api/v1/services/audio/tts/customization"
 
@@ -536,18 +541,19 @@ def delete_voice(voice: str, *, api_key: str, base_url: str = "", workspace_id: 
                  timeout: float = DEFAULT_TIMEOUT_S, opener=None) -> None:      # noqa: ANN001
     """删除一条自定义音色（清理废弃候选，保持列表干净）。
 
-    ⚠️ 删除也要带上**正确的族**：`action=delete` 的 `model` 与列表/创建同源，
-    拿 design 去删复刻音色是删不掉的（而且不报错——只是没删掉）。
+    ⚠️ 删除的 `model` **不一定**与列表同源：设计族（cosyvoice 管线）**列表**用 `voice-enrollment`，
+    但**删除**要用 `qwen-voice-enrollment` + `action=delete`（见 `FAMILY_DELETE_MODELS`）——
+    用列表那个模型删会 `invalid action`，实测过。
     """
     if not (api_key or "").strip():
         raise VoiceLabError("还没配置 API key（见界面右上角「设置」）")
     if not (voice or "").strip():
         raise VoiceLabError("没有指定要删除的音色")
-    model = FAMILIES.get(family)
+    model = FAMILY_DELETE_MODELS.get(family, FAMILIES.get(family))
     if model is None:
         raise VoiceLabError(f"未知音色族：{family!r}")
     obj = _post({"model": model,
-                 "input": {"action": "delete", "voice": voice,
+                 "input": {"action": FAMILY_DELETE_ACTIONS.get(family, "delete"), "voice": voice,
                            "target_model": target_model}},
                 api_key=api_key, url=url or customization_url(base_url, workspace_id),
                 timeout=timeout, opener=opener)
