@@ -39,10 +39,13 @@ from . import tts                       # 试听要复用它的合成口径（�
 from .tts import _get_opener          # 与 tts.py 共用「直连、绕开系统代理」的同一份策略
 
 # 创建与合成必须用同一个模型；换模型就得重新炼（官方硬约束）。
-DEFAULT_TARGET_MODEL = "cosyvoice-v3.5-flash"           # 声音设计（文字描述）；旧的 qwen3-tts-vd-* 全族已下架（2026-10-10 实测）
-CLONE_TARGET_MODEL = "qwen3-tts-vc-2026-01-22"          # 声音复刻（音频素材）
+DEFAULT_TARGET_MODEL = "qwen-audio-3.0-tts-flash"        # 声音设计（文字描述）；qwen3-tts-vd-* 与 cosyvoice 都不是优选（2026-10-11 实测）
+CLONE_TARGET_MODEL = "qwen-audio-3.0-tts-flash"          # 声音复刻（音频素材）；旧的 qwen3-tts-vc-* 全族已下架（2026-10-11 实测）
 DESIGN_MODEL = "qwen-voice-design"                      # 创建/列表/删除用哪个 model 字段
-CLONE_MODEL = "qwen-voice-enrollment"
+CLONE_MODEL = "qwen-voice-enrollment"      # 仅用于**列表/删除**（存量 qwen3-tts-vc 音色还在）
+# 复刻的**创建**必须用 voice-enrollment（与设计同族，2026-10-11 实测）：
+#   model=voice-enrollment + action=create_voice + prefix + url(+data URL 亦可) + preview_text
+CLONE_CREATE_MODEL = "voice-enrollment"
 # 两族是**分开的**：列表按 `model` 隔离（用 design 查是看不到复刻音色的，实测过）。
 COSY_LIST_MODEL = "voice-enrollment"      # 设计音色现在挂在它下面（action=list_voice）
 FAMILIES: dict[str, str] = {"design": COSY_LIST_MODEL, "clone": CLONE_MODEL}
@@ -518,7 +521,7 @@ def create_or_reuse(name: str, prompt: str, *, api_key: str, base_url: str = "",
 
 def enroll_voice(name: str, audio_data_url: str, *, api_key: str, base_url: str = "",
                  workspace_id: str = "", target_model: str = CLONE_TARGET_MODEL,
-                 url: str = "", timeout: float = DEFAULT_TIMEOUT_S,
+                 preview_text: str = "", url: str = "", timeout: float = DEFAULT_TIMEOUT_S,
                  opener=None) -> VoiceCreation:                          # noqa: ANN001
     """**声音复刻**：拿一段素材音频炼一条音色（`qwen-voice-enrollment`，**0.01 元/次**）。
 
@@ -534,14 +537,18 @@ def enroll_voice(name: str, audio_data_url: str, *, api_key: str, base_url: str 
     data = str(audio_data_url or "").strip()
     if not (data.startswith("data:") or data.startswith("http://") or data.startswith("https://")):
         raise VoiceLabError("复刻素材必须是 URL 或 data:audio/...;base64,（裸 base64 会被服务端当 URL 拒绝）")
-    payload = {"model": CLONE_MODEL,
-               "input": {"action": "create", "target_model": target_model,
-                         "preferred_name": nm, "audio": {"data": data}}}
+    # ⚠️ 形状与「设计」同族（2026-10-11 实测）：`url` 字段**同时接受**公网 URL 与
+    # `data:audio/...;base64,` —— 所以本地素材不必先传到公网。
+    payload = {"model": CLONE_CREATE_MODEL,
+               "input": {"action": "create_voice", "target_model": target_model,
+                         "prefix": normalize_prefix(nm), "url": data,
+                         "preview_text": str(preview_text or TEST_TEXT)},
+               "parameters": {"sample_rate": 24000, "response_format": "wav"}}
     obj = _post(payload, api_key=api_key, url=url or customization_url(base_url, workspace_id),
                 timeout=timeout, opener=opener)
     _check_error(obj)
     out = (obj.get("output") or {})
-    voice = str(out.get("voice") or "")
+    voice = str(out.get("voice") or out.get("voice_id") or "")   # 两者都认（踩过白建的坑）
     if not voice:
         raise VoiceLabError("服务端没返回音色 id（复刻可能未生效）")
     return VoiceCreation(voice=voice, name=nm,
@@ -596,7 +603,9 @@ def delete_voice(voice: str, *, api_key: str, base_url: str = "", workspace_id: 
 
 
 def sample_pcm(voice: str, model: str = "", *, api_key: str, endpoint: str | None = None,
-               timeout: float = 60.0, text: str = TEST_TEXT) -> bytes:
+               timeout: float = 60.0, text: str = TEST_TEXT,
+               inference_host: str | None = None, pitch: float | None = None,
+               speech_rate: float | None = None) -> bytes:
     """用测试文本合成一句，供**试听已有音色**（不创建、不再花 0.2 元）。
 
     为什么需要它：官方只在**创建**时回一份 `preview_audio`；账号里已有的音色（例如用户在
@@ -610,8 +619,11 @@ def sample_pcm(voice: str, model: str = "", *, api_key: str, endpoint: str | Non
         raise VoiceLabError("没有指定音色")
     model = str(model or "").strip() or tts.DEFAULT_MODEL
     try:
+        # Qwen-Audio-TTS 系（qwen-audio-3.0-tts-*）要带上专属域名与调参，否则会打 HTTP 并失败
         return tts.synthesize(text, voice=voice, model=model, api_key=api_key,
-                              endpoint=endpoint, timeout=timeout)
+                              endpoint=endpoint, timeout=timeout,
+                              inference_host=inference_host, pitch=pitch,
+                              speech_rate=speech_rate)
     except tts.TtsError as exc:
         raise VoiceLabError(str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — 网络/解码异常也要给用户一句人话

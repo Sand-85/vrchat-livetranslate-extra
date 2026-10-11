@@ -470,14 +470,14 @@ def test_clone_payload_and_guard() -> bool:
                           api_key="sk-test", base_url="wss://maas.qianwenaiapi.com/x", opener=op)
     payload = op.sent[0][1]
     inp = payload["input"]
-    cond = (payload["model"] == vl.CLONE_MODEL                      # qwen-voice-enrollment
-            and inp["action"] == "create"
-            and inp["audio"]["data"].startswith("data:audio/wav;base64,")   # 真机要 data URL
-            and inp["preferred_name"] == "my_copy"                  # 名字被规范化
+    cond = (payload["model"] == vl.CLONE_CREATE_MODEL               # voice-enrollment（活管线）
+            and inp["action"] == "create_voice"                     # 不是老的 create
+            and inp["url"].startswith("data:audio/wav;base64,")     # 素材走 url 字段（data URL 也收）
+            and inp["prefix"] == "mycopy"                           # prefix 只允许字母数字
             and inp["target_model"] == vl.CLONE_TARGET_MODEL
             and res.voice.endswith("abcd") and res.reused is False)
-    print(f"  请求体：model={payload['model']} audio.data 前缀={inp['audio']['data'][:22]}… "
-          f"name={inp['preferred_name']}  {'OK' if cond else '✗'}")
+    print(f"  请求体：model={payload['model']} url 前缀={inp['url'][:22]}… "
+          f"name={inp['prefix']}  {'OK' if cond else '✗'}")
     ok &= cond
 
     for bad in ("QUJD", "", "ftp://x/y.wav"):

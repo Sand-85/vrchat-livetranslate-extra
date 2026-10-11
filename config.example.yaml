@@ -343,8 +343,11 @@ text_input:
     # 且**只在业务空间专属域名**上服务（形如 ws-xxxx.cn-beijing.maas.aliyuncs.com）。
     # 实测：公共/试用域名调用会返回 `url error`；该族还**只认声音复刻出来的专属音色**
     # （内置音色会报 `Engine error [411]`）。
-    # 用法：把 model 设为 qwen-audio-3.0-tts-flash、voice 设为复刻得到的音色 id，并填下面两项。
-    inference_host: ""       # 业务空间专属域名（不含 wss:// 前缀）；留空 = 该族不可用
+    # 用法：把 model 设为 qwen-audio-3.0-tts-flash、voice 设为复刻得到的音色 id 即可 ——
+    # **不用配域名**：默认就用当前线路的域名（标准域名本身就服务这一族，实测 dashscope.aliyuncs.com
+    # 与 maas.qianwenaiapi.com 都能出音频）。只有想要更高并发/网络隔离时才需要业务空间专属域名。
+    # ⚠️ 唯一的坑：模型必须放在 run-task 载荷里，**不能**塞进 `?model=` 查询串（那样会连不上）。
+    inference_host: ""       # 可选：业务空间专属域名（不含 wss://）；留空则按上面三级回落
     speech_rate: 1.0         # 语速：1 = 默认；1.15 约快 15%（实测单调）
     pitch: 1.0               # 音高：1 = 默认；0.95 约降半音（实测能压掉一点窄带音源的刺耳）
     # ---- 通联开关音（每句话开头「哔」、结尾「哔」）----

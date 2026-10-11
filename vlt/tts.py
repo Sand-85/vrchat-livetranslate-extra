@@ -87,6 +87,38 @@ def _inference_payloads(*, model: str, voice: str, text: str, task_id: str,
     ]
 
 
+INFERENCE_DEFAULT_REGION = "cn-beijing"
+
+
+def inference_host_for(workspace_id: str, region: str = INFERENCE_DEFAULT_REGION) -> str:
+    """由业务空间 ID 推出合成域名（`{WorkspaceId}.<region>.maas.aliyuncs.com`）。
+
+    两种写法都认：只给 ID（`ws-xxxx`）或直接把整个域名粘进来。为空返回空串，
+    调用方自行回落到 `inference_host` 配置项 —— 两个来源都不给则不走 ws。
+    """
+    wid = str(workspace_id or "").strip()
+    if not wid:
+        return ""
+    if wid.endswith(".maas.aliyuncs.com"):
+        return wid
+    return f"{wid}.{region}.maas.aliyuncs.com"
+
+
+def resolve_inference_host(explicit: str | None, workspace_id: str | None = None,
+                           region: str = INFERENCE_DEFAULT_REGION,
+                           fallback_host: str | None = None) -> str:
+    """三级回落：显式配置 → 业务空间 ID 推 → **当前线路的域名**。
+
+    为什么必须有第三级（2026-10-11 实测更正）：`/api-ws/v1/inference` 在**标准域名**
+    （`dashscope.aliyuncs.com`、`maas.qianwenaiapi.com`）上就能用 —— 只要**别把模型放进
+    `?model=` 查询串**（那个会让服务端不认），模型放在 `run-task` 载荷里即可。
+    所以业务空间专属域名只是「高并发/隔离」的可选项，**不是必需**：下载者不用去查 workspace。
+    """
+    return (str(explicit or "").strip()
+            or inference_host_for(str(workspace_id or ""), region)
+            or str(fallback_host or "").strip())
+
+
 def use_inference(model: str, host: str | None) -> bool:
     """是否该走 Qwen-Audio-TTS 专用通道（模型属该族**且**配了专属域名）。"""
     return bool(str(host or "").strip()) and str(model or "").strip().lower().startswith(

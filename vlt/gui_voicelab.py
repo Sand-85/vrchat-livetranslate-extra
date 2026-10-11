@@ -673,6 +673,13 @@ class VoicelabMixin:
         threading.Thread(target=self._lab_worker, args=("audition",), kwargs={
             "voice": info.voice, "model": info.target_model, "name": label,
             "api_key": api_key, "base_url": base_url, "ws_id": ws_id,
+            # Qwen-Audio-TTS 系走专用 ws：域名优先用配置里的 inference_host，
+            # 没配就用「设置」里的业务空间 ID 推 —— 与打字腿同一套取值纪律。
+            "inference_host": tts.resolve_inference_host(
+                (self._cfg.text_input.get("tts") or {}).get("inference_host"),
+                ws_id),
+            "pitch": (self._cfg.text_input.get("tts") or {}).get("pitch"),
+            "speech_rate": (self._cfg.text_input.get("tts") or {}).get("speech_rate"),
         }, daemon=True).start()
 
     def _on_lab_delete(self) -> None:
@@ -724,7 +731,10 @@ class VoicelabMixin:
                 # 端点按当前线路派生 —— 与「试听」同一条纪律，别回落到模块常量。
                 endpoint = endpoints.multimodal_url(kw["base_url"])
                 pcm = voice_lab.sample_pcm(kw["voice"], kw["model"], api_key=kw["api_key"],
-                                          endpoint=endpoint)
+                                          endpoint=endpoint,
+                                          inference_host=kw.get("inference_host"),
+                                          pitch=kw.get("pitch"),
+                                          speech_rate=kw.get("speech_rate"))
                 if pcm:
                     voice_lab.save_preview(APP_DIR, kw["voice"], pcm)
                 self._q.put(("voice_lab", "audition", True, "", {

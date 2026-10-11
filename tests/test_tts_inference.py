@@ -124,6 +124,35 @@ try:
 except tts.TtsError as exc:
     check("task-failed 抛 TtsError 且带原文", "411" in str(exc))
 
+# ---------- ⑤ 域名解析（显式优先，其次由业务空间 ID 推） ----------
+print("⑤ 域名解析")
+check("只给 ID → 补全地域域名",
+      tts.inference_host_for("ws-abc") == "ws-abc.cn-beijing.maas.aliyuncs.com")
+check("直接粘整个域名 → 原样用",
+      tts.inference_host_for("ws-x.cn-beijing.maas.aliyuncs.com")
+      == "ws-x.cn-beijing.maas.aliyuncs.com")
+check("空 / 空白 → 空串（调用方回落）",
+      tts.inference_host_for("") == "" and tts.inference_host_for("   ") == "")
+check("显式配置优先",
+      tts.resolve_inference_host("explicit.host", "ws-id") == "explicit.host")
+check("没显式就推",
+      tts.resolve_inference_host("", "ws-id") == "ws-id.cn-beijing.maas.aliyuncs.com")
+check("都没有 → 空（不走 ws）", tts.resolve_inference_host("", "") == "")
+
+# ---------- ⑥ 音色页试听（voice_lab.sample_pcm）也走 ws ----------
+print("⑥ 试听路径")
+from vlt import voice_lab                                          # noqa: E402
+
+server3 = serve(handler, "127.0.0.1", 0)
+port3 = server3.socket.getsockname()[1]
+threading.Thread(target=server3.serve_forever, daemon=True).start()
+time.sleep(0.3)
+pcm_aud = voice_lab.sample_pcm("v-1", "qwen-audio-3.0-tts-flash", api_key="k",
+                               endpoint="http://127.0.0.1:1/dead",      # 打不通的 HTTP 端点
+                               inference_host=f"ws://127.0.0.1:{port3}",
+                               pitch=0.95, speech_rate=1.15, timeout=15.0)
+check("试听出音频（若走 HTTP 会因死端点失败 → 证明走了 ws）", pcm_aud == b"".join(FRAMES))
+
 # ---------- 汇总 ----------
 bad = [n for n, ok in results if not ok]
 print(f"\n共 {len(results)} 项，失败 {len(bad)} 项" + (f"：{bad}" if bad else ""))

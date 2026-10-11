@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 from .config import AppConfig, Direction
 from .devices import enumerate_mic_devices, resolve_device_name
 from . import latency as latency, endpoints
+from . import tts
 from . import platform
 from .platform.audio import MixedAudioSource
 from .platform.base import LoopbackTarget
@@ -896,7 +897,12 @@ class Engine:
             speech_rate=tts_cfg.get("speech_rate"),
             # Qwen-Audio-TTS 系专用：音高 + 业务空间专属域名（走 ws，见 tts.use_inference）
             pitch=tts_cfg.get("pitch"),
-            inference_host=str(tts_cfg.get("inference_host") or "") or None,
+            # 域名三级回落：显式配置 → 业务空间 ID → **当前线路的域名**（标准域名本身就够用，
+            # 所以没配任何东西时也能出声；模型放 run-task 载荷里，不能塞进 ?model=）
+            inference_host=tts.resolve_inference_host(
+                tts_cfg.get("inference_host"),
+                self._cfg.session_base.get("workspace_id"),
+                fallback_host=endpoints.host_of(self._cfg.session_base.get("base_url") or "")) or None,
             timeout=float(tts_cfg.get("timeout_s", DEFAULT_TTS_TIMEOUT_S)),
             endpoint=self._tts_endpoint,
         )
