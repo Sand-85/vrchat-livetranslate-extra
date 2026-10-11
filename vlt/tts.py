@@ -73,6 +73,16 @@ INFERENCE_MODEL_PREFIX = "qwen-audio-"
 TRIM_SILENCE_THRESHOLD = 328       # 32768 * 0.01
 TRIM_TAIL_PAD_MS = 80
 TRIM_HOLD_MS = 1500                # 流式路「静音保持」上限：超过就先吐出去（防长停顿被吞）
+# 帧到达间隔：实测服务端把最后一帧压到 ~1.8s 才发（音频内容 ~0.8s 就传完了），
+# 引擎又是「生成器结束」才推收台音 → 话音后凭空多出近一秒静默（=「off2 出现太晚」）。
+# 判据：**0.5s 没有新帧** 且**最后一帧是安静的**（那就是那截尾巴）→ 认定说完、提前收尾。
+# 句中真的卡了 0.5s 时，最后一帧通常是语音（不是安静帧）→ 不会误判。
+TRIM_END_GAP_S = 0.35
+#   实测：语音帧 ~0.9s 内全部到齐，而 83ms 的尾帧有时被服务端压到 ~1.9s 才发；
+#   卡 0.35s 且末帧安静就收尾 → 收台音最多比话音晚 ~0.35s（原来近 1s）。
+#   句中真卡 0.35s 时末帧是语音（不是安静帧）→ 不会误判截断。
+# 连续「纯数字零」样本达到这么多 → 这句真的说完了（尾帧实测是纯零；句中停顿带底噪，不会误判）。
+TRIM_END_ZERO_MS = 250
 
 
 def trim_trailing_silence(pcm: bytes, *, rate: int = SAMPLE_RATE,
@@ -645,6 +655,21 @@ def synthesize(
     return _decode_to_24k_mono(raw)
 
 
+def trailing_digital_zero_run(pcm: bytes) -> int:
+    """末尾连续「纯数字零」样本的**字节数**（严格 0，不含底噪）。
+
+    用来识别 Qwen-Audio-TTS 的尾帧：实测尾帧峰值 0、100% 零样本；
+    句中停顿通常带底噪 → 不会被误判成结尾。
+    """
+    n = len(pcm) // 2
+    i = n - 1
+    while i >= 0:
+        if pcm[i * 2] or pcm[i * 2 + 1]:
+            break
+        i -= 1
+    return (n - 1 - i) * 2
+
+
 def _stream_inference(text: str, *, voice: str, model: str, host: str, api_key: str,
                       rate: float, pitch: float, timeout: float) -> Iterator[bytes]:
     """把 ws 的回调式分片转成生成器（阻塞调用放子线程，主线程只从队列取）。"""
@@ -669,10 +694,24 @@ def _stream_inference(text: str, *, voice: str, model: str, host: str, api_key: 
     th.start()
     held = b""                       # 攒着的**静音**（真语音从不进这里 → 零额外延迟）
     dropped = 0
+    last_was_quiet = False           # 最后一帧是否整帧安静（判「服务端压着尾巴」用）
+    got_audio = False
+    zero_bytes = 0                   # 当前连续纯零样本的字节数（跨帧累计）
+    zero_end = max(1, int(SAMPLE_RATE * TRIM_END_ZERO_MS / 1000.0)) * 2
     while True:
-        item = q.get()
+        try:
+            item = q.get(timeout=TRIM_END_GAP_S)
+        except queue.Empty:
+            # 断供一段时间了。最后一帧整帧安静 → 那就是被压着的尾帧，不等了。
+            # （最后一帧是语音 → 可能只是网络卡顿，继续等，别把句子截断。）
+            if got_audio and last_was_quiet:
+                _note(f"流式提前收尾（{TRIM_END_GAP_S}s 无新帧，末帧为静音尾）")
+                break
+            continue
         if item is None:
             break
+        got_audio = True
+        last_was_quiet = trailing_quiet_run(item) == len(item) and len(item) > 0
         nq = trailing_quiet_run(item)                # 这一片末尾的静音字节数
         head = item[:len(item) - nq]                 # 前面的语音部分：立刻吐（零延迟）
         if head:
@@ -686,6 +725,16 @@ def _stream_inference(text: str, *, voice: str, model: str, host: str, api_key: 
                 cut = (len(held) - hold_max) // 2 * 2
                 yield held[:cut]
                 held = held[cut:]
+        # ★ 纯零连续时长：整帧全零就累加，否则重置为该帧末尾的纯零长度
+        zr = trailing_digital_zero_run(item)
+        zero_bytes = zero_bytes + len(item) if zr == len(item) else zr
+        if got_audio and zero_bytes >= zero_end:
+            _note(f"流式提前收尾（已连续 {TRIM_END_ZERO_MS}ms 纯零，认定说完）")
+            if held:
+                if len(held) > pad:
+                    yield held[:pad]
+                held = b""
+            return
     th.join(timeout=1.0)
     if err:
         raise TtsError(str(err[0]))

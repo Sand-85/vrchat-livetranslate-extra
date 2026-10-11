@@ -217,6 +217,47 @@ check("尾部静音被丢掉（总长相较原始 0.8s 明显缩短）", _ms(joi
 check("留下的尾巴 ≈ 语音+80ms 余量", 270 <= _ms(joined) <= 300)
 check("首片就是语音（没有被整体扣住）", len(parts) >= 2 and _ms(parts[0]) >= 190)
 
+# ---------- ⑩ 纯零判尾（服务端把尾帧压着不发时的救命判据） ----------
+print("⑩ 纯零判尾")
+check("末尾纯零段被认出（200ms）",
+      abs(tts.trailing_digital_zero_run(_mk(50, 200, amp=9000)) / 2 / RATE * 1000 - 200) < 2)
+check("带底噪的停顿不算纯零（只认严格 0）",
+      tts.trailing_digital_zero_run((b"\x10\x00" * 100) + (b"\x00\x00" * 100)) == 200)
+check("整帧纯零 → 等于帧长", tts.trailing_digital_zero_run(b"\x00\x00" * 300) == 600)
+check("整帧语音 → 0", tts.trailing_digital_zero_run(_mk(80, 0, amp=9000)) == 0)
+
+
+def handler_stall(ws) -> None:
+    """语音帧 → 然后**卡住 0.9s** 才补发尾帧（实测服务端会压着不到 1s）。
+
+    关键：卡顿期间的等待不该让收台音跟着等 —— 纯零攒够就该收尾。
+    """
+    for raw in ws:
+        ev = json.loads(raw)
+        if ev["header"]["action"] != "finish-task":
+            continue
+        ws.send(json.dumps({"header": {"event": "task-started", "task_id": "x"}}))
+        ws.send(_mk(120, 0, amp=9000))                       # 纯语音帧
+        time.sleep(0.9)                                       # ← 服务端压着不发
+        ws.send(b"\x00\x00" * (RATE // 4))                    # 250ms 纯零尾帧
+        time.sleep(0.9)                                       # 还要再等一次才 task-finished
+        ws.send(json.dumps({"header": {"event": "task-finished", "task_id": "x"}}))
+        return
+
+
+server5 = serve(handler_stall, "127.0.0.1", 0)
+port5 = server5.socket.getsockname()[1]
+threading.Thread(target=server5.serve_forever, daemon=True).start()
+time.sleep(0.3)
+t_start = time.monotonic()
+parts2 = list(tts.synthesize_stream("x", voice="v", model="qwen-audio-3.0-tts-flash",
+                                    api_key="k", inference_host=f"ws://127.0.0.1:{port5}",
+                                    timeout=15.0))
+elapsed = time.monotonic() - t_start
+joined2 = b"".join(parts2)
+check("收尾没有等服务端第二次卡顿（未满 1.6s）", elapsed < 1.55)
+check("仍保留语音 + 少量余量", 120 <= _ms(joined2) <= 220)
+
 # ---------- 汇总 ----------
 bad = [n for n, ok in results if not ok]
 print(f"\n共 {len(results)} 项，失败 {len(bad)} 项" + (f"：{bad}" if bad else ""))
