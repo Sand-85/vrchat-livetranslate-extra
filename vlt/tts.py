@@ -119,6 +119,20 @@ def resolve_inference_host(explicit: str | None, workspace_id: str | None = None
             or str(fallback_host or "").strip())
 
 
+def safe_host_of(base_url: str) -> str:
+    """从 base_url 取 host；取不到（空/缺 scheme/畸形）返回空串 —— **绝不抛**。
+
+    为什么要这层：`endpoints.host_of()` 是**严格**助手（拿不到就抛 ValueError，见它的用例），
+    而这里的定位只是「给域名回落备一个候选」，没有候选也不该把整条合成链打挂。
+    （CI 就是这么红的：空 base_url 的用例把 ValueError 一路抛到了 engine。）
+    """
+    try:
+        from .endpoints import host_of
+        return host_of(str(base_url or ""))
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
 def use_inference(model: str, host: str | None) -> bool:
     """是否该走 Qwen-Audio-TTS 专用通道（模型属该族**且**配了专属域名）。"""
     return bool(str(host or "").strip()) and str(model or "").strip().lower().startswith(

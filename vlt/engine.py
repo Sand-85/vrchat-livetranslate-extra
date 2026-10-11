@@ -902,7 +902,7 @@ class Engine:
             inference_host=tts.resolve_inference_host(
                 tts_cfg.get("inference_host"),
                 self._cfg.session_base.get("workspace_id"),
-                fallback_host=endpoints.host_of(self._cfg.session_base.get("base_url") or "")) or None,
+                fallback_host=tts.safe_host_of(self._cfg.session_base.get("base_url"))) or None,
             timeout=float(tts_cfg.get("timeout_s", DEFAULT_TTS_TIMEOUT_S)),
             endpoint=self._tts_endpoint,
         )

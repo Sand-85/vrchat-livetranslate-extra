@@ -153,6 +153,14 @@ pcm_aud = voice_lab.sample_pcm("v-1", "qwen-audio-3.0-tts-flash", api_key="k",
                                pitch=0.95, speech_rate=1.15, timeout=15.0)
 check("试听出音频（若走 HTTP 会因死端点失败 → 证明走了 ws）", pcm_aud == b"".join(FRAMES))
 
+# ---------- ⑦ 取宿主助手绝不抛（CI 教训） ----------
+print("⑦ 回落宿主取值")
+check("空 base_url → 空串（不抛）", tts.safe_host_of("") == "")
+check("缺 scheme → 空串（不抛）", tts.safe_host_of("maas.qianwenaiapi.com/api-ws/v1/realtime") == "")
+check("正常 base_url → host", tts.safe_host_of("https://maas.qianwenaiapi.com/api/v1")
+      == "maas.qianwenaiapi.com")
+check("None → 空串（不抛）", tts.safe_host_of(None) == "")          # type: ignore[arg-type]
+
 # ---------- 汇总 ----------
 bad = [n for n, ok in results if not ok]
 print(f"\n共 {len(results)} 项，失败 {len(bad)} 项" + (f"：{bad}" if bad else ""))
