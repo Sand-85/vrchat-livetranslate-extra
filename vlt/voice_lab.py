@@ -741,25 +741,29 @@ class ClonePreset:
     labels: dict = field(default_factory=dict)  # 其它语言的显示名（缺省回落 label）
 
 
-# 内置预设：用户 2026-10-03 复刻 MetroPolice 时用的那份拼接范本
-# （4 条连续朗读 → 0.2s 间隔拼到 19.7s，44.1kHz 单声道 16bit；实测一次通过、无降级）
+# 内置预设：2026-10-11 复刻现役 MetroPolice 用的那份拼接范本
+# （5 条整句朗读 → 0.1s 间隔拼到 15.8s，重采样 24kHz 单声道 16bit；**不加任何响度增益**：
+#   给窄带/广播素材做增益会让服务端的 ASR 前置环节直接失败 —— request asr failed）
+# 旧的 source_sample_v2.wav 保留在仓库里（老安装的缓存仍指它，删了会让它们首次拉取失败）
 BUILTIN_CLONE_PRESETS: tuple[ClonePreset, ...] = (
     ClonePreset(
         key="my_clip_4x",
         label="MetroPolice",
         spec=(
-            "素材：4 条连续朗读，44.1kHz 单声道 16bit\n"
-            "顺序：standardloyaltycheck(5.69s) → citizensummoned(5.56s) → "
-            "loyaltycheckfailure(4.57s) → classifyasdbthisblockready(3.29s)\n"
-            "段间：0.2 秒静音（别贴在一起，也别加长）\n"
-            "合计：19.7 秒（官方 10~20 秒；留 0.3 秒余量，别贴 20 秒上限）\n"
-            "规格：≥24kHz · 单声道 · ≤10MB · 无背景音／音乐／他人声 · 正常语速\n"
-            "产出：source_sample_v2.wav\n"
+            "素材：5 条整句朗读（原声 44.1kHz/16bit）→ 重采样 24kHz 单声道\n"
+            "顺序：classifyasdbthisblockready(3.29s) → control100percent(3.25s) → "
+            "malcompliant10107my1020(3.00s) → cprequestsallunitsreportin(2.94s) → "
+            "cpbolforthat243(2.90s)\n"
+            "段间：0.1 秒静音；**不要加响度增益**（会触发服务端 request asr failed）\n"
+            "合计：15.8 秒（官方 10~20 秒）\n"
+            "规格：24kHz · 单声道 · ≤10MB · 无背景音／音乐／他人声 · 正常语速\n"
+            "附加：复刻时声明 language_hints: [\"en\"]（素材是英文；不声明音色更容易飘）\n"
+            "产出：source_sample_v4.wav\n"
             "注：样本逐字文本（input.text）**别用文件名猜** —— 要么不填，要么拿 ASR 转写样本原样填，"
             "填错会被判 wer_too_high 静默降级。"
         ),
-        sample_name="source_sample_v2.wav",
-        sample_sha256="93c84fa33ccfd3c5f39cff648fb14bb387a78de1b2cb4568ca2861464f346756",
+        sample_name="source_sample_v4.wav",
+        sample_sha256="ea5f7528abfc8397878f018733abc1530e09826d9c7a2d2f93dd3f25b05252e3",
         labels={},          # 用户点名就叫 MetroPolice（各语言统一用这个英文名）
     ),
 )

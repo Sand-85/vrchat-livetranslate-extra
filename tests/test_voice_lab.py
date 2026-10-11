@@ -579,7 +579,7 @@ def test_clone_presets() -> bool:
         presets = vl.all_clone_presets(tmp)
         builtin = next((p for p in presets if p.key == "my_clip_4x"), None)
         cond = (builtin is not None and builtin.label == "MetroPolice"
-                and "19.7" in builtin.spec and "standardloyaltycheck" in builtin.spec)
+                and "15.8" in builtin.spec and "classifyasdbthisblockready" in builtin.spec)
         print(f"  内置范本在（{builtin.label if builtin else '无'}）且含条名/合计  {'OK' if cond else '✗'}")
         ok &= cond
 
@@ -588,7 +588,7 @@ def test_clone_presets() -> bool:
         _write_wav(sample, 12.0)
         vl.save_clone_preset(tmp, "my_clip_4x", label="我的范本（改名后）", sample_path=str(sample))
         again = next(p for p in vl.all_clone_presets(tmp) if p.key == "my_clip_4x")
-        cond = again.label == "我的范本（改名后）" and "19.7" in again.spec
+        cond = again.label == "我的范本（改名后）" and "15.8" in again.spec
         print(f"  本地覆盖显示名生效、范本正文仍在  {'OK' if cond else '✗'}")
         ok &= cond
         got = vl.find_preset_sample(tmp, again)
