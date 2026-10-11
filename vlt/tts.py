@@ -69,6 +69,59 @@ INFERENCE_PATH = "/api-ws/v1/inference"
 INFERENCE_MODEL_PREFIX = "qwen-audio-"
 
 
+# 尾部静音裁剪：门限取满幅的 1%（≈-40dBFS），尾部留 80ms 余量 —— 宁可少裁，不可裁到真语音。
+TRIM_SILENCE_THRESHOLD = 328       # 32768 * 0.01
+TRIM_TAIL_PAD_MS = 80
+TRIM_HOLD_MS = 1500                # 流式路「静音保持」上限：超过就先吐出去（防长停顿被吞）
+
+
+def trim_trailing_silence(pcm: bytes, *, rate: int = SAMPLE_RATE,
+                          threshold: int = TRIM_SILENCE_THRESHOLD,
+                          pad_ms: float = TRIM_TAIL_PAD_MS) -> bytes:
+    """裁掉尾部静音，只保留「最后一个有声样本 + pad_ms 余量」。
+
+    为什么需要：Qwen-Audio-TTS 的合成结果尾部带一截静音（实测短句 0.08s、长句到 0.41s），
+    引擎把「收台音」排在整段音频之后 → 用户听感就是「说完半天才 off2」。
+    保守起见：全静音、或裁完不足 1 帧时**原样返回**（不外抛、不误裁）。
+    """
+    if len(pcm) < 4:
+        return pcm
+    n = len(pcm) // 2
+    last = -1
+    for i in range(n - 1, -1, -1):
+        v = pcm[i * 2] | (pcm[i * 2 + 1] << 8)
+        if v >= 0x8000:
+            v -= 0x10000
+        if v > threshold or v < -threshold:
+            last = i
+            break
+    if last < 0:
+        return pcm                                        # 整段都是静音：别动
+    keep = min(n, last + 1 + int(rate * pad_ms / 1000.0))
+    if keep >= n:
+        return pcm
+    return pcm[:keep * 2]
+
+
+def trailing_quiet_run(pcm: bytes, *, threshold: int = TRIM_SILENCE_THRESHOLD) -> int:
+    """这一帧**末尾**连续静音的字节数（整帧静音就是帧长）。
+
+    为什么按「末尾连续段」而不是「整帧是否静音」：服务端分片约 330ms 一片，**同一片里常
+    语音+静音混着** —— 按整帧判断会漏掉最后一片里的那段静音（实测踩过：日志报「丢掉 0.00s」，
+    用户听感照旧是「收台音拖后」）。
+    """
+    if len(pcm) < 2:
+        return 0
+    n = len(pcm) // 2
+    for i in range(n - 1, -1, -1):
+        v = pcm[i * 2] | (pcm[i * 2 + 1] << 8)
+        if v >= 0x8000:
+            v -= 0x10000
+        if v > threshold or v < -threshold:
+            return (n - 1 - i) * 2
+    return n * 2
+
+
 def _inference_payloads(*, model: str, voice: str, text: str, task_id: str,
                         rate: float, pitch: float, volume: int) -> list[str]:
     """三条控制消息（拆出来是为了能单测，不必真连服务端）。"""
@@ -197,8 +250,13 @@ def synthesize_inference(text: str, *, voice: str, model: str, host: str,
         raise TtsError(f"Qwen-Audio-TTS 连接失败：{type(exc).__name__}: {exc}") from exc
     if not pcm:
         raise TtsError("Qwen-Audio-TTS 没有返回音频")
-    _note(f"Qwen-Audio-TTS：ws 合成 {len(pcm)} 字节（rate={rate} pitch={pitch}）")
-    return bytes(pcm)
+    raw_len = len(pcm)
+    out = trim_trailing_silence(bytes(pcm))
+    if len(out) < raw_len:
+        _note(f"Qwen-Audio-TTS：尾部静音裁掉 {(raw_len - len(out)) / 2 / SAMPLE_RATE:.2f}s"
+              f"（收台音才贴得住话音）")
+    _note(f"Qwen-Audio-TTS：ws 合成 {len(out)} 字节（rate={rate} pitch={pitch}）")
+    return out
 
 # 目标语言码 → DashScope 的 language_type（可选参数；拿不准就不传，服务端自己判）
 LANG_NAMES = {
@@ -605,16 +663,41 @@ def _stream_inference(text: str, *, voice: str, model: str, host: str, api_key: 
         finally:
             q.put(None)
 
+    hold_max = max(1, int(SAMPLE_RATE * TRIM_HOLD_MS / 1000.0)) * 2    # 静音保持上限（字节）
+    pad = max(1, int(SAMPLE_RATE * TRIM_TAIL_PAD_MS / 1000.0)) * 2     # 尾部保留余量（字节）
     th = threading.Thread(target=_worker, name="tts-inference", daemon=True)
     th.start()
+    held = b""                       # 攒着的**静音**（真语音从不进这里 → 零额外延迟）
+    dropped = 0
     while True:
         item = q.get()
         if item is None:
             break
-        yield item
+        nq = trailing_quiet_run(item)                # 这一片末尾的静音字节数
+        head = item[:len(item) - nq]                 # 前面的语音部分：立刻吐（零延迟）
+        if head:
+            if held:                                 # 句内停顿：先把攒的静音原样补发（顺序不变）
+                yield held
+                held = b""
+            yield head
+        if nq:
+            held += item[len(item) - nq:]
+            if len(held) > hold_max:                 # 长停顿：超出部分先吐，别把停顿吞掉
+                cut = (len(held) - hold_max) // 2 * 2
+                yield held[:cut]
+                held = held[cut:]
     th.join(timeout=1.0)
     if err:
         raise TtsError(str(err[0]))
+    # 收流时还在攒的静音 = 尾部静音 → 只留 pad，其余丢掉（收台音就贴得住话音）
+    if len(held) > pad:
+        dropped = len(held) - pad
+        held = held[:pad]
+    if dropped:
+        _note(f"Qwen-Audio-TTS：流式丢掉尾部静音 {dropped / 2 / SAMPLE_RATE:.2f}s"
+              f"（收台音才贴得住话音）")
+    if held:
+        yield held
 
 
 def synthesize_stream(

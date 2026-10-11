@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import struct
 import sys
 import threading
 import time
@@ -160,6 +161,61 @@ check("缺 scheme → 空串（不抛）", tts.safe_host_of("maas.qianwenaiapi.c
 check("正常 base_url → host", tts.safe_host_of("https://maas.qianwenaiapi.com/api/v1")
       == "maas.qianwenaiapi.com")
 check("None → 空串（不抛）", tts.safe_host_of(None) == "")          # type: ignore[arg-type]
+
+# ---------- ⑧ 尾部静音裁剪（收台音贴住话音的关键） ----------
+print("⑧ 尾部静音")
+RATE = 24000
+
+
+def _mk(speech_ms: int, tail_ms: int, amp: int = 8000) -> bytes:
+    sp = b"".join(struct.pack("<h", amp if i % 2 else -amp)
+                  for i in range(int(RATE * speech_ms / 1000)))
+    return sp + b"\x00\x00" * int(RATE * tail_ms / 1000)
+
+
+_ms = lambda p: len(p) / 2 / RATE * 1000          # noqa: E731
+out = tts.trim_trailing_silence(_mk(300, 400))
+check("长尾静音被裁到「语音+80ms 余量」", 370 <= _ms(out) <= 390)
+out2 = tts.trim_trailing_silence(_mk(300, 50))
+check("尾巴本来就短 → 原样不动", abs(_ms(out2) - 350) < 1)
+allsil = b"\x00\x00" * RATE
+check("整段静音 → 原样返回（不误裁）", tts.trim_trailing_silence(allsil) == allsil)
+check("空 / 极短 → 原样", tts.trim_trailing_silence(b"") == b""
+      and tts.trim_trailing_silence(b"\x01\x02") == b"\x01\x02")
+
+# 帧内末尾静音长度（服务端分片常把语音与静音混在一片里）
+mix = _mk(100, 200)
+check("一片「语音+静音」→ 末尾静音段测出 200ms", abs(tts.trailing_quiet_run(mix) / 2 / RATE * 1000 - 200) < 2)
+check("整片静音 → 等于帧长", tts.trailing_quiet_run(b"\x00\x00" * 480) == 960)
+check("整片语音 → 0", tts.trailing_quiet_run(_mk(120, 0)) == 0)
+
+# ---------- ⑨ 流式：只丢尾静音，语音零延迟 ----------
+print("⑨ 流式丢尾静音")
+
+
+def handler_tail(ws) -> None:
+    """分三片：语音+静音混片 → 纯静音片 → 结束（模拟服务端的粗粒度分片）。"""
+    for raw in ws:
+        ev = json.loads(raw)
+        if ev["header"]["action"] == "finish-task":
+            ws.send(json.dumps({"header": {"event": "task-started", "task_id": "x"}}))
+            ws.send(_mk(200, 300))                      # 混片
+            ws.send(b"\x00\x00" * (RATE // 2))          # 0.5s 纯静音
+            ws.send(json.dumps({"header": {"event": "task-finished", "task_id": "x"}}))
+            return
+
+
+server4 = serve(handler_tail, "127.0.0.1", 0)
+port4 = server4.socket.getsockname()[1]
+threading.Thread(target=server4.serve_forever, daemon=True).start()
+time.sleep(0.3)
+parts = list(tts.synthesize_stream("x", voice="v", model="qwen-audio-3.0-tts-flash",
+                                   api_key="k", inference_host=f"ws://127.0.0.1:{port4}",
+                                   timeout=15.0))
+joined = b"".join(parts)
+check("尾部静音被丢掉（总长相较原始 0.8s 明显缩短）", _ms(joined) < 400)
+check("留下的尾巴 ≈ 语音+80ms 余量", 270 <= _ms(joined) <= 300)
+check("首片就是语音（没有被整体扣住）", len(parts) >= 2 and _ms(parts[0]) >= 190)
 
 # ---------- 汇总 ----------
 bad = [n for n, ok in results if not ok]
