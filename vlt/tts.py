@@ -34,6 +34,7 @@ import ssl
 import threading
 import json
 import time
+import uuid
 from typing import Callable, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -56,6 +57,102 @@ SAMPLE_RATE = 24000
 OMNI_ENDPOINT = "https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions"
 DEFAULT_OMNI_MODEL = "qwen3.5-omni-flash"
 DEFAULT_OMNI_VOICE = "Tina"
+
+# === Qwen-Audio-TTS（Qwen-Audio-3.0-TTS 系）走**专用 WebSocket**，不是 HTTP ===
+# 实测（2026-10-11）：
+#   * 这一族在 HTTP 合成接口上返回 `url error`（公共域名不服务），只能用业务空间专属域名
+#     `{WorkspaceId}.<region>.maas.aliyuncs.com`（trial 域名同样不行）。
+#   * 协议不是 OpenAI-Realtime 那套：`session.created` 永不出现，改用 DashScope 语音合成
+#     协议 `run-task` → `continue-task` → `finish-task`，音频以**二进制帧**回来。
+#   * 该族**只认专属音色**（声音复刻产物）；内置音色会报 `Engine error [411]`。
+INFERENCE_PATH = "/api-ws/v1/inference"
+INFERENCE_MODEL_PREFIX = "qwen-audio-"
+
+
+def _inference_payloads(*, model: str, voice: str, text: str, task_id: str,
+                        rate: float, pitch: float, volume: int) -> list[str]:
+    """三条控制消息（拆出来是为了能单测，不必真连服务端）。"""
+    head = {"streaming": "duplex", "task_id": task_id}
+    return [
+        json.dumps({"header": {**head, "action": "run-task"},
+                    "payload": {"task_group": "audio", "task": "tts",
+                                "function": "SpeechSynthesizer", "model": model,
+                                "parameters": {"text_type": "PlainText", "voice": voice,
+                                               "format": "pcm", "sample_rate": SAMPLE_RATE,
+                                               "volume": volume, "rate": rate, "pitch": pitch},
+                                "input": {}}}),
+        json.dumps({"header": {**head, "action": "continue-task"},
+                    "payload": {"input": {"text": text}}}),
+        json.dumps({"header": {**head, "action": "finish-task"}, "payload": {"input": {}}}),
+    ]
+
+
+def use_inference(model: str, host: str | None) -> bool:
+    """是否该走 Qwen-Audio-TTS 专用通道（模型属该族**且**配了专属域名）。"""
+    return bool(str(host or "").strip()) and str(model or "").strip().lower().startswith(
+        INFERENCE_MODEL_PREFIX)
+
+
+def synthesize_inference(text: str, *, voice: str, model: str, host: str,
+                         api_key: str = "", rate: float = 1.0, pitch: float = 1.0,
+                         volume: int = 50, timeout: float = DEFAULT_TIMEOUT_S,
+                         on_chunk: Callable[[bytes], None] | None = None) -> bytes:
+    """Qwen-Audio-TTS 专用 ws 合成：音频以二进制帧到达，来一帧交给 on_chunk 一帧。"""
+    if not str(text or "").strip():
+        return b""
+    if not voice:
+        raise TtsError("Qwen-Audio-TTS 需要 voice（专属音色 id）")
+    if not host:
+        raise TtsError("Qwen-Audio-TTS 需要 inference_host（业务空间专属域名）")
+    from websockets.sync.client import connect as _ws_connect   # 局部导入：只有这条路才用
+
+    task_id = uuid.uuid4().hex[:16]
+    pcm = bytearray()
+    try:
+        # host 允许自带 scheme（本地 ws 测试、或用户有自建端点时都方便）；默认按 wss 拼
+        _base = host if "://" in host else f"wss://{host}"
+        with _ws_connect(_base.rstrip("/") + INFERENCE_PATH,
+                         additional_headers={"Authorization": f"Bearer {api_key}"},
+                         open_timeout=min(20.0, max(5.0, timeout)),
+                         close_timeout=5, max_size=None) as ws:
+            for msg in _inference_payloads(model=model, voice=voice, text=text, task_id=task_id,
+                                           rate=rate, pitch=pitch, volume=volume):
+                ws.send(msg)
+            deadline = time.monotonic() + max(5.0, timeout)
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                try:
+                    raw = ws.recv(timeout=left)
+                except TimeoutError:
+                    break
+                if isinstance(raw, (bytes, bytearray)):
+                    chunk = bytes(raw)
+                    if chunk:
+                        pcm += chunk
+                        if on_chunk is not None:
+                            on_chunk(chunk)
+                    continue
+                try:
+                    ev = json.loads(raw)
+                except ValueError:
+                    continue
+                head = ev.get("header") or {}
+                name = str(head.get("event") or ev.get("type") or "")
+                if name == "task-failed":
+                    raise TtsError("Qwen-Audio-TTS 合成失败："
+                                   + str(head.get("error_message") or raw)[:200])
+                if name == "task-finished":
+                    break
+    except TtsError:
+        raise
+    except Exception as exc:                                 # noqa: BLE001
+        raise TtsError(f"Qwen-Audio-TTS 连接失败：{type(exc).__name__}: {exc}") from exc
+    if not pcm:
+        raise TtsError("Qwen-Audio-TTS 没有返回音频")
+    _note(f"Qwen-Audio-TTS：ws 合成 {len(pcm)} 字节（rate={rate} pitch={pitch}）")
+    return bytes(pcm)
 
 # 目标语言码 → DashScope 的 language_type（可选参数；拿不准就不传，服务端自己判）
 LANG_NAMES = {
@@ -400,6 +497,8 @@ def synthesize(
     seed: int | None = DEFAULT_SEED,
     instruction: str | None = None,
     speech_rate: float | None = None,
+    pitch: float | None = None,
+    inference_host: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
     endpoint: str | None = None,
     reuse_conn: bool = True,
@@ -412,6 +511,11 @@ def synthesize(
     `endpoint`：多模态地址由调用方按当前线路从 base_url 派生传入（`endpoints.multimodal_url`）；
     不传回落千问云常量。
     """
+    if use_inference(model, inference_host):
+        return synthesize_inference(text, voice=voice, model=model, host=str(inference_host),
+                                    api_key=api_key, rate=float(speech_rate or 1.0),
+                                    pitch=float(pitch or 1.0), timeout=timeout)
+
     text = _validate(text, api_key)
     req = _build_request(text, voice=voice, model=model, api_key=api_key, language=language,
                          seed=seed, instruction=instruction, speech_rate=speech_rate,
@@ -437,6 +541,36 @@ def synthesize(
     return _decode_to_24k_mono(raw)
 
 
+def _stream_inference(text: str, *, voice: str, model: str, host: str, api_key: str,
+                      rate: float, pitch: float, timeout: float) -> Iterator[bytes]:
+    """把 ws 的回调式分片转成生成器（阻塞调用放子线程，主线程只从队列取）。"""
+    import queue
+    import threading
+
+    q: "queue.Queue[bytes | None]" = queue.Queue()
+    err: list[BaseException] = []
+
+    def _worker() -> None:
+        try:
+            synthesize_inference(text, voice=voice, model=model, host=host, api_key=api_key,
+                                 rate=rate, pitch=pitch, timeout=timeout, on_chunk=q.put)
+        except BaseException as exc:                         # noqa: BLE001
+            err.append(exc)
+        finally:
+            q.put(None)
+
+    th = threading.Thread(target=_worker, name="tts-inference", daemon=True)
+    th.start()
+    while True:
+        item = q.get()
+        if item is None:
+            break
+        yield item
+    th.join(timeout=1.0)
+    if err:
+        raise TtsError(str(err[0]))
+
+
 def synthesize_stream(
     text: str,
     *,
@@ -447,6 +581,8 @@ def synthesize_stream(
     seed: int | None = DEFAULT_SEED,
     instruction: str | None = None,
     speech_rate: float | None = None,
+    pitch: float | None = None,
+    inference_host: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
     endpoint: str | None = None,
     on_stage: Callable[[str, float], None] | None = None,
@@ -469,6 +605,12 @@ def synthesize_stream(
     - 其余错误（401/403/429/5xx、网络不可达）直接抛：再发一次同样会失败，只会把失败延迟
       翻倍、白耗一次配额。
     """
+    if use_inference(model, inference_host):
+        yield from _stream_inference(text, voice=voice, model=model, host=str(inference_host),
+                                     api_key=api_key, rate=float(speech_rate or 1.0),
+                                     pitch=float(pitch or 1.0), timeout=timeout)
+        return
+
     text = _validate(text, api_key)
     req = _build_request(text, voice=voice, model=model, api_key=api_key, language=language,
                          seed=seed, instruction=instruction, speech_rate=speech_rate,

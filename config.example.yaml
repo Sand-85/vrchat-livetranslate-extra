@@ -338,6 +338,15 @@ text_input:
     voice: Cherry            # 多语言音色（中/英/日实测都能读）；界面「⚙ 设置 → 音色」可选
     stream: true             # 流式合成（SSE）：首段音频 ~0.5s 就能起播；false = 等整段（~1.7s 才开口）
     timeout_s: 30
+    # ---- Qwen-Audio-TTS 系（qwen-audio-3.0-tts-flash / -plus 等）专属 ----
+    # 这一族**不走 HTTP 当口**，而是走专用 WebSocket（`wss://<域名>/api-ws/v1/inference`），
+    # 且**只在业务空间专属域名**上服务（形如 ws-xxxx.cn-beijing.maas.aliyuncs.com）。
+    # 实测：公共/试用域名调用会返回 `url error`；该族还**只认声音复刻出来的专属音色**
+    # （内置音色会报 `Engine error [411]`）。
+    # 用法：把 model 设为 qwen-audio-3.0-tts-flash、voice 设为复刻得到的音色 id，并填下面两项。
+    inference_host: ""       # 业务空间专属域名（不含 wss:// 前缀）；留空 = 该族不可用
+    speech_rate: 1.0         # 语速：1 = 默认；1.15 约快 15%（实测单调）
+    pitch: 1.0               # 音高：1 = 默认；0.95 约降半音（实测能压掉一点窄带音源的刺耳）
     # ---- 通联开关音（每句话开头「哔」、结尾「哔」）----
     # 只作用于 TTS 出声（打字腿 / 语音腿 B 模式）；A 模式用实时模型自带音频，不经过这里。
     # 默认**开着**，但只在你当前「打字译音」音色属于 MetroPolice 这一族时才响 ——

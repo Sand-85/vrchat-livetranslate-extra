@@ -894,6 +894,9 @@ class Engine:
             seed=tts_cfg.get("seed", DEFAULT_TTS_SEED),
             instruction=str(tts_cfg.get("instruction") or "") or None,
             speech_rate=tts_cfg.get("speech_rate"),
+            # Qwen-Audio-TTS 系专用：音高 + 业务空间专属域名（走 ws，见 tts.use_inference）
+            pitch=tts_cfg.get("pitch"),
+            inference_host=str(tts_cfg.get("inference_host") or "") or None,
             timeout=float(tts_cfg.get("timeout_s", DEFAULT_TTS_TIMEOUT_S)),
             endpoint=self._tts_endpoint,
         )

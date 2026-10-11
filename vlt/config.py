@@ -450,6 +450,13 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 # 语速（仅 qwen3-tts 生效）：1 = 默认；0.8 约慢 20%，1.2 约快 20%（实测单调）
                 "speech_rate": _opt_float((raw_textin.get("tts") or {}).get("speech_rate"), 1.0,
                                       key="text_input.tts.speech_rate"),
+                # ⚠️ Qwen-Audio-TTS 系（qwen-audio-3.0-tts-*）走**专用 ws**，必须给业务空间专属域名
+                # （形如 ws-xxxx.cn-beijing.maas.aliyuncs.com，见阿里云「地域」文档）；
+                # 留空则该族不可用 —— 它在 HTTP 合成接口上只会返回 `url error`。
+                "inference_host": str((raw_textin.get("tts") or {}).get("inference_host") or "").strip(),
+                # 音高（仅 Qwen-Audio-TTS 生效）：1 = 默认；0.95 约降半音（实测能压掉一点刺耳）
+                "pitch": _opt_float((raw_textin.get("tts") or {}).get("pitch"), 1.0,
+                                    key="text_input.tts.pitch"),
                 # 通联开关音：每句话开头 / 结尾各播一小段音效（只作用于 TTS 出声：
                 # 打字腿 + 语音腿 B 模式；A 模式是实时模型自带音频，不播）。留空 = 不播。
                 "open_sfx": str((raw_textin.get("tts") or {}).get("open_sfx") or ""),
