@@ -23,7 +23,8 @@ from typing import Any
 import tkinter as tk
 from tkinter import ttk
 
-from . import __version__, endpoints, i18n, platform
+from . import endpoints, i18n, platform
+from . import version as version
 from . import config as _config_mod
 from . import ui_theme as _ui_theme
 from .config_io import (
@@ -859,7 +860,8 @@ def build_settings_about(gui, body: ttk.Frame) -> None:
     gui._update_check_btn.pack(side=tk.RIGHT)
     ttk.Label(upd_head, text=t("软件更新"), style="Section.TLabel").pack(side=tk.LEFT)
     gui._update_info = ttk.Label(
-        body, text=t("当前版本 v{ver} · 启动时会自动检查一次", ver=__version__),
+        body, text=t("当前版本 v{ver} · 启动时会自动检查一次",
+                        ver=version.display_version()),
         style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP)
     gui._update_info.pack(anchor=tk.W, pady=(6, 0))
 
