@@ -57,6 +57,7 @@ HIDDEN = [
     # **静默回落中文**（exe 无控制台，那行告警谁也看不见）。
     "vlt.locales", "vlt.locales.en", "vlt.locales.ja", "vlt.locales.ko", "vlt.locales.ru",
     "vlt.output", "vlt.output.chatbox", "vlt.output.overlay", "vlt.output.virtualmic",
+    "vlt.output.level_match",          # 译音音量匹配（纯逻辑；engine / micproxy 都 import 它）
     "vlt.output.openvr_overlay",        # Windows/SteamVR 手腕屏后端（Linux 产物里没有它）
     "vlt.output.win_d3d11",             # 持久 D3D11 贴图（SetOverlayTexture 上传；Windows 独占）
     "vlt.platform", "vlt.platform.base", "vlt.platform.win",

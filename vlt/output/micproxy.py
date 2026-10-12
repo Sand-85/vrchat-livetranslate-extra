@@ -51,6 +51,8 @@ from typing import Callable
 
 from ..devices import resolve_device_name
 from .. import platform
+from . import level_match
+from .level_match import LevelConfig
 from .virtualmic import VirtualMic, pick_output_device
 from ..platform import bump_thread_priority
 
@@ -221,6 +223,12 @@ class TranslatedSink:
         return self._p.opened
 
     @property
+    def mic_reference_db(self) -> float | None:
+        """麦克风「说话电平」参考（dBFS）；样本不足**或已过期**（`mic_window_s`）就是 None
+        —— 引擎据此决定是否回落固定增益。"""
+        return self._p.mic_reference_db
+
+    @property
     def active(self) -> bool:
         """代理现在是不是「译音」档 —— 只有译音档，推进来的译音才会真的从虚拟麦出声。
 
@@ -290,6 +298,15 @@ class MicProxy:
         self._underruns = 0
         self._sink = TranslatedSink(self)
 
+        # ---- 译音音量匹配（见 vlt/output/level_match.py）----
+        # 麦克风「说话电平」参考**复用 `_mic_pump` 已经在读的那些块**，不再开第二个采集
+        # 设备（同一只麦克风开两条流，在 WASAPI 独占/共享模式下都可能顶掉对方）。
+        self._level_cfg = LevelConfig.from_dict(self._audio_cfg.get("level") or {})
+        self._mic_ref = level_match.MicReference(self._level_cfg)
+        #: 「麦克风电平参考取不到」只报一次（不去重就会每 5s 刷一条告警）。
+        self._ref_warned = False
+        self._pump_started_at = 0.0
+
     # ------------------------------------------------------------------ 属性
     @property
     def opened(self) -> bool:
@@ -306,6 +323,27 @@ class MicProxy:
     @property
     def translated_sink(self) -> TranslatedSink:
         return self._sink
+
+    @property
+    def mic_reference_db(self) -> float | None:
+        """麦克风「说话电平」参考（dBFS）；有声证据不足**或已过 `mic_window_s`** → None。
+
+        ⚠️ 必须走 `valid(now)` 而不是直接 `db()`：`db()` 只看样本数、**不看新鲜度**。
+        不判过期的话，用户三分钟前说过一句话，`follow_mic` 就会拿那个电平一直算下去
+        （配置里的 `mic_window_s` 形同虚设）。取不到就是 None，让引擎如实回落固定增益。
+        """
+        now = time.monotonic()
+        return self._mic_ref.db() if self._mic_ref.valid(now) else None
+
+    @property
+    def level_config(self) -> LevelConfig:
+        return self._level_cfg
+
+    def set_level_config(self, cfg: LevelConfig) -> None:
+        """UI 改了「译音音量」参数后热更新。**不清历史**：拖一下滑块不该逼用户重说话。"""
+        self._level_cfg = cfg
+        self._mic_ref.set_config(cfg)
+        self._ref_warned = False          # 换了参数就允许再报一次「参考取不到」
 
     # ------------------------------------------------------------------ 启停
     def start(self) -> bool:
@@ -464,6 +502,7 @@ class MicProxy:
                         rate=src.rate, channels=src.channels)
         last_report = time.monotonic()
         last_under = self._underruns
+        self._pump_started_at = last_report
         try:
             while not self._stop.is_set():
                 chunk = await src.read(timeout=0.5)
@@ -471,6 +510,10 @@ class MicProxy:
                     # 始终填充直通环形缓冲（保持新鲜）；译音档时输出回调不取它，
                     # 切回原声档立刻有最近 ~passthrough_ms 的麦克风数据，无需等下一块。
                     self._ring.push(resample_to_48k_stereo(chunk, src.rate, src.channels))
+                    # ★ 译音音量匹配的参考电平也从这里取：**复用同一块数据**，不开第二个
+                    #   采集设备。译音档下**照样更新**（刻意不冻结 —— 回灌/自激不在本期范围，
+                    #   冻结逻辑自己加进来只会把「参考为什么不动」变成新的谜）。
+                    self._mic_ref.feed(chunk, src.rate, src.channels, now=time.monotonic())
                 now = time.monotonic()
                 if now - last_report >= UNDERRUN_REPORT_S:
                     delta = self._underruns - last_under
@@ -480,6 +523,7 @@ class MicProxy:
                             "[proxy] 直通缓冲欠载 {n} 次/{secs}s（可能爆音）："
                             "可在 设置→音频 调大直通缓冲",
                             n=delta, secs=f"{UNDERRUN_REPORT_S:.0f}")
+                    self._report_level_reference(now)
                     last_report = now
                     last_under = self._underruns
         finally:
@@ -487,6 +531,28 @@ class MicProxy:
                 src.close()
             except Exception:              # noqa: BLE001
                 pass
+
+    def _report_level_reference(self, now: float) -> None:
+        """`follow_mic` 模式下麦克风参考长期取不到 → 报**一次**（去重，不刷屏）。
+
+        为什么值得报：这条腿静默回落成固定增益后，用户只会觉得「音量匹配没用」，
+        而真实原因（麦克风一直没被判定为在说话 / 门限太严 / 选错设备）在界面上看不出来。
+        """
+        if self._ref_warned or self._level_cfg.mode != level_match.MODE_FOLLOW_MIC:
+            return
+        # 判据必须与 `mic_reference_db`（引擎实际读的那个）一致：样本不足**或**已过
+        # `mic_window_s` 都算「取不到」。用 `db() is not None` 判的话，参考过期了却照样
+        # 不报 —— 用户看到的还是「音量匹配没用」，日志里一个字都没有。
+        if self._mic_ref.valid(now):
+            return
+        # 刚起泵的前 mic_window_s 属于「还没说够话」，不是故障，别急着报。
+        if self._pump_started_at and (now - self._pump_started_at) < self._level_cfg.mic_window_s:
+            return
+        self._ref_warned = True
+        self._on_status(
+            "warn",
+            "[proxy] 麦克风电平参考取不到 → 译音音量匹配回落固定增益 {db} dB",
+            db=f"{self._level_cfg.fixed_gain_db:g}")
 
     # ------------------------------------------------------------------ 档位切换
     def set_translation_active(self, active: bool) -> None:
