@@ -16,7 +16,7 @@
   * HEAD 正好在 `v*` tag **且工作区干净** → 正式：`0.10.0`
   * 否则（非 tag / 有提交差 / dirty）        → 测试：`0.10.0+7.gb04129b`、
     dirty 再加 `.dirty` → `0.10.0+7.gb04129b.dirty`
-  * 拿不到 git 元数据（无 `.git`、浅克隆取不到 tag、没装 git）→ 未知：`0.10.0+unknown`
+  * 拿不到 git 元数据（无 `.git`、浅克隆取不到 tag、没装 git）→ 未知：`0.10.0+Extra`（本仓库把上游的 `unknown` 换成 `Extra`，一眼认出增强线）
 
 ## 元数据从哪来
 
@@ -71,7 +71,9 @@ class BuildMeta:
         if self.official:
             return self.base
         if not self.known:
-            return f"{self.base}+unknown"
+            # ⚠️ Extra 线**有意与上游不同**（上游为 `+unknown`）：本仓库拿不到 git 元数据时
+            #    显示 `+Extra`，一眼能认出这是增强线构建。同步上游时别改回去。
+            return f"{self.base}+Extra"
         suffix = f"{self.count}.g{self.hash}" if self.hash else str(self.count)
         if self.dirty:
             suffix += ".dirty"
@@ -82,7 +84,7 @@ def parse_describe(describe: str | None, base: str = __version__) -> BuildMeta:
     """把 `git describe` 输出解析成 `BuildMeta`（纯函数，离线可测）。
 
     认三种形态：`v0.10.0` / `v0.10.0-0-gabc1234`（正好在 tag）/
-    `v0.10.0-7-gabc1234[-dirty]`。无法识别（含 `None`）→ `known=False`（展示 `+unknown`）。
+    `v0.10.0-7-gabc1234[-dirty]`。无法识别（含 `None`）→ `known=False`（展示 `+Extra`）。
     """
     text = (describe or "").strip()
     if not text:
@@ -124,7 +126,7 @@ def _read_baked() -> object:
 
 
 #: 环境变量覆盖（CI / 测试用），避免在测试里起 git 子进程：
-#:   * `VLT_VERSION_NO_GIT=1`             → 完全不起 git（拿不到就按 +unknown），权威；
+#:   * `VLT_VERSION_NO_GIT=1`             → 完全不起 git（拿不到就按 +Extra），权威；
 #:   * `VLT_VERSION_DESCRIBE=<describe>`  → 直接当 describe 用，也不起 git。
 #: 有覆盖时仍然优先于烘焙文件与 git（测试要确定、要快，不该依赖子进程）。
 _ENV_NO_GIT = "VLT_VERSION_NO_GIT"
@@ -179,7 +181,7 @@ def build_meta() -> BuildMeta:
 
 
 def display_version() -> str:
-    """用户可见的版本号：正式 `0.10.0` / 测试 `0.10.0+7.gb04129b[.dirty]` / `+unknown`。"""
+    """用户可见的版本号：正式 `0.10.0` / 测试 `0.10.0+7.gb04129b[.dirty]` / `+Extra`。"""
     return build_meta().display
 
 

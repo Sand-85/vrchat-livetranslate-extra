@@ -9,7 +9,7 @@
 
   * HEAD 正好在 tag 且干净 → 正式 → 干净版本号；
   * 有提交差 / dirty     → `X.Y.Z+<n>.g<hash>[.dirty]`；
-  * 拿不到元数据          → `X.Y.Z+unknown`（绝不假装正式）。
+  * 拿不到元数据          → `X.Y.Z+Extra`（本仓库的分歧：上游是 unknown）（绝不假装正式）。
 
 ⚠️ 本文件**不碰真实 git**：只测纯函数 `parse_describe`，所以任何机器/浅克隆都稳定。
 真正的 git 调用（`_git_describe` / 烘焙文件）由构建脚本与真机启动覆盖。
@@ -59,13 +59,13 @@ def test_test_build_shapes() -> None:
 
 
 def test_unknown_fallback() -> None:
-    """拿不到 git 元数据（None / 空串 / 乱码）→ `+unknown`，绝不假装正式。"""
+    """拿不到 git 元数据（None / 空串 / 乱码）→ `+Extra`，绝不假装正式。"""
     for describe in (None, "", "   ", "not-a-describe", "v0.10.0-7-XXXX", "v0.10"):
         meta = parse_describe(describe, BASE)
         assert not meta.known, f"{describe!r} 应判为「无元数据」：{meta}"
         assert not meta.official, describe
-        assert meta.display == "0.10.0+unknown", f"{describe!r} → {meta.display!r}"
-    print("  无元数据 → +unknown（不假装正式版）OK")
+        assert meta.display == "0.10.0+Extra", f"{describe!r} → {meta.display!r}"
+    print("  无元数据 → +Extra（不假装正式版）OK")
 
 
 def test_base_is_independent_of_tag() -> None:
@@ -76,9 +76,9 @@ def test_base_is_independent_of_tag() -> None:
 
 
 def test_dataclass_defaults() -> None:
-    """默认 BuildMeta 是不可用状态（防呆：忘了 known 就显 +unknown，而不是正式版）。"""
+    """默认 BuildMeta 是不可用状态（防呆：忘了 known 就显 +Extra，而不是正式版）。"""
     m = BuildMeta(base=BASE)
-    assert not m.known and not m.official and m.display == "0.10.0+unknown"
+    assert not m.known and not m.official and m.display == "0.10.0+Extra"
     print("  BuildMeta 默认值 = 未知（安全兜底）OK")
 
 
@@ -119,7 +119,7 @@ def test_baked_buildinfo_is_read() -> None:
         V._git_describe = lambda: (_ for _ in ()).throw(
             AssertionError("describe=null 时不应回退去问 git"))
         try:
-            assert V.display_version() == f"{V.__version__}+unknown", V.display_version()
+            assert V.display_version() == f"{V.__version__}+Extra", V.display_version()
         finally:
             V._git_describe = saved_git
     finally:
@@ -156,7 +156,7 @@ def test_env_override_skips_git() -> None:
         os.environ.pop(V._ENV_DESCRIBE, None)
         os.environ[V._ENV_NO_GIT] = "1"
         V.build_meta.cache_clear()
-        assert V.display_version() == f"{V.__version__}+unknown", V.display_version()
+        assert V.display_version() == f"{V.__version__}+Extra", V.display_version()
     finally:
         V._git_describe = saved_git
         V.BUNDLE_DIR = saved_dir
