@@ -29,6 +29,7 @@ from .glossary_text import _parse_glossary_lines as _parse_glossary_lines
 from .level_probe import LevelProbe as LevelProbe
 from .output import level_match as level_match
 from .output.level_match import format_db as format_db
+from .output.micproxy import MODE_TRANSLATED as MODE_TRANSLATED
 from .output.overlay import OverlayConfig as OverlayConfig
 from .output.overlay import resolve_offset as resolve_offset
 from .paths import BUNDLE_DIR as BUNDLE_DIR
@@ -751,21 +752,152 @@ class TranslationGUI(VoicelabMixin):
         except Exception as exc:                       # noqa: BLE001
             print(f"[proxy] ⚠️ 关闭代理时出错（忽略）：{type(exc).__name__}: {exc}", flush=True)
 
+    def _rebind_running_engines(self, sink) -> tuple[int, int]:  # noqa: ANN001
+        """把**在跑**引擎的译音输出腿整条换到 *sink*（None = 换回引擎自建）。返回 (成功数, 失败数)。
+
+        为什么在这里逐个调 `Engine.rebind_audio_sink`：翻译进行中开 / 关代理时，在跑的引擎手里
+        仍是构造时那条 `audio_sink`（issue #90）—— 只把参考接线改活会让「引擎自建 VirtualMic」
+        与「新起的代理」同时占同一条虚拟声卡端点。真正的修法是把输出腿整条换掉，由引擎侧那把
+        `_sink_lock` 保证与音频泵 / 事件循环互斥（见 `Engine.rebind_audio_sink`）。
+
+        只对**在跑**且**真有** `rebind_audio_sink` 的引擎动手：老实现 / 测试替身没有这个方法就
+        跳过（既不计成功也不计失败）—— 调用方据 (0, 0) 走「没能重接线」的旧留痕。每个引擎的
+        逐分支留痕（成功 / 跳过 / 失败）由 `Engine.rebind_audio_sink` 自己打；这里只兜住异常，
+        绝不让重接线打断界面（禁静默降级：异常也留一行 WARN）。
+        """
+        ok = fail = 0
+        for e in (self._engines or []):
+            if not getattr(e, "running", False):
+                continue
+            rebind = getattr(e, "rebind_audio_sink", None)
+            if not callable(rebind):
+                continue
+            try:
+                if rebind(sink):
+                    ok += 1
+                else:
+                    fail += 1
+            except Exception as exc:                   # noqa: BLE001 — 绝不因重接线打断界面
+                fail += 1
+                print(f"[proxy] ⚠️ 重接线引擎译音输出时出错：{type(exc).__name__}: {exc}",
+                      flush=True)
+        return ok, fail
+
+    def _proxy_translated_wanted(self) -> bool:
+        """中途开代理后要不要把档位切到「译音」—— 口径与 `gui_engine.start()` **完全一致**。
+
+        那边是 `want_audio = vmic_var.get()`，再 `Direction.output_audio = want_audio and
+        direction == "mine"`（译音输出只对「我说的话」那条腿有效）。两条都成立才切：没勾
+        「译音输出」、或当前方向不含「我说」时切过去等于让对方听静音 —— 比原声更糟。
+        """
+        ctx = getattr(self, "_engine_ctx", None)
+        var = getattr(ctx, "vmic_var", None)
+        if var is None:
+            var = getattr(self, "_vmic_var", None)
+        try:
+            want = bool(var.get()) if var is not None else False
+        except Exception:                            # noqa: BLE001 — 占位控件不一定能 get
+            want = False
+        if not want:
+            return False
+        return any(direction == "mine" and getattr(eng, "running", False)
+                   for eng, direction in zip(self._engines or [],
+                                             self._engine_dirs or []))
+
+    def _proxy_adopt_translation(self, proxy) -> None:  # noqa: ANN001
+        """让**中途新建**的代理知道「翻译正在跑」，并按 start() 的口径决定档位（上游 review #1）。
+
+        为什么必须补这一手：`MicProxy._translation_active` 默认 False，而
+        `set_translation_active()` 只在翻译启停时被调（`gui_engine.start/stop`）——
+        中途开代理这条路径以前从头到尾没调它，于是 `set_mode(MODE_TRANSLATED)` 被代理
+        直接拒（`micproxy.set_mode` 里那条「翻译未运行，无法切到译音档」）。症状是：
+        重接线已把译音 PCM 灌进代理的 translated 环形缓冲，代理却停在原声档、没人 drain
+        （溢出丢弃），用户点「原声/译音」还被告知「翻译未运行」→ 这一轮根本听不到译音。
+        """
+        try:
+            proxy.set_translation_active(True)
+        except Exception as exc:                     # noqa: BLE001 — 绝不让它打断界面
+            print(f"[proxy] ⚠️ 通知代理「翻译在跑」失败：{type(exc).__name__}: {exc}"
+                  "（档位停在原声；主界面「原声/译音」按钮仍可手动切）", flush=True)
+            return
+        if not self._proxy_translated_wanted():
+            print("[proxy] 中途开代理：未勾「译音输出」或本方向不含「我说」→ 档位保持原声"
+                  "（与「开始翻译」同一口径：切过去等于让对方听静音）", flush=True)
+            return
+        if proxy.set_mode(MODE_TRANSLATED):
+            print("[proxy] 中途开代理 → 档位切到「译音」（与「开始翻译」的默认行为一致；"
+                  "可在主界面「原声/译音」按钮切回）", flush=True)
+        else:
+            print("[proxy] ⚠️ 中途开代理后切「译音」失败（保持原档位；"
+                  "主界面「原声/译音」按钮仍可手动切）", flush=True)
+
     def _restart_proxy(self) -> None:
-        """设置页勾选框的落地点：想开就开、想关就关，按钮态与提示一起刷新。"""
+        """设置页勾选框的落地点：想开就开、想关就关，按钮态与提示一起刷新。
+
+        翻译**进行中**开 / 关代理时，顺带把在跑引擎的译音输出腿整条重接线（issue #90）：
+        开 → 接到代理的 `translated_sink`；关 → 换回引擎自建 VirtualMic。每条腿都逐分支留痕。
+        """
         if self._proxy_wanted():
             if self._start_proxy():
                 self._set_status("info", t("麦克风代理已启用"))
+                # 翻译进行中开的代理：把在跑引擎的译音输出接到代理那条常驻流上（否则引擎
+                # 仍用构造时的 audio_sink=None 自建，follow_mic 读不到代理的参考电平）。
+                proxy = self._proxy
+                sink = getattr(proxy, "translated_sink", None) if proxy is not None else None
+                if sink is not None and any(getattr(e, "running", False)
+                                            for e in self._engines):
+                    ok, fail = self._rebind_running_engines(sink)
+                    if fail:
+                        print(f"[proxy] ⚠️ 翻译进行中开了代理，但 {fail} 个在跑引擎没能接到"
+                              "代理的译音输出：这些引擎本轮译音未接上，重新点「开始翻译」可恢复",
+                              flush=True)
+                        self._set_status(
+                            "warn",
+                            t("引擎译音输出重接线失败（本轮译音未接上代理，"
+                              "重新点「开始翻译」可恢复）"))
+                    elif ok:
+                        # ★ 上游 review #1：新建的代理 `_translation_active` 是 False，不补这一手
+                        #   它就以为翻译没在跑 → `set_mode(MODE_TRANSLATED)` 被拒 → 译音灌进
+                        #   translated 缓冲却没人 drain，这一轮根本听不到译音。
+                        self._proxy_adopt_translation(proxy)
+                        # 如实报**当前档位**：以前这里恒写「原声/译音切换生效」，而代理其实
+                        # 停在原声档 —— 与实际相反的留痕比没有留痕更难排查。
+                        gear = ("译音" if getattr(proxy, "mode", None) == MODE_TRANSLATED
+                                else "原声")
+                        print(f"[proxy] 翻译进行中开了代理：已把 {ok} 个在跑引擎的译音输出接到"
+                              f"代理 translated_sink（follow_mic 参考即时可用；"
+                              f"当前档位 {gear}）", flush=True)
+                    else:
+                        # 在跑的引擎没有 rebind_audio_sink（旧实现 / 测试替身）→ 没能接上，
+                        # 如实留一行痕（禁静默降级：状态栏保持「已启用」，那是真的）。
+                        print("[proxy] ⚠️ 翻译进行中开了代理，但在跑引擎不支持重接线："
+                              "这些引擎本轮译音仍走自建输出，重新点「开始翻译」后才会接到代理",
+                              flush=True)
             return
         running = any(getattr(e, "running", False) for e in self._engines)
         self._close_proxy()
         self._refresh_voice_mode_btn()
-        if running:
-            # 引擎手里那条 audio_sink 指向刚关掉的代理缓冲：本轮译音**没人接管**了。
-            # 必须说清楚，别让人以为还在出声（禁静默降级）。
-            print("[proxy] ⚠️ 翻译进行中关掉了代理：本轮译音输出已失效，"
-                  "重新点「开始翻译」后由引擎自建虚拟声卡输出（旧行为）", flush=True)
+        # 先落这条 info：没能重接线时（老引擎 / 替身）它就是**最后**一条状态（旧行为契约）。
         self._set_status("info", t("麦克风代理已关闭（回到旧行为）"))
+        if running:
+            ok, fail = self._rebind_running_engines(None)
+            if fail:
+                # 换回自建时虚拟声卡打不开 → 这些引擎本轮译音不出声（必须让用户知道）。
+                print(f"[proxy] ⚠️ 翻译进行中关掉了代理，且 {fail} 个在跑引擎没能切回自建译音"
+                      "输出（虚拟声卡打不开？）：这些引擎本轮译音不出声，重新点「开始翻译」可恢复",
+                      flush=True)
+                self._set_status(
+                    "warn",
+                    t("引擎切回自建译音输出失败（虚拟声卡打不开？本轮译音不出声，"
+                      "重新点「开始翻译」可恢复）"))
+            elif ok:
+                print(f"[proxy] 翻译进行中关掉了代理：已把 {ok} 个在跑引擎的译音输出切回引擎自建"
+                      "虚拟声卡（翻译不中断）", flush=True)
+            else:
+                # 在跑的引擎没有 rebind_audio_sink（旧实现 / 测试替身）→ 保持旧行为的明确提示。
+                # 引擎手里那条 audio_sink 指向刚关掉的代理缓冲：本轮译音**没人接管**了。
+                print("[proxy] ⚠️ 翻译进行中关掉了代理：本轮译音输出已失效，"
+                      "重新点「开始翻译」后由引擎自建虚拟声卡输出（旧行为）", flush=True)
 
     def _apply_proxy_buffers(self, passthrough_ms: int, translated_ms: int) -> None:
         """缓冲改动落地：代理在跑就即时生效，不在跑就只落盘 + 如实说明下次何时生效。"""

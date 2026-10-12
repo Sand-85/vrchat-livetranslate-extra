@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import wave
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,6 +115,8 @@ def test_engine_push_order() -> bool:
         eng._sfx_cache = None
         # 没注入音量匹配器 = 与升级前逐字节一致的行为（本用例只验开关音的推入顺序与内容）
         eng._level = None
+        # 输出腿现在有互斥锁（`#97` 的重接线要跟音频线程互斥）；替身自带一把真锁
+        eng._sink_lock = threading.RLock()
         # 让相对路径按临时目录解析（等价于源码运行时的 BUNDLE_DIR=仓库根）
         engine_mod.BUNDLE_DIR = d
 
@@ -137,6 +140,7 @@ def test_engine_push_order() -> bool:
         eng2._virtualmic = Recorder()
         eng2._sfx_cache = None
         eng2._level = None
+        eng2._sink_lock = threading.RLock()
         eng2._drain_slot_to_mic(Slot([chunk24]))
         plain = eng2._virtualmic.events
         want2 = [("push", RATE48_STEREO_BYTES), ("end", 0)]
@@ -207,6 +211,7 @@ def test_voice_binding() -> bool:
             eng._virtualmic = Recorder()
             eng._sfx_cache = None
             eng._level = None
+            eng._sink_lock = threading.RLock()
             eng._drain_slot_to_mic(Slot([np.zeros(2400, dtype=np.int16).tobytes()]))
             cond = eng._virtualmic.events == ["push", "end"]     # 只有正文分片 + 封句
             print(f"    引擎：当前 clear_auto（非绑定音色）→ 无开关音  "

@@ -635,6 +635,12 @@ STRINGS: dict[str, str] = {
         "Mic Proxy unavailable (virtual cable not open?); Original/Translated switching disabled",
     "麦克风代理已启用": "Mic Proxy enabled",
     "麦克风代理已关闭（回到旧行为）": "Mic Proxy disabled (back to the old behavior)",
+    "引擎译音输出重接线失败（本轮译音未接上代理，重新点「开始翻译」可恢复）":
+        "Failed to re-wire the engine's translated-audio output "
+        "(this round isn't hooked up to the proxy — click \"Start\" again to recover)",
+    "引擎切回自建译音输出失败（虚拟声卡打不开？本轮译音不出声，重新点「开始翻译」可恢复）":
+        "The engine couldn't switch back to its own translated-audio output "
+        "(virtual cable won't open? This round stays silent — click \"Start\" again to recover)",
     "直通麦克风已切换：{name}": "Passthrough microphone switched: {name}",
     "麦克风已切换（直通即时生效；翻译输入下轮生效）":
         "Microphone switched (passthrough applied now; translation input takes effect when translation restarts)",
