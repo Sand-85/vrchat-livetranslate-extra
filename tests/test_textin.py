@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import io
 import json
 import math
@@ -408,6 +409,10 @@ def test_gui_wiring() -> bool:
             gui._root.destroy()
         except Exception:  # noqa: BLE001
             pass
+        # Tk 对象必须**当着主线**收掉：不 gc 的话它们会赖到后面某个后台线程触发 GC 时
+        # 才被销毁，而 Tkinter 在非创建线程里删 Tcl 解释器会直接 `Tcl_AsyncDelete` 中止
+        # 进程（CI 的 coverage 下必现；本文件后面几个 TTS 用例都会起线程）。
+        gc.collect()
     return ok
 
 
@@ -451,6 +456,7 @@ def test_send_button_and_return_are_wired() -> bool:
             gui._root.destroy()
         except Exception:  # noqa: BLE001
             pass
+        gc.collect()          # 同上：Tk 对象只许在主线里收
     return ok
 
 
