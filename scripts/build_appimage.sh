@@ -231,12 +231,17 @@ step "2/7 PyInstaller onedir 打包"
 rm -rf "$WORK"
 mkdir -p "$WORK/pyi" "$WORK/work" "$WORK/spec"
 
+# 版本溯源：构建期把 git describe 烘焙成 buildinfo.json（冻结产物里没有 .git，
+# 见 vlt/version.py；拿不到就写 null → 产物显示 +unknown，绝不假装正式版）。
+BUILDINFO="${REPO}/build/buildinfo.json"
+"$VENV_PY" "$REPO/scripts/gen_buildinfo.py" "$BUILDINFO" || die "生成 buildinfo.json 失败"
+
 # 动态导入的模块（静态分析看不到）——磁盘上的 vlt 模块**全部**列在这里；
 # 漏一个 = 用户拿到手 ImportError。第 3 步有一次「磁盘 vs 包内」对账断言兜底。
 HIDDEN=(
     vlt vlt.app vlt.config vlt.config_io vlt.crashlog vlt.credentials vlt.devices
     vlt.engine vlt.gui vlt.i18n vlt.level_probe vlt.paths vlt.textin vlt.tts
-    vlt.update_check vlt.voices
+    vlt.update_check vlt.version vlt.voices
     vlt.selfcheck                      # --verify-* 自检入口（验收脚本用；run_gui.py 按需导入）
     # 界面语言是 importlib 按语言码动态加载的（vlt/i18n.py）—— 不列就会静默回落中文
     vlt.locales vlt.locales.en vlt.locales.ja vlt.locales.ko vlt.locales.ru
@@ -265,8 +270,6 @@ HIDDEN=(
 # 带二进制/数据文件的库 → 连数据一起收
 COLLECT_ALL=(xr pythonosc)
 # Linux 产物里**不允许**出现 Windows 独占实现（与 build_exe.py 的 EXCLUDE_WIN 镜像）
-# ⚠️ 与 build_exe.py 的 EXCLUDE_WIN 镜像：新增 Windows 独占模块时两处都要补，
-#    scripts/check_platform_purity.py 的 FORBIDDEN 清单与 tests/test_platform_purity.py 会盯着。
 EXCLUDES=(vlt.platform.win vlt.output.openvr_overlay vlt.output.win_d3d11 openvr pyaudiowpatch pycaw comtypes sounddevice)
 
 PYI_ARGS=(
@@ -277,6 +280,7 @@ PYI_ARGS=(
     --add-data "${REPO}/assets:assets"
     --add-data "${REPO}/testdata:testdata"
     --add-data "${REPO}/config.example.yaml:."
+    --add-data "${BUILDINFO}:."          # 版本溯源（git describe，见 vlt/version.py）
     --add-binary "${XFT_TK}:."          # 顶掉 PyInstaller 收到的解释器自带那份
 )
 for h in "${HIDDEN[@]}";      do PYI_ARGS+=(--hidden-import "$h"); done
@@ -296,10 +300,10 @@ tail -4 "$PYI_LOG"
 step "3/7 构建后自检（数据 / Tk / 模块对账）"
 _INT="$BUNDLE/_internal"
 
-for f in "assets/app.png" "config.example.yaml" "testdata/zh_test_16k.pcm"; do
+for f in "assets/app.png" "config.example.yaml" "testdata/zh_test_16k.pcm" "buildinfo.json"; do
     [ -e "$_INT/$f" ] || die "包内缺数据文件：$_INT/$f"
 done
-echo "    ✅ 数据文件齐（assets / config.example.yaml / testdata）"
+echo "    ✅ 数据文件齐（assets / config.example.yaml / testdata / buildinfo.json）"
 
 [ -f "$_INT/libtcl9tk9.0.so" ] || die "包里没有 libtcl9tk9.0.so（--add-binary 没落地？）"
 _ldd_has "$_INT/libtcl9tk9.0.so" xft \
@@ -318,7 +322,9 @@ from PyInstaller.archive.readers import pkg_archive_contents
 exe, vlt_dir = sys.argv[1], pathlib.Path(sys.argv[2])
 names = set(pkg_archive_contents(exe))
 
-forbidden = {"vlt.platform.win", "vlt.output.openvr_overlay"}
+# ⚠️ 这份集合与上面的 EXCLUDES 是**两份**清单，加新的平台独占模块时必须同时改；
+#    tests/test_platform_purity.py 现在会断言两份的 vlt.* 集合一致（漏改即红）。
+forbidden = {"vlt.platform.win", "vlt.output.openvr_overlay", "vlt.output.win_d3d11"}
 bad = sorted(n for n in names if any(n == f or n.startswith(f + ".") for f in forbidden))
 assert not bad, f"包里混进了 Windows 独占模块：{bad}"
 
@@ -331,7 +337,11 @@ for p in vlt_dir.rglob("*.py"):
     if name not in forbidden:
         disk.add(name)
 missing = sorted(disk - names)
-assert not missing, f"磁盘上有、包里没有的 vlt 模块（用户拿到手就是 ImportError）：{missing}"
+assert not missing, (
+    f"磁盘上有、包里没有的 vlt 模块：{missing}\n"
+    "    修法：在函数里**按需导入**（importlib / 函数体内 import）的模块 → 加进上面的 HIDDEN；\n"
+    "    如果是故意排除的**平台独占**模块（Windows 才该有）→ 加进 EXCLUDES\n"
+    "    （并同步 scripts/check_platform_purity.py 的 FORBIDDEN[linux]，以及 heredoc 里的 forbidden 集合）")
 
 # 第三方里「靠运行时环境动态挑」的模块，PyInstaller 的 hook 覆盖不全 —— 单独钉住。
 # 加新项时写清「为什么静态分析看不到」。
