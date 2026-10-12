@@ -372,10 +372,12 @@ def log_startup_info(tag: str = "") -> None:
     print(f"[startup] {tag}  {_dt.datetime.now().isoformat(timespec='seconds')}")
     print(f"[startup] python {sys.version.split()[0]} | {platform.platform()}")
     try:
-        from . import __version__ as _ver
+        # 展示版本：正式版就是干净版本号，源码/测试构建带「距上个 tag 的提交数+短哈希」
+        # （见 vlt/version.py）。release 冻结构建仍是 v0.10.0 —— verify_release.py 靠这行。
+        from .version import display_version as _display
 
         _how = "打包 exe" if getattr(sys, "frozen", False) else "源码运行"
-        print(f"[startup] 版本 v{_ver}（{_how}）")
+        print(f"[startup] 版本 v{_display()}（{_how}）")
     except Exception as exc:  # noqa: BLE001
         print(f"[startup] 版本读取失败：{exc}")
     print(f"[startup] cwd {Path.cwd()}")
@@ -402,13 +404,18 @@ def log_startup_info(tag: str = "") -> None:
     except Exception as exc:
         print(f"[startup] git 信息读取失败：{exc}")
     try:
-        from .config import load_api_key
-        k = load_api_key()
-        print(f"[startup] API 密钥：{k[:6]}****{k[-4:]}（{len(k)} 字符）")
-    except SystemExit as exc:
-        print(f"[startup] API 密钥：未配置（{exc}）")
+        import yaml
+        from . import endpoints
+        from .config import DEFAULT_CONFIG, load_api_key
+        from .credentials import mask_key
+        raw = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding='utf-8')) if DEFAULT_CONFIG.exists() else {}
+        provider = endpoints.normalize_provider(((raw or {}).get('session') or {}).get('provider', endpoints.DEFAULT_PROVIDER))
+        key = load_api_key(slot=endpoints.key_slot(provider))
+        print(f"[startup] API 密钥：{mask_key(key)}")
+    except SystemExit:
+        print("[startup] API 密钥：未配置")
     except Exception as exc:
-        print(f"[startup] API 密钥：读取失败 {exc}")
+        print(f"[startup] API 密钥诊断不可用（{type(exc).__name__}）")
     print("=" * 64)
 
 

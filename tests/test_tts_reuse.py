@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 from vlt import tts                                                # noqa: E402
 
 results: list[tuple[str, bool]] = []
-CONNS: list[int] = []          # 每个 handler 实例 = 一条连接
+CONNS: list[object] = []       # 保留实例引用，避免已释放 handler 的 id 被复用
 DROP_NEXT = [False]            # 让下一条连接在响应前被掐断
 
 
@@ -39,7 +39,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self) -> None:             # noqa: N802
-        CONNS.append(id(self))
+        CONNS.append(self)
         n = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(n)
         if DROP_NEXT[0]:
