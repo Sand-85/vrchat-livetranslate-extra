@@ -121,7 +121,7 @@ from .ui_state import room_status_text, save_room_cfg
 from .gui_selftest import run_self_test
 # 显式重导出（`X as X`）：这些名字 gui.py 自己不再用，但 `tests/` 与 `run_gui.py` 仍从
 # `vlt.gui` 取。不写 `as` 的话 ruff 的 F401 会把它们当未用导入删掉（CI 门禁阻断）。
-from . import gui_room, gui_voice, gui_audio, gui_update, gui_settings
+from . import gui_room, gui_voice, gui_audio, gui_update, gui_settings, gui_proxy_hint
 from . import gui_desktop, gui_chat, gui_engine, gui_layout
 from .gui_room import RoomCtx; from .gui_voice import VoiceCtx
 from .gui_audio import AudioCtx; from .gui_desktop import DesktopCtx
@@ -193,6 +193,8 @@ _DELEGATE_MAP = {
     "_on_update_check_result": gui_update.on_update_check_result,
     "_show_update_dialog": gui_update.show_update_dialog,
     "_close_update_dialog": gui_update.close_update_dialog,
+    "_maybe_show_proxy_hint": gui_proxy_hint.maybe_show,
+    "_close_proxy_hint": gui_proxy_hint.close,
     "_open_release_page": gui_update.open_release_page,
     "_on_update_ignore": gui_update.on_update_ignore,
     "_on_update_later": gui_update.on_update_later,
@@ -733,7 +735,20 @@ class TranslationGUI(VoicelabMixin):
         print(f"[proxy] 麦克风代理已启动（VRChat 的麦克风请**永久**指向虚拟声卡）："
               f"直通缓冲 {pt}ms / 译音缓冲 {a.get('buffer_ms')}ms / 当前档位 {proxy.mode}",
               flush=True)
+        # 首次真正跑起来：说明一次它占用了虚拟声卡的输出流（只提示一次，见 gui_proxy_hint）
+        self._maybe_show_proxy_hint(on_shown=self._mark_proxy_hint_shown)
         return True
+
+    def _mark_proxy_hint_shown(self) -> None:
+        """把「首次启用说明已弹过」落盘 —— 以后不再打扰（headless 走不到这里，见 gui_proxy_hint）。
+
+        落盘走 ``_yaml_write`` + ``_yaml_set_in_text``（与代理其它参数同一套），
+        再同步内存快照：代理随时可能重开，它读的是内存那份。
+        """
+        _yaml_write(DEFAULT_CONFIG, lambda t: _yaml_set_in_text(
+            t, ["output", "audio", "proxy", "hint_shown"], _fmt_scalar(True)),
+            err="保存代理首次启用提示标记")
+        self._sync_proxy_cfg_mem(proxy={"hint_shown": True})
 
     def _proxy_degraded(self, status_text: str, log_line: str) -> None:
         """代理不可用 → 回到旧行为，并**各留一行痕**（状态栏一行 + stdout 一行）。"""

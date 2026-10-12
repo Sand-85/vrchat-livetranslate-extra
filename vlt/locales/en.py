@@ -635,6 +635,11 @@ STRINGS: dict[str, str] = {
         "Mic Proxy unavailable (virtual cable not open?); Original/Translated switching disabled",
     "麦克风代理已启用": "Mic Proxy enabled",
     "麦克风代理已关闭（回到旧行为）": "Mic Proxy disabled (back to the old behavior)",
+    "程序会把真实麦克风直通到虚拟声卡（VRChat 里麦克风固定选它），并常驻占用它的输出流。\n\n如果你的「默认播放设备」也是这块虚拟声卡，会听到自己的声音（回声）。\n不需要的话：设置 → 麦克风代理 → 取消勾选（立即释放声卡）。":
+        "The app passes your real microphone through to the virtual sound card (keep VRChat's "
+        "microphone set to it) and keeps that card's output stream open while it runs.\n\n"
+        "If your default playback device is the same virtual sound card, you will hear yourself (echo).\n"
+        "If you don't need it: Settings → Mic Proxy → uncheck it (the sound card is released right away).",
     "引擎译音输出重接线失败（本轮译音未接上代理，重新点「开始翻译」可恢复）":
         "Failed to re-wire the engine's translated-audio output "
         "(this round isn't hooked up to the proxy — click \"Start\" again to recover)",

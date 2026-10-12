@@ -454,6 +454,9 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 "passthrough_buffer_ms": _int_clamped(
                     raw_proxy.get("passthrough_buffer_ms", 150), 150,
                     key="output.audio.proxy.passthrough_buffer_ms", lo=60, hi=500),
+                # 「首次启用说明已弹过」标记：程序自己维护（见 gui_proxy_hint），用户不用管。
+                # 放在配置里而不是内存/状态文件：用户换机拷配置时不该再被弹一次。
+                "hint_shown": bool(raw_proxy.get("hint_shown", False)),
             },
             # 译音音量（对齐麦克风）：治「译音比原声响/轻」。原声直通与译音**共用同一条**
             # 虚拟声卡输出流，VRChat 的麦克风音量只能整体调 → 两条腿的相对失配只能在程序内修。
