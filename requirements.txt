@@ -9,7 +9,7 @@
 
 python-osc>=1.9.0         # 发 chatbox 消息（UDP 127.0.0.1:9000）—— 两端都靠 OSC，与 VR 无关
 Pillow>=10.0.0            # 把中日文渲染成贴图（手腕屏）/ 收款码缩放
-websockets>=12.0          # 与阿里实时翻译建立双工会话
+websockets>=15.0          # 双工会话与房间认证使用新版 additional_headers API
 numpy>=1.26               # 重采样 / 音频处理
 miniaudio>=1.60           # （留给语音路）音频格式转换
 PyYAML>=6.0               # 配置读取
