@@ -82,7 +82,7 @@ def _harness(*, enabled: bool = True, headless: bool = True, hint_shown: bool | 
     """沙箱配置 + headless GUI + 假代理 + 假 opener。yield (gui, cfg_path, opened, buf)。"""
     import vlt.config as cfg_mod
     import vlt.gui as gui_mod
-    import vlt.gui as gui_proxy_mod          # 本仓库还没做 GUI 拆分：代理方法就在 vlt/gui.py 里
+    import vlt.gui_proxy as gui_proxy_mod      # 代理那一节现在真住在 vlt/gui_proxy.py（E4 拆分）
     from vlt import gui_proxy_hint
 
     tmp = Path(tempfile.mkdtemp(prefix="vlt-proxy-hint-"))
@@ -103,8 +103,9 @@ def _harness(*, enabled: bool = True, headless: bool = True, hint_shown: bool | 
     cfg_mod.DEFAULT_CONFIG = cfg_path
     gui_mod.DEFAULT_CONFIG = cfg_path
     gui_mod._is_test_process = lambda: False                 # 只在本上下文里放开（假代理，不开流）
-    # ⚠️ 上游把代理实现搬到了 `vlt.gui_proxy`（#84 的拆分）——本仓库**还没拆**，
-    #    因此打桩点落在 `vlt/gui.py` 上（真用到 platform.create_mic_proxy 的就是它）。
+    # ⚠️ 代理实现住在 `vlt.gui_proxy`（E4 的 GUI 拆分）：打桩点要落在**真正用到**它的模块上。
+    #    `_yaml_write` / `DEFAULT_CONFIG` / `_is_test_process` 仍是 `vlt.gui` 的属性
+    #    （gui_proxy 经 `_m(self)` 现取），所以那几样照旧打在 `gui_mod` 上。
     gui_proxy_mod.platform.create_mic_proxy = lambda *a, **k: _FakeProxy()
 
     opened: list = []

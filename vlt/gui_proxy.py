@@ -1,0 +1,702 @@
+"""常驻麦克风代理 + 译音音量的 GUI 行为（界面侧）。与翻译供应商无关。
+
+从 ``vlt.gui`` 抽出（上游 #84 的 GUI 拆分）：这一节自己就有 ~640 行（代理生命周期、
+档位切换、运行期重接线、译音音量控件与热更新），留在单体 gui.py 里两边都难读。
+
+## 纪律
+
+* 本模块 **不许** ``import vlt.gui``（防循环引用）：`_yaml_write` / `DEFAULT_CONFIG` /
+  `_is_test_process` 一律经 ``_m(self)`` **现取模块属性** —— 用例打桩打的正是 `vlt.gui`
+  上的同名属性，写死 import 会绕开打桩。
+* 载重活都在 `vlt/gui_engine.py`（引擎侧）与 `vlt/output/micproxy.py`（代理本体）里；
+  本模块只管界面行为与落盘。
+"""
+from __future__ import annotations
+
+import os
+import sys
+import tkinter as tk
+from pathlib import Path
+
+from . import gui_audio, platform
+from .config_io import _fmt_scalar, _yaml_scalar, _yaml_set_in_text, _yaml_set_or_create
+from .i18n import t
+from .output import level_match
+from .output.level_match import format_db
+from .output.micproxy import MODE_TRANSLATED
+
+
+def _m(gui):
+    """取 **gui 模块**（`vlt.gui`）：`_yaml_write` / `DEFAULT_CONFIG` / `_is_test_process` 住在那里，
+    用例打的桩也打在那里。"""
+    return sys.modules[gui.__class__.__module__]
+
+
+_LEVEL_TICK_MS = 500
+_LEVEL_UI_FIXED_DB = (-24.0, 6.0)
+_LEVEL_UI_OFFSET_DB = (-12.0, 12.0)
+
+
+_TEST_ENTRIES = ("run_tests.py", "pytest", "pytest.exe", "py.test")
+def _is_test_process() -> bool:
+    """当前进程是不是**测试/自检**进程 —— 这类进程绝不构造麦克风代理。
+
+    代理会真开虚拟声卡输出流与麦克风（Windows 走 PortAudio；Linux 走 PipeWire 节点/子进程）。
+    跑用例的纪律是「绝不碰真实音频设备」（见 tests/test_micproxy.py 顶部的打桩说明），
+    所以在 GUI 构造阶段先问一句。
+    判据只看**进程入口 / 已导入的测试框架 / 环境变量**，不靠「有没有显示器」这类
+    间接信号 —— 间接信号在 CI 的 xvfb 下会误判成「真用户」。
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"): return True
+    if "pytest" in sys.modules or "_pytest" in sys.modules: return True
+    argv0 = (sys.argv[0] if sys.argv else "") or ""
+    entry = Path(argv0).name
+    return (entry.startswith("test_") or entry in _TEST_ENTRIES
+            or "unittest" in argv0 or "pytest" in argv0)
+
+
+class ProxyMethods:
+    # ── 麦克风代理（MicProxy）：常驻虚拟声卡路由，与翻译解耦 ──
+    def _proxy_audio_cfg(self) -> dict:
+        """取 ``output.audio`` 这一段（含 proxy 子段）的**副本**；配置畸形时回落空 dict。"""
+        out = self._cfg.output if isinstance(self._cfg.output, dict) else {}
+        a = out.get("audio")
+        return dict(a) if isinstance(a, dict) else {}
+
+    def _proxy_wanted(self) -> bool:
+        """配置里是不是想要代理（缺省即启用，见 config.py 的 proxy 归一化）。"""
+        p = self._proxy_audio_cfg().get("proxy") or {}
+        return bool(p.get("enabled", True)) if isinstance(p, dict) else True
+
+    def _sync_proxy_cfg_mem(self, *, audio: dict | None = None,
+                            proxy: dict | None = None) -> None:
+        """落盘之后同步**内存快照**：代理随时可能重开，它读的是这份而不是磁盘。"""
+        if not isinstance(self._cfg.output, dict):
+            return
+        a = self._cfg.output.get("audio")
+        if not isinstance(a, dict):
+            a = {}; self._cfg.output["audio"] = a
+        if audio:
+            a.update(audio)
+        if proxy:
+            p = a.get("proxy")
+            if not isinstance(p, dict):
+                p = {}; a["proxy"] = p
+            p.update(proxy)
+
+    def _on_proxy_status(self, level: str, msg: str, **params) -> None:
+        """代理的 on_status：**日志打中文原文、状态栏走 i18n**（与 ``gui_engine.on_engine_status`` 同口径）。
+
+        `msg` 是**中文模板**（同时就是 i18n 词条 key），带值的部分走 `**params`：
+
+          · 日志：`msg.format(**params)` —— 全仓日志统一中文，中英混排只会更难读；
+          · 状态栏：`t(msg, **params)` —— 用户看的地方必须能翻译（英文界面下不许闪中文）。
+
+        micproxy 内部每条消息自带 ``"[proxy] "`` 前缀，这里剥掉再补一个带级别的，
+        否则日志里会出现 ``[proxy][warn] [proxy] …`` 这种双重前缀。
+        """
+        body = msg[len("[proxy] "):] if msg.startswith("[proxy] ") else msg
+        print(f"[proxy][{level}] {body.format(**params) if params else body}", flush=True)
+        self._q.put(("status", level, t(body, **params) if params else t(body)))
+
+    def _start_proxy(self) -> bool:
+        """构造并启动麦克风代理。返回是否**真的起来了**（False = 走旧行为）。
+
+        ⚠️ 绝不抛异常、绝不阻塞启动：任何一步失败都只降级 + 留痕（禁静默降级）。
+        """
+        if self._proxy is not None:
+            return True
+        if not self._proxy_wanted():
+            print("[proxy] 配置 output.audio.proxy.enabled=false：不启动代理"
+                  "（译音输出回到旧行为：随翻译启停、由引擎自建）", flush=True)
+            return False
+        if _m(self)._is_test_process():
+            # 测试纪律：绝不碰真实音频设备（虚拟声卡输出流与麦克风：Windows 是 PortAudio，
+            # Linux 是 PipeWire 节点/子进程 —— 都会真的开流/起节点）
+            print("[proxy] 测试/自检进程：不构造麦克风代理（避免打开真实音频设备）", flush=True)
+            return False
+        a = self._proxy_audio_cfg()
+        out = self._cfg.output if isinstance(self._cfg.output, dict) else {}
+        mic_name = (out.get("capture") or {}).get("mic_device") or None
+        proxy = None
+        try:
+            # ★ 平台差异**只在门面里**：Windows → `vlt/output/micproxy.py`（PortAudio 输出流，
+            #   虚拟声卡是用户自备的 VoiceMeeter/VB-Cable）；Linux → `vlt/output/micproxy_linux.py`
+            #   （`pw-cat` 管道 + 运行时声明的 `VLT Mic` 节点）。档位语义两端一致。
+            proxy = platform.create_mic_proxy(a, mic_name, self._on_proxy_status)
+            ok = bool(proxy.start())
+        except Exception as exc:                       # noqa: BLE001
+            print(f"[proxy] 启动异常：{type(exc).__name__}: {exc}（其余功能不受影响）", flush=True)
+            ok = False
+        if not ok:
+            if proxy is not None:
+                try:
+                    proxy.close()                      # 半开的流/线程必须放掉
+                except Exception:                      # noqa: BLE001
+                    pass
+            self._proxy_degraded(
+                t("麦克风代理不可用（虚拟声卡没打开？）；原声/译音切换已禁用"),
+                "[proxy] 代理不可用 → 回到旧行为：译音输出由引擎自建（随翻译启停），"
+                "主界面「原声/译音」切换已禁用")
+            return False
+        self._proxy = proxy
+        self._refresh_voice_mode_btn()
+        pt = (a.get("proxy") or {}).get("passthrough_buffer_ms")
+        print(f"[proxy] 麦克风代理已启动（VRChat 的麦克风请**永久**指向虚拟声卡）："
+              f"直通缓冲 {pt}ms / 译音缓冲 {a.get('buffer_ms')}ms / 当前档位 {proxy.mode}",
+              flush=True)
+        # 首次真正跑起来：说明一次它占用了虚拟声卡的输出流（只提示一次，见 gui_proxy_hint）
+        self._maybe_show_proxy_hint(on_shown=self._mark_proxy_hint_shown)
+        return True
+
+    def _mark_proxy_hint_shown(self) -> None:
+        """把「首次启用说明已弹过」落盘 —— 以后不再打扰（headless 走不到这里，见 gui_proxy_hint）。
+
+        落盘走 ``_yaml_write`` + ``_yaml_set_in_text``（与代理其它参数同一套），
+        再同步内存快照：代理随时可能重开，它读的是内存那份。
+        """
+        _m(self)._yaml_write(_m(self).DEFAULT_CONFIG, lambda t: _yaml_set_in_text(
+            t, ["output", "audio", "proxy", "hint_shown"], _fmt_scalar(True)),
+            err="保存代理首次启用提示标记")
+        self._sync_proxy_cfg_mem(proxy={"hint_shown": True})
+
+    def _proxy_degraded(self, status_text: str, log_line: str) -> None:
+        """代理不可用 → 回到旧行为，并**各留一行痕**（状态栏一行 + stdout 一行）。"""
+        self._proxy = None
+        self._refresh_voice_mode_btn()                 # 无代理 → 按钮置灰
+        print(log_line, flush=True)
+        self._set_status("warn", status_text)
+
+    def _close_proxy(self) -> None:
+        """幂等关闭代理：先摘引用再 close，绝不让异常打断关窗流程。"""
+        p = self._proxy
+        if p is None:
+            return
+        self._proxy = None
+        try:
+            p.close()                                  # 幂等：停麦克风线程 + 关输出流
+            print("[proxy] 麦克风代理已关闭（虚拟声卡输出流与麦克风直通线程已释放）", flush=True)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"[proxy] ⚠️ 关闭代理时出错（忽略）：{type(exc).__name__}: {exc}", flush=True)
+
+    def _rebind_running_engines(self, sink) -> tuple[int, int]:  # noqa: ANN001
+        """把**在跑**引擎的译音输出腿整条换到 *sink*（None = 换回引擎自建）。返回 (成功数, 失败数)。
+
+        为什么在这里逐个调 `Engine.rebind_audio_sink`：翻译进行中开 / 关代理时，在跑的引擎手里
+        仍是构造时那条 `audio_sink`（issue #90）—— 只把参考接线改活会让「引擎自建 VirtualMic」
+        与「新起的代理」同时占同一条虚拟声卡端点。真正的修法是把输出腿整条换掉，由引擎侧那把
+        `_sink_lock` 保证与音频泵 / 事件循环互斥（见 `Engine.rebind_audio_sink`）。
+
+        只对**在跑**且**真有** `rebind_audio_sink` 的引擎动手：老实现 / 测试替身没有这个方法就
+        跳过（既不计成功也不计失败）—— 调用方据 (0, 0) 走「没能重接线」的旧留痕。每个引擎的
+        逐分支留痕（成功 / 跳过 / 失败）由 `Engine.rebind_audio_sink` 自己打；这里只兜住异常，
+        绝不让重接线打断界面（禁静默降级：异常也留一行 WARN）。
+        """
+        ok = fail = 0
+        for e in (self._engines or []):
+            if not getattr(e, "running", False):
+                continue
+            rebind = getattr(e, "rebind_audio_sink", None)
+            if not callable(rebind):
+                continue
+            try:
+                if rebind(sink):
+                    ok += 1
+                else:
+                    fail += 1
+            except Exception as exc:                   # noqa: BLE001 — 绝不因重接线打断界面
+                fail += 1
+                print(f"[proxy] ⚠️ 重接线引擎译音输出时出错：{type(exc).__name__}: {exc}",
+                      flush=True)
+        return ok, fail
+
+    def _proxy_translated_wanted(self) -> bool:
+        """中途开代理后要不要把档位切到「译音」—— 口径与 `gui_engine.start()` **完全一致**。
+
+        那边是 `want_audio = vmic_var.get()`，再 `Direction.output_audio = want_audio and
+        direction == "mine"`（译音输出只对「我说的话」那条腿有效）。两条都成立才切：没勾
+        「译音输出」、或当前方向不含「我说」时切过去等于让对方听静音 —— 比原声更糟。
+        """
+        ctx = getattr(self, "_engine_ctx", None)
+        var = getattr(ctx, "vmic_var", None)
+        if var is None:
+            var = getattr(self, "_vmic_var", None)
+        try:
+            want = bool(var.get()) if var is not None else False
+        except Exception:                            # noqa: BLE001 — 占位控件不一定能 get
+            want = False
+        if not want:
+            return False
+        return any(direction == "mine" and getattr(eng, "running", False)
+                   for eng, direction in zip(self._engines or [],
+                                             self._engine_dirs or []))
+
+    def _proxy_adopt_translation(self, proxy) -> None:  # noqa: ANN001
+        """让**中途新建**的代理知道「翻译正在跑」，并按 start() 的口径决定档位（上游 review #1）。
+
+        为什么必须补这一手：`MicProxy._translation_active` 默认 False，而
+        `set_translation_active()` 只在翻译启停时被调（`gui_engine.start/stop`）——
+        中途开代理这条路径以前从头到尾没调它，于是 `set_mode(MODE_TRANSLATED)` 被代理
+        直接拒（`micproxy.set_mode` 里那条「翻译未运行，无法切到译音档」）。症状是：
+        重接线已把译音 PCM 灌进代理的 translated 环形缓冲，代理却停在原声档、没人 drain
+        （溢出丢弃），用户点「原声/译音」还被告知「翻译未运行」→ 这一轮根本听不到译音。
+        """
+        try:
+            proxy.set_translation_active(True)
+        except Exception as exc:                     # noqa: BLE001 — 绝不让它打断界面
+            print(f"[proxy] ⚠️ 通知代理「翻译在跑」失败：{type(exc).__name__}: {exc}"
+                  "（档位停在原声；主界面「原声/译音」按钮仍可手动切）", flush=True)
+            return
+        if not self._proxy_translated_wanted():
+            print("[proxy] 中途开代理：未勾「译音输出」或本方向不含「我说」→ 档位保持原声"
+                  "（与「开始翻译」同一口径：切过去等于让对方听静音）", flush=True)
+            return
+        if proxy.set_mode(MODE_TRANSLATED):
+            print("[proxy] 中途开代理 → 档位切到「译音」（与「开始翻译」的默认行为一致；"
+                  "可在主界面「原声/译音」按钮切回）", flush=True)
+        else:
+            print("[proxy] ⚠️ 中途开代理后切「译音」失败（保持原档位；"
+                  "主界面「原声/译音」按钮仍可手动切）", flush=True)
+
+    def _restart_proxy(self) -> None:
+        """设置页勾选框的落地点：想开就开、想关就关，按钮态与提示一起刷新。
+
+        翻译**进行中**开 / 关代理时，顺带把在跑引擎的译音输出腿整条重接线（issue #90）：
+        开 → 接到代理的 `translated_sink`；关 → 换回引擎自建 VirtualMic。每条腿都逐分支留痕。
+        """
+        if self._proxy_wanted():
+            if self._start_proxy():
+                self._set_status("info", t("麦克风代理已启用"))
+                # 翻译进行中开的代理：把在跑引擎的译音输出接到代理那条常驻流上（否则引擎
+                # 仍用构造时的 audio_sink=None 自建，follow_mic 读不到代理的参考电平）。
+                proxy = self._proxy
+                sink = getattr(proxy, "translated_sink", None) if proxy is not None else None
+                if sink is not None and any(getattr(e, "running", False)
+                                            for e in self._engines):
+                    ok, fail = self._rebind_running_engines(sink)
+                    if fail:
+                        print(f"[proxy] ⚠️ 翻译进行中开了代理，但 {fail} 个在跑引擎没能接到"
+                              "代理的译音输出：这些引擎本轮译音未接上，重新点「开始翻译」可恢复",
+                              flush=True)
+                        self._set_status(
+                            "warn",
+                            t("引擎译音输出重接线失败（本轮译音未接上代理，"
+                              "重新点「开始翻译」可恢复）"))
+                    elif ok:
+                        # ★ 上游 review #1：新建的代理 `_translation_active` 是 False，不补这一手
+                        #   它就以为翻译没在跑 → `set_mode(MODE_TRANSLATED)` 被拒 → 译音灌进
+                        #   translated 缓冲却没人 drain，这一轮根本听不到译音。
+                        self._proxy_adopt_translation(proxy)
+                        # 如实报**当前档位**：以前这里恒写「原声/译音切换生效」，而代理其实
+                        # 停在原声档 —— 与实际相反的留痕比没有留痕更难排查。
+                        gear = ("译音" if getattr(proxy, "mode", None) == MODE_TRANSLATED
+                                else "原声")
+                        print(f"[proxy] 翻译进行中开了代理：已把 {ok} 个在跑引擎的译音输出接到"
+                              f"代理 translated_sink（follow_mic 参考即时可用；"
+                              f"当前档位 {gear}）", flush=True)
+                    else:
+                        # 在跑的引擎没有 rebind_audio_sink（旧实现 / 测试替身）→ 没能接上，
+                        # 如实留一行痕（禁静默降级：状态栏保持「已启用」，那是真的）。
+                        print("[proxy] ⚠️ 翻译进行中开了代理，但在跑引擎不支持重接线："
+                              "这些引擎本轮译音仍走自建输出，重新点「开始翻译」后才会接到代理",
+                              flush=True)
+            return
+        running = any(getattr(e, "running", False) for e in self._engines)
+        self._close_proxy()
+        self._refresh_voice_mode_btn()
+        # 先落这条 info：没能重接线时（老引擎 / 替身）它就是**最后**一条状态（旧行为契约）。
+        self._set_status("info", t("麦克风代理已关闭（回到旧行为）"))
+        if running:
+            ok, fail = self._rebind_running_engines(None)
+            if fail:
+                # 换回自建时虚拟声卡打不开 → 这些引擎本轮译音不出声（必须让用户知道）。
+                print(f"[proxy] ⚠️ 翻译进行中关掉了代理，且 {fail} 个在跑引擎没能切回自建译音"
+                      "输出（虚拟声卡打不开？）：这些引擎本轮译音不出声，重新点「开始翻译」可恢复",
+                      flush=True)
+                self._set_status(
+                    "warn",
+                    t("引擎切回自建译音输出失败（虚拟声卡打不开？本轮译音不出声，"
+                      "重新点「开始翻译」可恢复）"))
+            elif ok:
+                print(f"[proxy] 翻译进行中关掉了代理：已把 {ok} 个在跑引擎的译音输出切回引擎自建"
+                      "虚拟声卡（翻译不中断）", flush=True)
+            else:
+                # 在跑的引擎没有 rebind_audio_sink（旧实现 / 测试替身）→ 保持旧行为的明确提示。
+                # 引擎手里那条 audio_sink 指向刚关掉的代理缓冲：本轮译音**没人接管**了。
+                print("[proxy] ⚠️ 翻译进行中关掉了代理：本轮译音输出已失效，"
+                      "重新点「开始翻译」后由引擎自建虚拟声卡输出（旧行为）", flush=True)
+
+    def _apply_proxy_buffers(self, passthrough_ms: int, translated_ms: int) -> None:
+        """缓冲改动落地：代理在跑就即时生效，不在跑就只落盘 + 如实说明下次何时生效。"""
+        p = self._proxy
+        if p is not None:
+            try:
+                p.reopen_with(passthrough_ms=passthrough_ms,
+                              translated_buffer_ms=translated_ms)
+                print(f"[proxy] 缓冲已更新：直通 {passthrough_ms}ms / 译音 {translated_ms}ms"
+                      "（软件侧参数，输出流不重开、没有静音间隙）", flush=True)
+                self._set_status("info", t("缓冲已更新（即时生效）"))
+            except Exception as exc:                   # noqa: BLE001
+                print(f"[proxy] ⚠️ 应用缓冲失败：{type(exc).__name__}: {exc}"
+                      "（已落盘，下次启动生效）", flush=True)
+                self._set_status("warn", t("缓冲已保存（译音缓冲下次开始翻译生效）"))
+            return
+        if self._proxy_wanted():
+            print(f"[proxy] 代理没在跑（虚拟声卡没打开？）：缓冲已落盘 —— "
+                  f"直通 {passthrough_ms}ms / 译音 {translated_ms}ms，下次启动代理时生效",
+                  flush=True)
+            self._set_status("warn", t("虚拟声卡未打开——检查「译音输出」设备；缓冲改动已存，下次生效"))
+        else:
+            print(f"[proxy] 代理已关闭：缓冲已落盘（直通 {passthrough_ms}ms / "
+                  f"译音 {translated_ms}ms），译音缓冲下次开始翻译生效", flush=True)
+            self._set_status("info", t("缓冲已保存（译音缓冲下次开始翻译生效）"))
+
+    def _on_proxy_toggle(self) -> None:
+        self._sync_audio_ctx(); self._audio_ctx.proxy_enabled = self._proxy_enabled_var.get()
+        _m(self)._yaml_write(_m(self).DEFAULT_CONFIG, lambda t: _yaml_set_in_text(t, ["output", "audio", "proxy", "enabled"], _fmt_scalar(self._audio_ctx.proxy_enabled)), err="保存代理开关")
+        self._sync_proxy_cfg_mem(proxy={"enabled": bool(self._audio_ctx.proxy_enabled)})
+        self._restart_proxy()
+        self._sync_proxy_controls_state()
+    def _on_proxy_buffer_change(self, _event=None) -> None:
+        if self._passthrough_spin is None: return
+        try:
+            pt = int(self._passthrough_var.get()); tr = int(self._translated_buf_var.get())
+            pt_clamped = max(60, min(500, pt)); tr_clamped = max(50, min(2000, tr))
+            if pt != pt_clamped: self._passthrough_var.set(pt_clamped)
+            if tr != tr_clamped: self._translated_buf_var.set(tr_clamped)
+            pt, tr = pt_clamped, tr_clamped
+        except (ValueError, TypeError): return
+        self._sync_audio_ctx()
+        def _fn(t):
+            t = _yaml_set_in_text(t, ["output", "audio", "proxy", "passthrough_buffer_ms"], _fmt_scalar(pt))
+            return _yaml_set_in_text(t, ["output", "audio", "buffer_ms"], _fmt_scalar(tr))
+        _m(self)._yaml_write(_m(self).DEFAULT_CONFIG, _fn, err="保存代理缓冲")
+        self._sync_proxy_cfg_mem(audio={"buffer_ms": tr}, proxy={"passthrough_buffer_ms": pt})
+        self._apply_proxy_buffers(pt, tr)
+    def _sync_proxy_controls_state(self) -> None:
+        if self._proxy_check is None: return
+        on = bool(self._proxy_enabled_var.get())
+        if self._passthrough_spin is not None:
+            try: self._passthrough_spin.configure(state=tk.NORMAL if on else tk.DISABLED)
+            except Exception: pass
+        if self._translated_spin is not None:
+            try: self._translated_spin.configure(state=tk.NORMAL)
+            except Exception: pass
+        if hasattr(self, '_proxy_hint') and self._proxy_hint is not None:
+            self._proxy_hint.configure(text="" if on else t("已关闭：回到旧行为（译音输出随翻译启停，主界面切换开关置灰）"))
+    def _on_device_scan_result(self, mics, loops, outs) -> None:
+        self._sync_audio_ctx(); gui_audio.on_device_scan_result(self._audio_ctx, self._cfg, mics, loops, outs, self._names_holder, self._scan_holder)
+        self._device_scan_pending = self._scan_holder.get("pending", False)
+    def _on_device_change(self, _event=None) -> None:
+        self._sync_audio_ctx()
+        old_mic = self._current_mic_device()
+        gui_audio.on_device_change(self._audio_ctx, self._cfg, self._names_holder)
+        new_mic = self._current_mic_device()
+        if new_mic != old_mic:
+            self._apply_mic_change(new_mic)
+    def _current_mic_device(self) -> str:
+        out = self._cfg.output if isinstance(self._cfg.output, dict) else {}
+        return str((out.get("capture") or {}).get("mic_device") or "")
+    def _apply_mic_change(self, device_name: str) -> None:
+        """麦克风变更后让**直通腿**即时生效：只重启代理的采集线程，不动虚拟声卡输出流
+        （引擎手里的 `translated_sink` 不受影响，翻译不断）。代理没在跑就只落盘，下次
+        `start()` 生效。翻译输入那条腿在引擎启动时读定设备，运行中切换不影响本轮 ——
+        状态栏如实说明，别让人以为翻译输入也换了（禁静默降级）。"""
+        p = self._proxy
+        if p is None:
+            return
+        try:
+            p.reopen_mic(device_name or None)
+        except Exception as exc:                        # noqa: BLE001 — 绝不因切麦打断界面
+            print(f"[proxy] ⚠️ 切换麦克风失败：{type(exc).__name__}: {exc}"
+                  "（已落盘，下次启动生效）", flush=True)
+            self._set_status("warn", t("麦克风已保存（切换未即时生效，下次启动生效）"))
+            return
+        print(f"[proxy] 直通麦克风已切换：{device_name or '自动检测'}"
+              "（仅重启采集线程；翻译输入下轮生效）", flush=True)
+        self._set_status("info", t("麦克风已切换（直通即时生效；翻译输入下轮生效）"))
+
+    # ── 译音音量（固定增益 / 跟随麦克风）：控件 → 落盘 → 热更新 ──
+    #    与「麦克风代理」同一条腿：参数住在 output.audio.level，真正施加增益的是
+    #    引擎侧的 LevelMatcher，麦克风电平参考由代理的直通线程顺带喂（见 level_match.py）。
+
+    def _level_cfg_mem(self) -> dict:
+        """``output.audio.level`` 的**内存真源**（缺这一段就现补一个空 dict 挂上去）。
+
+        为什么必须写回 ``self._cfg``：设置窗是可以反复重建的，重建时读的是这份内存快照
+        而不是磁盘 —— 只落盘不同步的话，关窗再开就看见旧值（缓冲那两个 spin 同理）。
+        """
+        out = self._cfg.output if isinstance(self._cfg.output, dict) else {}
+        a = out.get("audio")
+        if not isinstance(a, dict):
+            return {}
+        lv = a.get("level")
+        if not isinstance(lv, dict):
+            lv = {}; a["level"] = lv
+        return lv
+
+    def _level_mode_names(self) -> dict[str, str]:
+        """模式代码 → 界面文案。每次都现取 ``t()``：界面语言可能在运行中改过。
+
+        ⚠️ off 那一项用的 key 是「关闭音量匹配」而不是「关闭」—— 后者在 4 份词表里
+        早就是按钮的 "Close"（``gui_update.py`` 的关闭按钮），复用会让英文界面的
+        模式下拉显示成 "Close / Fixed gain / Follow mic"。
+        """
+        return {level_match.MODE_OFF: t("关闭音量匹配"),
+                level_match.MODE_FIXED: t("固定增益"),
+                level_match.MODE_FOLLOW_MIC: t("跟随麦克风")}
+
+    def _level_mode_code(self) -> str:
+        """下拉框当前选中项 → 模式代码；认不出来就退回配置里的值（控件还没建时走这条）。"""
+        names = self._level_mode_names()
+        var = getattr(self, "_level_mode_var", None)
+        if var is not None:
+            try:
+                shown = str(var.get())
+            except Exception:                        # noqa: BLE001 — 占位控件不一定能 get
+                shown = ""
+            for code, name in names.items():
+                if name == shown:
+                    return code
+        cur = str(self._level_cfg_mem().get("mode") or level_match.MODE_OFF)
+        return cur if cur in names else level_match.MODE_OFF
+
+    def _level_read_db(self, var_name: str, lo: float, hi: float,
+                       key: str) -> float:
+        """读一个 dB 数值控件：脏值/越界一律夹回界面档位并对齐到 0.5 dB，再写回控件。
+
+        夹取而不是拒收：手打 ``999`` 时如果什么都不做，界面显示 999、程序按 6 跑 ——
+        这种「看到的和生效的不一样」比夹取更糟（禁静默降级）。
+
+        ⚠️ **必须接住 `tk.TclError`**：用户在 Spinbox 里手打 ``abc``、或清空后按回车 /
+        失焦时，`var.get()`（DoubleVar）抛的是 `_tkinter.TclError`（"expected floating-point
+        number but got …"）而不是 ValueError。漏了它，异常就会逃出 Tk 回调 → crashlog 记
+        一条「Tk 回调异常」、设置**静默不保存**、控件留着脏值 —— 与上面那句承诺正好相反。
+        """
+        var = getattr(self, var_name, None)
+        if var is None:
+            mem = self._level_cfg_mem().get(key)
+            try:
+                return max(lo, min(hi, float(mem)))
+            except (TypeError, ValueError):
+                return 0.0
+        try:
+            val = float(var.get())
+        except (TypeError, ValueError, tk.TclError):
+            val = 0.0
+        val = round(max(lo, min(hi, val)) * 2.0) / 2.0
+        try:
+            var.set(val)
+        except Exception:                            # noqa: BLE001
+            pass
+        return val
+
+    def _on_level_change(self, _event=None) -> None:
+        """译音音量三件控件的落地点：读控件 → 落盘 → 同步内存 → 热更新代理与在跑的引擎。"""
+        if getattr(self, "_level_mode_combo", None) is None:
+            return                                   # 设置页还没建（headless / 未打开）
+        mode = self._level_mode_code()
+        fixed = self._level_read_db("_level_fixed_var", *_LEVEL_UI_FIXED_DB,
+                                    key="fixed_gain_db")
+        offset = self._level_read_db("_level_offset_var", *_LEVEL_UI_OFFSET_DB,
+                                     key="offset_db")
+        mem = self._level_cfg_mem()
+        changed = {k: v for k, v in (("mode", mode), ("fixed_gain_db", fixed),
+                                     ("offset_db", offset)) if mem.get(k) != v}
+        if not changed:
+            self._sync_level_controls_state()
+            return
+        mem.update(changed)
+        cfg = level_match.LevelConfig.from_dict(dict(mem))
+
+        def _fn(text):
+            for key, val in changed.items():
+                # ⚠️ 模式必须走 `_yaml_scalar`：裸词 `off` 是 YAML 1.1 的**布尔字面量**，
+                #    不加引号写回去，下次启动读到的就是 Python 的 False 而不是 "off"。
+                text = _yaml_set_or_create(
+                    text, ["output", "audio", "level", key],
+                    _yaml_scalar(val) if isinstance(val, str) else _fmt_scalar(val))
+            return text
+
+        # `_yaml_set_or_create`（不是 `_in_text`）：老用户的 config.yaml 里可能整段
+        # `level:` 都不存在，`_in_text` 遇到缺父键会静默 no-op —— 设置就永远存不下去。
+        _m(self)._yaml_write(_m(self).DEFAULT_CONFIG, _fn, err="保存译音音量")
+        self._apply_level_config(cfg)
+        print(f"[level] 译音音量已更新：模式 {mode} / 固定增益 {fixed:g} dB / "
+              f"相对麦克风 {offset:g} dB（逐句重算生效，不给译音加缓冲）", flush=True)
+        self._set_status("info", t("译音音量已更新（逐句生效）"))
+        self._sync_level_controls_state()
+
+    def _apply_level_config(self, cfg) -> None:  # noqa: ANN001
+        """热更新：代理换参考电平的参数、在跑的引擎换增益参数；都没在跑就只留一行痕。"""
+        p = self._proxy
+        if p is not None:
+            try:
+                p.set_level_config(cfg)
+            except Exception as exc:                 # noqa: BLE001 — 绝不因调参打断界面
+                print(f"[level] ⚠️ 代理热更新失败：{type(exc).__name__}: {exc}"
+                      "（已落盘，下次启动生效）", flush=True)
+        hit = 0
+        for e in (self._engines or []):
+            lm = getattr(e, "level_match", None)
+            if lm is None:
+                continue
+            try:
+                lm.set_config(cfg)                   # 逐句生效：下一句就用新参数
+                hit += 1
+            except Exception as exc:                 # noqa: BLE001
+                print(f"[level] ⚠️ 引擎热更新失败：{type(exc).__name__}: {exc}"
+                      "（已落盘，本轮仍用旧参数）", flush=True)
+        if p is None and not hit:
+            print("[level] 代理与引擎都没在跑：参数已落盘，下次启动生效", flush=True)
+
+    def _sync_level_controls_state(self) -> None:
+        """按模式置灰控件 + 刷新说明；`off` 时读数行显示 `—`（不参与计算）。"""
+        if getattr(self, "_level_mode_combo", None) is None:
+            return
+        mode = self._level_mode_code()
+        for name, on in (("_level_fixed_spin", mode == level_match.MODE_FIXED),
+                         ("_level_offset_spin", mode == level_match.MODE_FOLLOW_MIC)):
+            w = getattr(self, name, None)
+            if w is None:
+                continue
+            try:
+                w.configure(state=tk.NORMAL if on else tk.DISABLED)
+            except Exception:                        # noqa: BLE001
+                pass
+        hint = getattr(self, "_level_hint", None)
+        if hint is not None:
+            if mode == level_match.MODE_FIXED:
+                msg = t("固定增益：所有译音统一加减这么多 dB（负数=更轻）")
+            elif mode == level_match.MODE_FOLLOW_MIC:
+                msg = t("跟随麦克风：把译音对齐到你说话时的电平（跨设备免调）")
+            else:
+                msg = t("已关闭：译音逐字节原样输出（与升级前行为一致）")
+            try:
+                hint.configure(text=msg)
+            except Exception:                        # noqa: BLE001
+                pass
+        if mode == level_match.MODE_OFF:
+            self._level_set_readout(None, None, None)
+
+    def _level_set_readout(self, mic, tts, gain) -> None:  # noqa: ANN001
+        """把三个读数写进控件；一个都没有就整行 `—`（绝不显示半真半假的数）。"""
+        lbl = getattr(self, "_level_gain_lbl", None)
+        if lbl is not None:
+            try:
+                lbl.configure(text="—" if gain is None else f"{format_db(gain)} dB")
+            except Exception:                        # noqa: BLE001
+                pass
+        line = getattr(self, "_level_readout_lbl", None)
+        if line is None:
+            return
+        if mic is None and tts is None and gain is None:
+            text = "—"
+        else:
+            text = t("麦克风 {mic} dBFS ｜ 译音 {tts} dBFS ｜ 增益 {gain} dB",
+                     mic=format_db(mic), tts=format_db(tts), gain=format_db(gain))
+        try:
+            line.configure(text=text)
+        except Exception:                            # noqa: BLE001
+            pass
+
+    def _level_live_values(self):  # noqa: ANN201
+        """(麦克风, 译音, 增益)：有引擎就读引擎的 ``status()``，麦克风电平回落读代理。
+
+        两个来源都是**已经在跑的东西**：引擎的 status() 是句尾测量的快照，代理的
+        ``mic_reference_db`` 是直通线程顺带算的中位数 —— 读数绝不新开采集设备。
+        """
+        mic = tts = gain = None
+        for e in (getattr(self, "_engines", None) or []):
+            lm = getattr(e, "level_match", None)
+            if lm is None:
+                continue
+            try:
+                st = lm.status()
+            except Exception:                        # noqa: BLE001
+                continue
+            if mic is None:
+                mic = st.get("mic_db")
+            if tts is None:
+                tts = st.get("tts_db")
+            if gain is None:
+                gain = st.get("gain_db")
+        if mic is None:
+            p = getattr(self, "_proxy", None)
+            if p is not None:
+                try:
+                    mic = p.mic_reference_db
+                except Exception:                    # noqa: BLE001
+                    mic = None
+        return mic, tts, gain
+
+    def _cancel_level_tick(self, _event=None) -> None:  # noqa: ANN001
+        """取消挂起的 500ms 读数 tick（幂等）。设置窗 / 根窗被**销毁**时调用。
+
+        为什么不走 `_refresh_level_readout()` 的「不可见就停」那条路：它得先问一句
+        「窗口可见吗」才发现自己该停，而窗口已经销毁时连 `winfo_viewable()` 都要靠异常兜；
+        更要紧的是**挂起的 `after` 还挂在 root 上**，Tk 收尾时会带着一个已经死掉的命令名
+        到点，打一行 `invalid command name "..._refresh_level_readout"`（这是末影猫 L5 报的
+        收尾噪音）。`<Destroy>` 事件在「关程序销毁根窗」时也会传到设置窗上，所以这一处绑定
+        把两种收尾（销毁设置窗 / 销毁根窗）都盖到。
+
+        绑在设置窗上还有一个好处：生产路径（`withdraw`）**不销毁**窗口，所以这条绑定在
+        正常使用中一次都不会触发，纯兜底。
+        """
+        job = getattr(self, "_level_readout_job", None)
+        self._level_readout_job = None
+        root = getattr(self, "_root", None)
+        if job is None or root is None:
+            return
+        try:
+            root.after_cancel(job)
+        except Exception:                            # noqa: BLE001 — 收尾路径绝不抛
+            pass
+
+    def _settings_win_viewable(self) -> bool:
+        """设置窗此刻是不是真看得见（withdrawn / 已销毁都算看不见）。"""
+        win = getattr(self, "_settings_win", None)
+        if win is None:
+            return False
+        try:
+            return bool(win.winfo_viewable())
+        except Exception:                            # noqa: BLE001
+            return False
+
+    def _refresh_level_readout(self) -> None:
+        """500ms tick：刷实时读数并**自己再排一次**；窗口一不可见就地停下。
+
+        开关口径照 ``_sync_gate_level_probe()``：只在设置窗可见时跑。开/关设置窗各调
+        一次本函数就够了 —— 可见时它续期，不可见时它取消挂起的 job 且不再续期。
+        """
+        root = getattr(self, "_root", None)
+        job = getattr(self, "_level_readout_job", None)
+        self._level_readout_job = None
+        if job is not None and root is not None:
+            try:
+                root.after_cancel(job)
+            except Exception:                        # noqa: BLE001
+                pass
+        if root is None or not self._settings_win_viewable():
+            return
+        if self._level_mode_code() == level_match.MODE_OFF:
+            self._level_set_readout(None, None, None)
+        else:
+            self._level_set_readout(*self._level_live_values())
+        try:
+            self._level_readout_job = root.after(_LEVEL_TICK_MS,
+                                                 self._refresh_level_readout)
+        except Exception:                            # noqa: BLE001
+            self._level_readout_job = None
+
+    def _save_device_config(self, mic_name, loop_name, out_name) -> None: self._sync_audio_ctx(); gui_audio.save_device_config(self._audio_ctx, self._cfg, mic_name, loop_name, out_name)
+    def _on_gate_change(self, _v=None) -> None:
+        self._sync_audio_ctx(); gui_audio.on_gate_change(self._audio_ctx, self._cfg, self._root, self._engines, self._gate_holder); self._gate_probe = self._gate_holder["probe"]; self._gate_save_job = self._gate_holder["save_job"]
+    def _apply_gate_live(self) -> None: self._sync_audio_ctx(); gui_audio.apply_gate_live(self._audio_ctx, self._engines)
+    def _save_gate_cfg(self) -> None: self._sync_audio_ctx(); gui_audio.save_gate_cfg(self._audio_ctx, self._cfg, self._gate_holder); self._gate_save_job = self._gate_holder["save_job"]
+    def _gate_probe_wanted(self) -> bool: self._sync_audio_ctx(); return gui_audio.gate_probe_wanted(self._audio_ctx, self._engines)
+    def _sync_gate_level_probe(self) -> None: self._sync_audio_ctx(); gui_audio.sync_gate_level_probe(self._audio_ctx, self._cfg, self._gate_holder); self._gate_probe = self._gate_holder["probe"]
+    def _stop_gate_probe(self) -> None: self._sync_audio_ctx(); gui_audio.stop_gate_probe(self._audio_ctx, self._gate_holder); self._gate_probe = self._gate_holder["probe"]
+    def _gate_level_db(self): self._sync_audio_ctx(); return gui_audio.gate_level_db(self._audio_ctx, self._engines, self._gate_holder)
+    def _refresh_gate_level(self) -> None:
+        self._sync_audio_ctx(); gui_audio.refresh_gate_level(self._audio_ctx, self._engines, self._gate_holder); self._gate_level_hold = self._gate_holder.get("level_hold", 0)
