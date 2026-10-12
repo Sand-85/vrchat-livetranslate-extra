@@ -265,7 +265,9 @@ HIDDEN=(
 # 带二进制/数据文件的库 → 连数据一起收
 COLLECT_ALL=(xr pythonosc)
 # Linux 产物里**不允许**出现 Windows 独占实现（与 build_exe.py 的 EXCLUDE_WIN 镜像）
-EXCLUDES=(vlt.platform.win vlt.output.openvr_overlay openvr pyaudiowpatch pycaw comtypes sounddevice)
+# ⚠️ 与 build_exe.py 的 EXCLUDE_WIN 镜像：新增 Windows 独占模块时两处都要补，
+#    scripts/check_platform_purity.py 的 FORBIDDEN 清单与 tests/test_platform_purity.py 会盯着。
+EXCLUDES=(vlt.platform.win vlt.output.openvr_overlay vlt.output.win_d3d11 openvr pyaudiowpatch pycaw comtypes sounddevice)
 
 PYI_ARGS=(
     --noconfirm --clean --noupx --onedir

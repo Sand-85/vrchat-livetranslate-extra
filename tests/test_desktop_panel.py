@@ -273,9 +273,9 @@ def test_settings_sliders_really_schedule_save() -> None:
     后端没得热重载，看着就是「设置不生效」。根因：拆分时 gui_desktop 里另留了一份
     schedule_*_save，Tk root 从没传进去（`if root is not None` 直接空转）→ 全是死路。
 
-    ⚠️ 本用例**不绕过防抖**（同文件 test_desktop_sliders_save_own_keys_only_when_touched
-    是直接调 _save_*_cfg()，所以抓不到这个）：调真实滑块处理器，再推 Tk 事件循环让
-    after(300) 到期，最后验配置文件真的变了。
+    ⚠️ 本用例**不绕过防抖**（同文件 `test_desktop_sliders_save_own_keys_only_when_touched`
+    是直接调 `_save_*_cfg()`，所以抓不到这个）：调真实滑块处理器，再推 Tk 事件循环让
+    `after(300)` 到期，最后验配置文件真的变了。
     """
     import time as _time
 
@@ -302,7 +302,6 @@ def test_settings_sliders_really_schedule_save() -> None:
     gui = None
     try:
         gui = TranslationGUI()
-        gui._root.withdraw()          # 本仓库测试口径：不弹可见窗口
         if gui._update_check_job is not None:
             gui._root.after_cancel(gui._update_check_job)
             gui._update_check_job = None
@@ -360,16 +359,17 @@ def test_wrist_page_falls_back_to_fewer_columns_when_narrow() -> None:
     import vlt.config as _cfg_mod
     import vlt.i18n as _i18n
     import vlt.gui as _gui_mod
-    import vlt.gui_layout as _layout_mod
     import vlt.ui_theme as _ui_theme_mod
 
     _make_gui_sandbox()
+    sandbox = yaml.safe_load(GUI_SANDBOX.read_text(encoding="utf-8"))
+    sandbox.setdefault("ui", {})["scale"] = 1.0  # 字号与几何一起固定，不能只 mock 几何。
+    GUI_SANDBOX.write_text(yaml.safe_dump(sandbox, allow_unicode=True), encoding="utf-8")
     saved = (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG, _i18n.detect_system_language,
-             _ui_theme_mod.SETTINGS_WIDTH, _layout_mod._dpi_scale)
+             _ui_theme_mod.SETTINGS_WIDTH)
     _cfg_mod.DEFAULT_CONFIG = GUI_SANDBOX
     _gui_mod.DEFAULT_CONFIG = GUI_SANDBOX
     _ui_theme_mod.SETTINGS_WIDTH = 420       # 比五种语言里最窄的还窄
-    _layout_mod._dpi_scale = lambda gui: 1.0   # 钉死缩放，别让宿主 DPI 干扰
     _i18n.detect_system_language = lambda: "zh"
 
     from vlt.gui import TAB_INSET_X, TranslationGUI
@@ -381,6 +381,7 @@ def test_wrist_page_falls_back_to_fewer_columns_when_narrow() -> None:
             gui._root.after_cancel(gui._update_check_job)
             gui._update_check_job = None
         gui._root.update_idletasks()
+        assert abs(float(gui._root.tk.call("tk", "scaling")) - 96 / 72) < .02
         budget = 420 - 2 * TAB_INSET_X - 24       # 与 vlt/gui.py 里同一套算法
         got = int(gui._tune_grid.winfo_reqwidth())
         cols = len({int(c.grid_info()["column"]) for c in gui._tune_grid.winfo_children()})
@@ -393,7 +394,7 @@ def test_wrist_page_falls_back_to_fewer_columns_when_narrow() -> None:
             except Exception:  # noqa: BLE001
                 pass
         (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG, _i18n.detect_system_language,
-         _ui_theme_mod.SETTINGS_WIDTH, _layout_mod._dpi_scale) = saved
+         _ui_theme_mod.SETTINGS_WIDTH) = saved
     print("  内容区变窄时手腕屏页自动降列（420px → 1 列，不越界）OK")
 
 

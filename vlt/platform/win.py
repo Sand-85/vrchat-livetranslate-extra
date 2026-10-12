@@ -23,7 +23,6 @@ log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 设备枚举
 
-
 _THREAD_PRIORITY = {"idle": -15, "below": -1, "normal": 0, "above": 1, "highest": 2}
 
 
@@ -47,6 +46,7 @@ def bump_thread_priority(level: str = "above") -> bool:
         return bool(k32.SetThreadPriority(k32.GetCurrentThread(), prio))
     except Exception:                                    # noqa: BLE001
         return False
+
 
 def query_devices() -> list[dict]:
     """sounddevice 的设备表 —— **只保留 Windows 已启用（WASAPI）那一套**。
@@ -340,7 +340,10 @@ class PyaudioLoopbackSource(QueueAudioSource):
         while not stop.is_set():
             try:
                 avail = self._stream.get_read_available()
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                if not stop.is_set():
+                    print(f"[loopback] 采集线程退出（poll）：{type(exc).__name__} "
+                          f"errno={getattr(exc, 'errno', None)}", flush=True)
                 break
             if avail <= 0:
                 time.sleep(0.01)
@@ -348,7 +351,10 @@ class PyaudioLoopbackSource(QueueAudioSource):
             try:
                 data = self._stream.read(min(avail, self._chunk_max),
                                          exception_on_overflow=False)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                if not stop.is_set():
+                    print(f"[loopback] 采集线程退出（read）：{type(exc).__name__} "
+                          f"errno={getattr(exc, 'errno', None)}", flush=True)
                 break
             self._emit(data)
 
