@@ -499,6 +499,7 @@ class VoicelabMixin:
         p = self._lab_preset()
         if p is None:
             return
+        self._lab_preset_key = p.key        # 克隆完成后按它取这条预设随带的通联音
         sample = voice_lab.find_preset_sample(APP_DIR, p)
         if sample is not None:
             self._lab_preset_run(action, sample)
@@ -773,6 +774,18 @@ class VoicelabMixin:
                 res = voice_lab.enroll_or_reuse(
                     kw["name"], data_url, api_key=kw["api_key"],
                     base_url=kw["base_url"], workspace_id=kw["ws_id"])
+                # ★ 预设克隆：顺手把它随带的通联音弄到本地（先复制打包内的，缺了才联网），
+                #   然后把路径随结果带回主线程去写配置并**强绑定**到这条新音色。
+                pkey = getattr(self, "_lab_preset_key", "")
+                preset = next((x for x in self._lab_presets if x.key == pkey), None)
+                if preset is not None and getattr(preset, "sfx", ()):
+                    try:
+                        got = voice_lab.fetch_preset_sfx(APP_DIR, preset,
+                                                         bundled=(BUNDLE_DIR, APP_DIR))
+                        res.sfx_paths = {str(k): str(v) for k, v in got.items()}
+                    except Exception as exc:                     # noqa: BLE001
+                        print(f"[gui] 通联音本地化失败（不影响克隆）：{type(exc).__name__}: {exc}",
+                              flush=True)
                 self._q.put(("voice_lab", "clone", True, "", res))
             else:
                 voice_lab.delete_voice(kw["voice"], api_key=kw["api_key"],
@@ -902,10 +915,33 @@ class VoicelabMixin:
             res = payload
             # 把名字记到本地登记表 → 列表里显示人话而不是一长串 id（下次刷新也认）
             voice_lab.save_label(APP_DIR, res.voice, res.name)
+            # ★ 预设随带的通联音：落到本地后写进配置，并把 sfx_voice **强绑定到刚克隆出的
+            #   这条音色**上 —— 于是每个用户克隆同一预设，都得到「自己那条音色 + 本地通联音」。
+            sfx = dict(getattr(res, "sfx_paths", None) or {})
+            if sfx:
+                if sfx.get("on2.wav"):
+                    self._write_leaf(["text_input", "tts", "open_sfx"], sfx["on2.wav"],
+                                     "绑定开台音", create=True)
+                if sfx.get("off2.wav"):
+                    self._write_leaf(["text_input", "tts", "close_sfx"], sfx["off2.wav"],
+                                     "绑定收台音", create=True)
+                self._write_leaf(["text_input", "tts", "sfx_voice"], res.voice,
+                                 "通联音强绑定音色", create=True)
+                if isinstance(self._cfg.text_input, dict):
+                    tts_cfg = self._cfg.text_input.setdefault("tts", {})
+                    if sfx.get("on2.wav"):
+                        tts_cfg["open_sfx"] = sfx["on2.wav"]
+                    if sfx.get("off2.wav"):
+                        tts_cfg["close_sfx"] = sfx["off2.wav"]
+                    tts_cfg["sfx_voice"] = res.voice
+                print(f"[gui] 通联音已就位并强绑定到 {res.voice!r}："
+                      f"open={sfx.get('on2.wav')} close={sfx.get('off2.wav')}", flush=True)
             self._lab_last[res.voice] = ""
             self._lab_banner = (t("账号里已有同名音色，直接复用：{v}（没有再花钱）", v=res.name)
                                 if res.reused else
                                 t("音色已克隆：{v}（0.01 元，服务端审核中）", v=res.name))
+            if getattr(res, "sfx_paths", None):
+                self._lab_banner += "；" + t("通联音已就位并绑定到这条音色")
             self._lab_set_status(self._lab_banner)
             print(f"[gui] 声音复刻{'复用' if res.reused else '创建'}成功 → {res.voice!r}"
                   f"（名字 {res.name!r}）", flush=True)

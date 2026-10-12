@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""声音设计客户端 `vlt/voice_lab.py` 的离线验收（假 HTTP，零花费、不碰网络）。
+"""声音设计客户端 `vlt/vl.py` 的离线验收（假 HTTP，零花费、不碰网络）。
 
 重点钉住三件事：
   ① **不重复花钱**：同名音色已存在时 `create_or_reuse()` 只查不建（用户反复点也不会反复计费）；
@@ -827,6 +827,81 @@ def test_sample_update_check() -> bool:
     return ok
 
 
+def test_preset_sfx() -> bool:
+    """18) 预设随带的通联音：URL 构造 / 优先复制打包（不联网）/ sha 校验 / 坏缓存重下 / 坏文件只跳过。"""
+    import hashlib as _hl
+    import io
+    import tempfile
+    from pathlib import Path as _P
+
+    ok = True
+    repo = _P(__file__).resolve().parents[1]
+    p = next(x for x in vl.BUILTIN_CLONE_PRESETS if x.key == "my_clip_4x")
+    names = [n for n, _s in p.sfx]
+    ok &= names == ["on2.wav", "off2.wav"]
+    print(f"    内置预设随带音频：{names}")
+
+    urls = vl.preset_sfx_urls("on2.wav")
+    ok &= len(urls) >= 3 and all(u.endswith("/assets/sfx/on2.wav") for u in urls)
+    print(f"    地址数 {len(urls)}，示例 {urls[0]}")
+
+    def boom(*_a, **_k):
+        raise AssertionError("这一步不该联网")
+
+    # ① 打包里有 → 直接复制，**不联网**（opener 直接抛来证明）
+    with tempfile.TemporaryDirectory() as td:
+        got = vl.fetch_preset_sfx(td, p, bundled=(repo,), opener=boom)
+        ok &= sorted(got) == ["off2.wav", "on2.wav"]
+        for n, path in got.items():
+            want = dict(p.sfx)[n]
+            ok &= path.is_file() and _hl.sha256(path.read_bytes()).hexdigest() == want
+        print(f"    从打包复制：{sorted(got)}（sha 都对，未联网）")
+
+        # ② 已有且 sha 对 → 复用（同样不联网）
+        got2 = vl.fetch_preset_sfx(td, p, bundled=(), opener=boom)
+        ok &= sorted(got2) == ["off2.wav", "on2.wav"]
+        print("    已有缓存 → 直接复用（未联网）")
+
+        # ③ 缓存被改坏 → 联网重下（假 opener 给正确字节）
+        dest = vl.sfx_cache_dir(td) / "on2.wav"
+        dest.write_bytes(b"broken")
+        real = (repo / "assets" / "sfx" / "on2.wav").read_bytes()
+
+        class _Resp(io.BytesIO):
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *_exc):
+                return False
+
+        def opener(_req, timeout=0.0):                       # noqa: ARG001
+            return _Resp(real)
+
+        got3 = vl.fetch_preset_sfx(td, p, bundled=(), opener=opener)
+        ok &= dest.read_bytes() == real
+        print(f"    坏缓存 → 联网重下并修好：{sorted(got3)}")
+
+        # ④ 联网也挂 + 打包也没有 → 只跳过那一个，**不抛**
+        def dead(*_a, **_k):
+            raise OSError("网络不可达")
+
+        (vl.sfx_cache_dir(td) / "on2.wav").write_bytes(b"broken")
+        got4 = vl.fetch_preset_sfx(td, p, bundled=(), opener=dead)
+        ok &= "on2.wav" not in got4 and "off2.wav" in got4
+        print(f"    一个挂掉只跳过它，不抛：{sorted(got4)}")
+
+    # ⑤ 强绑定判定：sfx_voice = 这条音色才播
+    from vlt import sfx as _sfx
+    vid = "qwen-audio-3.0-tts-flash-metrov4-0c80786e559a4215ba83b66e9a4b2a83"
+    ok &= _sfx.bound_to_current_voice({"voice": vid, "sfx_voice": vid}) is True
+    ok &= _sfx.bound_to_current_voice({"voice": "Momo", "sfx_voice": vid}) is False
+    ok &= _sfx.bound_to_current_voice({"voice": vid, "sfx_voice": ""}) is True
+    print("    强绑定判定：同音色播 / 别的音色不播 / 没绑定谁都不绑")
+    if not ok:
+        print("    ✗ 预设通联音用例有失败项")
+    return bool(ok)
+
+
 if __name__ == "__main__":
     print("test_voice_lab:")
     print(" 1) 音色名规范化")
@@ -865,5 +940,7 @@ if __name__ == "__main__":
     ok &= test_preset_fetch()
     print(" 17) 启动查更新（清单驱动：最新不下载 / 过期自动拉 / 取不到就抛 / 结构校验）")
     ok &= test_sample_update_check()
+    print(" 18) 预设随带的通联音（本地化 + 强绑定）")
+    ok &= test_preset_sfx()
     assert ok, "voice_lab 用例失败（见上）"
     print("ALL PASSED")

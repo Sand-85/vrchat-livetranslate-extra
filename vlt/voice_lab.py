@@ -138,6 +138,8 @@ class VoiceCreation:
     preview_wav: bytes = b""
     reused: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+    # 预设随带的通联音落到本地的路径（{文件名: 绝对路径}）；非预设克隆时为空。
+    sfx_paths: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------- 纯函数（离线可测）
@@ -739,6 +741,10 @@ class ClonePreset:
     sample_name: str = ""                       # 期望的样本文件名（本地按名找 / 远端按名拉）
     sample_sha256: str = ""                     # 拉回来的音频必须对得上（防镜像串味/半截文件）
     labels: dict = field(default_factory=dict)  # 其它语言的显示名（缺省回落 label）
+    # 这条预设随带的通联音（开关台音）：((文件名, sha256), ...)。
+    # 克隆完会把它弄到应用数据目录，并把 sfx_voice 强绑定到**用户刚克隆出的那条音色**上，
+    # 于是每个用户克隆同一预设都会得到「自己那条音色 + 本地通联音」。
+    sfx: tuple = ()
 
 
 # 内置预设：2026-10-11 复刻现役 MetroPolice 用的那份拼接范本
@@ -765,6 +771,10 @@ BUILTIN_CLONE_PRESETS: tuple[ClonePreset, ...] = (
         sample_name="source_sample_v4.wav",
         sample_sha256="ea5f7528abfc8397878f018733abc1530e09826d9c7a2d2f93dd3f25b05252e3",
         labels={},          # 用户点名就叫 MetroPolice（各语言统一用这个英文名）
+        sfx=(
+            ("on2.wav", "fd21b0919a8dc6257c4e79a2ca7ccabdbbe069b0bf482a335434c1312c1c6fbe"),
+            ("off2.wav", "d61e1b46455369d5e4f8128f8087ba06fb7259ded5fa9098f31156b7e534fe8b"),
+        ),
     ),
 )
 
@@ -894,6 +904,72 @@ def preset_sample_urls(preset: ClonePreset) -> list[str]:
 def preset_cache_path(app_dir, preset: ClonePreset) -> Path:
     """拉回来放哪 —— 与试听缓存同一个目录，`find_preset_sample` 天然认它。"""
     return preview_dir(app_dir) / str(preset.sample_name or "preset_sample.wav")
+
+
+def preset_sfx_urls(name: str) -> list[str]:
+    """通联音的候选下载地址：与样本同一套镜像，只是把目录从 vo_sample/ 换成 assets/sfx/。"""
+    n = str(name or "").strip()
+    if not n:
+        return []
+    return [base.replace("/vo_sample/", "/assets/sfx/") + n for _label, base in PRESET_MIRRORS]
+
+
+def sfx_cache_dir(app_dir) -> Path:
+    """通联音落到本地哪 —— 应用数据目录下的 sfx/（用户可见、可自己换）。"""
+    return preview_dir(app_dir) / "sfx"
+
+
+def _sha256_file(path: Path) -> str:
+    """文件的 sha256（小文件，直接读尽）。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for blk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def fetch_preset_sfx(app_dir, preset: ClonePreset, *, bundled=(), opener=None,
+                     timeout: float = 60.0) -> dict[str, Path]:
+    """把预设随带的通联音弄到本地，返回 `{文件名: 路径}`。
+
+    顺序：本地已有一份且 sha 对 → 直接用；不然从 `bundled` 目录（打包内 assets/sfx）复制
+    （离线、零延迟）；再不行才按镜像联网下载并校验 sha256。
+    单个文件失败**只跳过那一个**（打日志，不抛）—— 通联音是锦上添花，绝不能把克隆带挂。
+    """
+    out: dict[str, Path] = {}
+    pairs = tuple(preset.sfx or ())
+    if not pairs:
+        return out
+    dest_dir = sfx_cache_dir(app_dir)
+    for name, sha in pairs:
+        want = str(sha or "").strip().lower()
+        dest = dest_dir / str(name)
+        try:
+            if dest.is_file() and _sha256_file(dest) == want:
+                out[str(name)] = dest
+                continue
+            copied = False
+            for base in tuple(bundled):
+                src = Path(base) / "assets" / "sfx" / str(name)
+                if src.is_file() and _sha256_file(src) == want:
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(src.read_bytes())
+                    print(f"[voice_lab] 通联音已从打包复制到本地：{name}", flush=True)
+                    out[str(name)] = dest
+                    copied = True
+                    break
+            if copied:
+                continue
+            raw = _first_verified(preset_sfx_urls(str(name)), {want}, timeout=timeout,
+                                  opener=opener)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(raw)
+            print(f"[voice_lab] 通联音已拉取：{name}（{len(raw) / 1024:.0f} KB）", flush=True)
+            out[str(name)] = dest
+        except Exception as exc:                                     # noqa: BLE001
+            print(f"[voice_lab] 通联音处理失败（不影响克隆）：{name} → "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+    return out
 
 
 def _http_get_bytes(url: str, *, timeout: float, opener=None) -> bytes:

@@ -647,4 +647,5 @@ STRINGS: dict[str, str] = {
         "Translated Output is unchecked, so Translated mode will be silent (tick it in the output row and try again)",
     "🎙 原声": "🎙 Original",
     "🗣 译音": "🗣 Translated",
+    '通联音已就位并绑定到这条音色': '; radio SFX are in place and bound to this voice',
 }
