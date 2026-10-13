@@ -187,9 +187,6 @@ class VoicelabMixin:
         self._lab_save_btn = ttk.Button(btns, text=t("保存为当前音色"),
                                         command=self._on_lab_save, state=tk.DISABLED)
         self._lab_save_btn.pack(side=tk.LEFT, padx=(6, 0))
-        self._lab_del_btn = ttk.Button(btns, text=t("删除所选"),
-                                       command=self._on_lab_delete, state=tk.DISABLED)
-        self._lab_del_btn.pack(side=tk.LEFT, padx=(6, 0))
         # 价格直接印在按钮旁：点下去花的是**用户自己的钱**，别藏在文档里
         ttk.Label(body, text=t("0.2 元/个（北京地域开通后 90 天内前 10 次免费，创建失败不计费）"),
                   style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP).pack(
@@ -277,6 +274,12 @@ class VoicelabMixin:
         self._lab_refresh_btn = ttk.Button(lcol, text=t("刷新列表"),
                                            command=self._on_lab_refresh)
         self._lab_refresh_btn.pack(fill=tk.X, pady=(4, 0))
+        # 「删除所选」就摆在这片「过往生成（生成记录）」旁边 —— 它删的就是列表里选中的那一条，
+        # 跟「试听所选 / 刷新列表」同列，不用回上面生成区的按钮行去找。
+        # 不可恢复：`_on_lab_delete` 里先弹确认，没选中时按钮是灰的（没反应比删错好）。
+        self._lab_del_btn = ttk.Button(lcol, text=t("删除所选"),
+                                       command=self._on_lab_delete, state=tk.DISABLED)
+        self._lab_del_btn.pack(fill=tk.X, pady=(4, 0))
 
         # 试听的花费提示：**常显**，不靠点击后的状态行 —— 用户点之前就该知道要不要花钱。
         # 只写「试听免费」是不诚实的（首次试听一条已有音色确实要合成一句）。

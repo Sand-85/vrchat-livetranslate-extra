@@ -1203,6 +1203,45 @@ def test_sample_check_wiring() -> bool:
     return ok
 
 
+def test_delete_button_beside_history() -> bool:
+    """「删除所选」必须就在**生成记录（过往生成）那一片**里，与「试听所选 / 刷新列表」同列。
+
+    为什么单独立一条：headless 用例注入控件替身、不跑 `_build_settings_voice`，
+    所以按钮「摆在哪儿」没人守 —— 改布局时很容易把它挪回上面的生成区按钮行（用户就找不到了）。
+    这里用**真的** Tk（root 隐藏，不弹窗）把音色页搭一遍，验三层关系：
+      ① 按钮归列表那一行的列（`lcol`）管；② 与试听/刷新同一个父容器；
+      ③ 列表上方的标题确实是「过往生成」。
+    """
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.withdraw()                                   # 真 Tk，但不弹窗
+    try:
+        gui = TranslationGUI(headless=True)
+        gui._root = root                              # type: ignore[assignment]
+        body = ttk.Frame(root)
+        gui._build_settings_voice(body)
+
+        btn = gui._lab_del_btn
+        lrow = gui._lab_list.master                   # 列表那一行（列表 + 右侧列）
+        ok_col = btn.master is gui._lab_preview_btn.master is gui._lab_refresh_btn.master
+        ok_row = btn.master.master is lrow
+        titles = [w.cget("text") for w in lrow.master.winfo_children()
+                  if isinstance(w, ttk.Label)]
+        ok_title = any("过往生成" in str(t) for t in titles)
+        print(f"  删除所选与试听/刷新同列：{ok_col}；与列表同一行：{ok_row}；"
+              f"那一片的标题是「过往生成」：{ok_title}")
+        assert ok_col, "「删除所选」没跟「试听所选 / 刷新列表」同列"
+        assert ok_row, "「删除所选」不在生成记录那一行里"
+        assert ok_title, f"列表那一片的标题不像「过往生成」：{titles}"
+        assert btn.cget("text") == _i18n.t("删除所选"), "按钮文案不是「删除所选」"
+        assert str(btn.cget("state")) == "disabled", "没选中时「删除所选」该是灰的"
+    finally:
+        root.destroy()
+    return True
+
+
 if __name__ == "__main__":
     print("test_voice_lab_gui:")
     print(" 1) 生成 → 列表 → 保存（model+voice 一起写）")
@@ -1243,5 +1282,7 @@ if __name__ == "__main__":
     ok &= test_preset_fetch_on_demand()
     print("17) 启动查样本更新（有更新才提示 / 失败不打扰 / 挂钩真跑）")
     ok &= test_sample_check_wiring()
+    print("18) 布局：「删除所选」就在生成记录（过往生成）旁边")
+    ok &= test_delete_button_beside_history()
     assert ok, "音色页接线用例失败（见上）"
     print("ALL PASSED")
