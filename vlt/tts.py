@@ -81,8 +81,15 @@ TRIM_END_GAP_S = 0.35
 #   实测：语音帧 ~0.9s 内全部到齐，而 83ms 的尾帧有时被服务端压到 ~1.9s 才发；
 #   卡 0.35s 且末帧安静就收尾 → 收台音最多比话音晚 ~0.35s（原来近 1s）。
 #   句中真卡 0.35s 时末帧是语音（不是安静帧）→ 不会误判截断。
-# 连续「纯数字零」样本达到这么多 → 这句真的说完了（尾帧实测是纯零；句中停顿带底噪，不会误判）。
+# 连续「纯数字零」样本达到这么多 **且** 服务端随后也停了 grace 秒 → 这句真的说完了。
+#   ⚠️ 真机踩过（logs/gui_20261013_220841.log，2026-10-13）：
+#     句子「我之前帮人弄过，俩人弄半宿变弄边骂」（17 字）在**逗号处**服务端吐了 ≥250ms **纯零**，
+#     只看纯零长度的旧口径当场「认定说完」→ 后半句整段丢掉（日志：已出声 1.2s，而服务端其实给了
+#     163634 字节 ≈3.4s；同场其它 5 句时长都随字数增长，只有这句被截）。
+#     所以判据改成「纯零够长 **且** 队列也空了」：句中停顿后服务端马上会继续发片 → 不误判；
+#     真尾时服务端要么不再发片、要么把尾帧压到 ~1.9s 才发 → grace 里就收尾，收台音照旧贴得住。
 TRIM_END_ZERO_MS = 250
+TRIM_END_ZERO_GRACE_S = 0.15
 
 
 def trim_trailing_silence(pcm: bytes, *, rate: int = SAMPLE_RATE,
@@ -700,14 +707,32 @@ def _stream_inference(text: str, *, voice: str, model: str, host: str, api_key: 
     zero_end = max(1, int(SAMPLE_RATE * TRIM_END_ZERO_MS / 1000.0)) * 2
     while True:
         try:
-            item = q.get(timeout=TRIM_END_GAP_S)
+            item = q.get(timeout=TRIM_END_ZERO_GRACE_S)
         except queue.Empty:
-            # 断供一段时间了。最后一帧整帧安静 → 那就是被压着的尾帧，不等了。
-            # （最后一帧是语音 → 可能只是网络卡顿，继续等，别把句子截断。）
-            if got_audio and last_was_quiet:
-                _note(f"流式提前收尾（{TRIM_END_GAP_S}s 无新帧，末帧为静音尾）")
-                break
-            continue
+            # 服务端这一小会儿没新片了。
+            # ① 此前见过够长的纯零 → 那是真尾（说完了），立刻收尾（别等它把尾帧压到 ~1.9s）；
+            # ② 否则再按原口径等满 TRIM_END_GAP_S，看末帧是不是安静的尾帧。
+            # ⚠️ 纯零判据**只能**在这里用：句中停顿同样是一段纯零，但服务端随后会继续发片，
+            #    在取片路径上直接判会把后半句整段丢掉（2026-10-13 真机踩过，见 TRIM_END_ZERO_MS 注释）。
+            if got_audio and zero_bytes >= zero_end:
+                _note(f"流式提前收尾（已连续 {TRIM_END_ZERO_MS}ms 纯零且 "
+                      f"{TRIM_END_ZERO_GRACE_S}s 无新片，认定说完）")
+                # 与「服务端还在压尾帧」的旧口径一致：这里**直接收尾走人**，
+                # 不去 th.join 等服务端（实测会白等 ~0.9s：服务端第二次卡顿才开始说 task-finished，
+                # 于是收台音跟着晚 ~0.9s —— 用例 test_tts_inference 的 1.6s 断言就盯着这个）。
+                # 后台取片线程是 daemon，剩下的帧只会进没人读的队列，自己结束。
+                if len(held) > pad:
+                    yield held[:pad]
+                return
+            try:
+                item = q.get(timeout=max(0.0, TRIM_END_GAP_S - TRIM_END_ZERO_GRACE_S))
+            except queue.Empty:
+                # 断供一段时间了。最后一帧整帧安静 → 那就是被压着的尾帧，不等了。
+                # （最后一帧是语音 → 可能只是网络卡顿，继续等，别把句子截断。）
+                if got_audio and last_was_quiet:
+                    _note(f"流式提前收尾（{TRIM_END_GAP_S}s 无新帧，末帧为静音尾）")
+                    break
+                continue
         if item is None:
             break
         got_audio = True
@@ -725,16 +750,10 @@ def _stream_inference(text: str, *, voice: str, model: str, host: str, api_key: 
                 cut = (len(held) - hold_max) // 2 * 2
                 yield held[:cut]
                 held = held[cut:]
-        # ★ 纯零连续时长：整帧全零就累加，否则重置为该帧末尾的纯零长度
+        # ★ 纯零连续时长：整帧全零就累加，否则重置为该帧末尾的纯零长度。
+        #   注意：**只累计、不在这里判收尾** —— 判收尾放到上面「取不到片」的分支里（见那里的注释）。
         zr = trailing_digital_zero_run(item)
         zero_bytes = zero_bytes + len(item) if zr == len(item) else zr
-        if got_audio and zero_bytes >= zero_end:
-            _note(f"流式提前收尾（已连续 {TRIM_END_ZERO_MS}ms 纯零，认定说完）")
-            if held:
-                if len(held) > pad:
-                    yield held[:pad]
-                held = b""
-            return
     th.join(timeout=1.0)
     if err:
         raise TtsError(str(err[0]))

@@ -255,7 +255,7 @@ parts2 = list(tts.synthesize_stream("x", voice="v", model="qwen-audio-3.0-tts-fl
                                     timeout=15.0))
 elapsed = time.monotonic() - t_start
 joined2 = b"".join(parts2)
-check("收尾没有等服务端第二次卡顿（未满 1.6s）", elapsed < 1.55)
+check(f"收尾没有等服务端第二次卡顿（未满 1.6s，实测 {elapsed:.2f}s）", elapsed < 1.55)
 check("仍保留语音 + 少量余量", 120 <= _ms(joined2) <= 220)
 
 # ---------- 汇总 ----------
