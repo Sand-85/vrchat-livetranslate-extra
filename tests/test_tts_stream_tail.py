@@ -11,9 +11,11 @@
 只有这一句 17 字 → 1.2s，收尾理由也是**唯一一次**「已连续 250ms 纯零」——
 落点正好在逗号后（前 6 字「我之前帮人弄过」）→ 后半句整段丢了。
 
-这里用假的 `synthesize_inference` 脚本化喂帧，离线复现两件事：
-  A) 句中一段 300ms 纯零之后**服务端还在继续发片** → 后半句必须留在输出里（本用例主回归）；
-  B) 真尾（纯零够长 + 服务端不再发片，但也不立刻关流）→ 仍要提前收尾，别把 900ms 静音全吐出去。
+这里用假的 `synthesize_inference` 脚本化喂帧，离线复现三件事：
+  A) 句中一段 300ms 纯零之后**服务端还在继续发片** → 后半句必须留在输出里；
+  C) **长文本**：句中 250ms 纯零 + **0.4s 不送片**（服务端在分句处真的会这样）→ 同样不许截断
+     （2026-10-15 真机：51 字只推出 4.1s，而服务端给了 11.08s 的音频 —— 就是被这条判据切掉的）；
+  B) 真尾（**1.0s 以上**不送片 + 末帧安静）→ 仍要提前收尾，别把静音全吐出去、也别白等 task-finished。
 """
 from __future__ import annotations
 
@@ -45,17 +47,21 @@ def _zeros(ms: int) -> bytes:
     return bytes(2 * int(RATE * ms / 1000.0))
 
 
-def _run(frames: list[bytes], *, hold_s: float) -> bytes:
+def _run(script: list, *, hold_s: float) -> bytes:
     """跑真的 `_stream_inference`，只把「服务端发片」这一层换成脚本。
 
-    `hold_s` = 喂完帧之后**先不关流**多久（真机：尾帧有时压到 ~1.9s，且流不立刻关）。
+    脚本里：`bytes` = 送一片；`float` = **这一段不送片**（秒）—— 服务端在分句处的真实停顿。
+    `hold_s` = 喂完之后**先不关流**多久（真机：尾帧有时压到 ~1.9s，且流不立刻关）。
     """
     real = tts.synthesize_inference
 
     def fake(text: str, **kw) -> None:                             # 扮演服务端
         cb = kw["on_chunk"]
-        for f in frames:
-            cb(f)
+        for it in script:
+            if isinstance(it, float):                              # 停顿：不送片
+                time.sleep(it)
+                continue
+            cb(it)
             time.sleep(0.01)
         time.sleep(hold_s)
 
@@ -87,7 +93,12 @@ def main() -> int:
     check("句中停顿不再截断后半句（两段语音都在）", _speech_bytes(out_a) >= one * 2 * 0.95)
     check("A 路总长够（前半 + 后半）", len(out_a) >= one * 2)
 
-    # B) 真尾：纯零够长 + 服务端不再发片（也不立刻关流）→ 仍提前收尾
+    # C) 长文本：句中 250ms 纯零 + 0.4s 不送片（真机就是被这个组合切掉的）→ 仍不许截断
+    out_c = _run([_speech(400), _zeros(250), 0.4, _speech(400), _zeros(120)], hold_s=0.0)
+    check("长文本的句中停顿（250ms 纯零 + 0.4s 不送片）不再截断",
+          _speech_bytes(out_c) >= one * 2 * 0.95)
+
+    # B) 真尾：≥1.0s 不送片 + 末帧安静 → 仍提前收尾（也不去等 task-finished）
     out_b = _run([_speech(400), _zeros(900)], hold_s=1.5)
     check("真尾仍提前收尾（没把 900ms 静音全吐出去）", len(out_b) < one + int(RATE * 0.5) * 2)
     check("真尾仍保住了话音", _speech_bytes(out_b) >= one * 0.95)

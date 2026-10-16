@@ -228,9 +228,11 @@ check("整帧语音 → 0", tts.trailing_digital_zero_run(_mk(80, 0, amp=9000)) 
 
 
 def handler_stall(ws) -> None:
-    """语音帧 → 然后**卡住 0.9s** 才补发尾帧（实测服务端会压着不到 1s）。
+    """语音帧 → 卡住 0.9s → 补发尾帧 → **再压 1.9s** 才 task-finished（实测服务端就爱压着）。
 
-    关键：卡顿期间的等待不该让收台音跟着等 —— 纯零攒够就该收尾。
+    关键：压着的这 1.9s 不该让收台音跟着等。判据是「`TRIM_END_GAP_S`(=1.0s) 无新帧 + 末帧安静」
+    （2026-10-15 起**不再看纯零** —— 长文本的分句处也有纯零，照那个判会把后半句整段丢掉），
+    所以这里 1.0s 后就该收尾（≈1.9s），而不是等到 2.8s 的 task-finished。
     """
     for raw in ws:
         ev = json.loads(raw)
@@ -240,7 +242,7 @@ def handler_stall(ws) -> None:
         ws.send(_mk(120, 0, amp=9000))                       # 纯语音帧
         time.sleep(0.9)                                       # ← 服务端压着不发
         ws.send(b"\x00\x00" * (RATE // 4))                    # 250ms 纯零尾帧
-        time.sleep(0.9)                                       # 还要再等一次才 task-finished
+        time.sleep(1.9)                                       # 压着不发（> GAP 阈值，才算「真尾」）
         ws.send(json.dumps({"header": {"event": "task-finished", "task_id": "x"}}))
         return
 
@@ -255,7 +257,7 @@ parts2 = list(tts.synthesize_stream("x", voice="v", model="qwen-audio-3.0-tts-fl
                                     timeout=15.0))
 elapsed = time.monotonic() - t_start
 joined2 = b"".join(parts2)
-check(f"收尾没有等服务端第二次卡顿（未满 1.6s，实测 {elapsed:.2f}s）", elapsed < 1.55)
+check(f"收尾没等服务端压完的 1.9s（≈1.9s 就该收，实测 {elapsed:.2f}s）", elapsed < 2.4)
 check("仍保留语音 + 少量余量", 120 <= _ms(joined2) <= 220)
 
 # ---------- 汇总 ----------
