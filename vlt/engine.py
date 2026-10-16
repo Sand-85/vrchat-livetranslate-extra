@@ -26,6 +26,7 @@ from . import platform
 from .platform.audio import MixedAudioSource
 from .platform.base import LoopbackTarget
 from .output.chatbox import Chatbox, TokenBucket
+from .output.overlay import DegradedNoteRelay
 from .output.level_match import LevelConfig, LevelMatcher, block_db, format_db
 from .output.level_match import MODE_OFF as LEVEL_MODE_OFF
 from .output.merger import Merger
@@ -181,7 +182,8 @@ INPUT_GATE_DEFAULT_ENABLED = True
 INPUT_GATE_DEFAULT_DB = -50.0          # 2026-10-07：-45 → -50（更宽松 = 更早开闸；代价是更易收环境噪声）
 INPUT_GATE_DEFAULT_HOLD_MS = 500.0     # 超阈值后，回落多久内仍继续送（防句中断裂）
 INPUT_GATE_DEFAULT_PREROLL_MS = 300    # 开闸时补发的、越阈值之前的音频（防丢句首）
-# ↑ 2026-10-07：250 → 300（与更宽松的门限配套，保证句首辅音更稳）
+# ↑ 2026-10-07：250 → 300（与更宽松的门限配套，保证句首辅音更稳）—— **本仓库保留我们的校准值**
+INPUT_GATE_DEFAULT_TAIL_MS = 600.0     # 关闸时补发的等长数字静音（毫秒）：给服务端一个明确的「停顿」（上游 #105）
 INPUT_GATE_MIN_DB = -70.0
 INPUT_GATE_MAX_DB = -10.0
 LEVEL_FLOOR_DB = -120.0                # 电平下限（纯数字静音时用它，避免 log10(0)）
@@ -393,7 +395,12 @@ class _LevelGate:
       说话句中的停顿、句尾渐弱不会被切碎（默认 500ms）。
     - **preroll**：开闸时把越阈值之前的一小段（默认 250ms）补上 ——
       句首辅音/起音不丢，否则识别会掉字。
-    - 只**暂停上送**，不改写、不伪造音频（与服务端 turn_detection 的节奏假设一致）。
+    - **tail**：关闸时先补一小段**等长数字静音**（默认 600ms）再停 —— 上送流是一条
+      **时间轴**，只在轴上挖洞（什么也不发）会同时坏两件事：① 服务端 turn_detection
+      收不到「停顿」就永远不给这一轮收尾（实测有一轮拖到 196.7s，译文要等下一次长静音
+      才吐）；② 服务端把不相邻的两段语音当成同一轮连着听，ASR 会串出乱句。
+      补静音=明确给出停顿、保住时间轴；只补一小段是因为静音占比一高模型容易滑进
+      repeat 输出（麦克风腿就是这样被 `_SilenceGate` 闸住的），600ms 够触发一次收尾。
 
     与 `_SilenceGate` 的关系：职责不同、串联工作。本闸门治「小声」（用户要的过滤），
     静音闸门治「长时间真静音」（防服务端 repeat 掉线）。本闸门拦掉的块不会进入
@@ -401,11 +408,12 @@ class _LevelGate:
     """
 
     def __init__(self, enabled: bool, threshold_db: float, hold_ms: float,
-                 preroll_ms: int) -> None:
+                 preroll_ms: int, tail_ms: float = INPUT_GATE_DEFAULT_TAIL_MS) -> None:
         self.enabled = enabled
         self.threshold_db = threshold_db
         self.hold_ms = hold_ms
         self.preroll_ms = preroll_ms
+        self.tail_ms = max(0.0, float(tail_ms))   # 0 = 关掉补静音（回到「只停送」的旧行为）
         self.is_open = False                 # 当前是否在上送（开闸）
         self._last_loud_ts: float | None = None
         self._preroll: deque[tuple[bytes, float]] = deque()
@@ -414,6 +422,7 @@ class _LevelGate:
         self.dropped_chunks = 0              # 累计拦截（未上送）的块数
         self.opened = 0                      # 开闸次数
         self.replay_count = 0                # 补发 preroll 的次数
+        self.tail_chunks = 0                 # 累计补发的数字静音块数（关闸时那一下）
 
     def feed(self, chunk: bytes, *, now: float, dur_s: float) -> list[bytes]:
         """返回本次真正要上送的块序列（0..N 块；N>1 = 开闸补发 preroll 的情形）。"""
@@ -444,12 +453,32 @@ class _LevelGate:
             if held:
                 return [chunk]              # hold 期内继续送：句中的停顿不切碎
             self.is_open = False
+            tail = self._silence_tail(len(chunk))
+            self.tail_chunks += len(tail)
+            self.dropped_chunks += 1
+            self._remember(chunk, dur_s)
             print(f"[gate] 输入门限：已回落 {self.hold_ms:g}ms 低于门限 "
                   f"{self.threshold_db:g} dBFS（当前 {db:.1f}）→ 暂停上送"
-                  f"（累计已拦截 {self.dropped_chunks} 块）", flush=True)
+                  f"（并补发 {len(tail)} 块数字静音 ≈{self.tail_ms:g}ms，"
+                  f"让服务端收到停顿、及时给这一轮收尾；累计已拦截 {self.dropped_chunks} 块）",
+                  flush=True)
+            return tail
         self.dropped_chunks += 1
         self._remember(chunk, dur_s)
         return []
+
+    def _silence_tail(self, nbytes: int) -> list[bytes]:
+        """关闸那一下补的**等长数字静音**（块数 = tail_ms / 单块时长，至少 1 块）。
+
+        块长必须与采集块一致：服务端按时间轴对齐，发不等长的块会把它自己的断句节奏带偏。
+        `tail_ms=0` 或空块 → 不补（回到「只停送」的旧行为）。
+        """
+        if self.tail_ms <= 0 or nbytes <= 0:
+            return []
+        block_ms = nbytes / 2 / 16000.0 * 1000.0        # 16k 单声道 s16le：2 字节/样本
+        if block_ms <= 0:
+            return []
+        return [b"\x00" * nbytes] * max(1, int(round(self.tail_ms / block_ms)))
 
     def _remember(self, chunk: bytes, dur_s: float) -> None:
         if self.preroll_ms <= 0:
@@ -678,9 +707,10 @@ class Engine:
         self._chatbox: Chatbox | None = None
         self._merger: Merger | None = None
         self._overlay: Any | None = None
-        # 上一次已上报给界面的「手腕屏降级说明」（None = 正常）。见 _relay_overlay_note：
-        # 有变化才转发一次，避免每 0.3s 刷屏。
-        self._overlay_note_seen: str | None = None
+        # 「手腕屏降级说明」的转发（只在**变化**时推状态栏；每帧都推会刷屏，且状态栏会被
+        # 后续消息立刻覆盖）。判重与 GUI 那条 tick **共用** `DegradedNoteRelay` ——
+        # 分开写必然漂移（GUI 走的不是这条 `_pump_loop`，见 `vlt/output/overlay.py` 里那段说明）。
+        self._note_relay = DegradedNoteRelay()
         self._virtualmic: VirtualMic | None = None
         # 通联开关音（每句开头 on / 结尾 off）：缓存**未加增益**的原始波形 ——
         # 增益每次出声按 config 现值再乘，所以调 `sfx_gain` **不用重启**。
@@ -1636,13 +1666,12 @@ class Engine:
 
         手腕屏后端（Windows / Linux 两个后端）**可选**提供这个属性；有变化才转发一次 ——
         用户关心的是「面板为什么偶尔不刷新」，只打日志的话他永远看不到（禁静默降级）。
+        判重本身在 `DegradedNoteRelay` 里（GUI 那条 tick 用的是**同一个**类，见其 docstring）。
+
+        ⚠️ 只覆盖 CLI / `--demo` 那条路：GUI 下 `Engine._overlay` 恒为 None（手腕屏由界面持有），
+        所以 GUI 的降级说明由 `gui_chat.poll` 里那一跳负责推 —— 两处都必须在。
         """
-        note = getattr(self._overlay, "degraded_note", None)
-        if note == self._overlay_note_seen:
-            return
-        self._overlay_note_seen = note
-        if note:
-            self._events.on_status("warn", note)
+        self._note_relay.relay(self._overlay, self._events.on_status)
 
     async def _feed_audio(self) -> None:
         if self._source.startswith("pcm:"):
@@ -2302,7 +2331,7 @@ class Engine:
             lines.append(f"[diag] 输入门限（loopback）：门限 {ig.threshold_db:g} dBFS | "
                          f"当前{'上送中' if ig.is_open else '拦截中'} | "
                          f"已拦截 {ig.dropped_chunks} 块 | 开闸 {ig.opened} 次"
-                         f"（补发 preroll {ig.replay_count} 次）| "
+                         f"（补发 preroll {ig.replay_count} 次 / 关闸补静音 {ig.tail_chunks} 块）| "
                          f"最近一块电平 {ig.level_db:.1f} dBFS")
         if self._repeat_dropped:
             lines.append(f"[diag] 本地 repeat 抑制：已丢弃 {self._repeat_dropped} 条重复输出"
@@ -2432,7 +2461,8 @@ def _gate_tail(gate: "_LevelGate | None") -> str:
     """「采集结束」行上的输入门限小结（两条腿共用一处口径，别各写一遍）。"""
     if gate is not None and gate.enabled and (gate.dropped_chunks or gate.opened):
         return (f"｜输入门限（{gate.threshold_db:g} dBFS）：拦截 {gate.dropped_chunks} 块、"
-                f"开闸 {gate.opened} 次")
+                f"开闸 {gate.opened} 次、关闸补静音 {gate.tail_chunks} 块"
+                f"（{gate.tail_ms:g}ms/次）")
     return ""
 
 

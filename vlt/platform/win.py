@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from .audio import QueueAudioSource
+from . import first_openable_font
 from .base import PA_LOCK, AudioSource, LoopbackTarget
 
 log = logging.getLogger(__name__)
@@ -246,11 +247,50 @@ def find_thai_font() -> str | None:
     与 `find_cjk_font()` 是**两条独立**的探测：CJK 字体（雅黑等）不含泰文字形，
     泰文字体（Leelawadee UI 等）不含中日韩字形 —— 混排时必须按书写系统切 run、
     各用各的字体画，否则会出豆腐块。
+
+    候选逐份**打开校验**（`first_openable_font`）：路径存在但 Pillow 打不开的候选会被跳过。
     """
-    for cand in _THAI_FONT_CANDIDATES:
-        if Path(cand).exists():
-            return cand
-    return None
+    return first_openable_font(_THAI_FONT_CANDIDATES)
+
+
+# 韩文字体候选（按优先级）。
+#
+# ⚠️ **不能复用 CJK 字体**：与泰文同因。实测 `C:/Windows/Fonts/msyh.ttc`（微软雅黑，
+# 本项目默认 CJK 字体）**不含韩文字形** —— 用 PIL 渲染 `안녕하세요`，位图与渲染
+# 「私有区缺字位 U+E000 × 5」的位图**逐字节完全相同**（= 豆腐块，用户 2026-10 报的
+# 「韩语显示成方框」就是这个）。所以韩语也要走独立探测 + 按书写系统切 run 渲染。
+#
+# 候选顺序：
+#   1. Malgun Gothic（`malgun.ttf`）—— Windows Vista+ 自带的韩文 UI 字体（实测中文 Win11
+#      上也存在，即**不装韩文语言包也有**），观感最好；
+#   2. Malgun Gothic Semilight / 굴림 / 바탕 —— 굴림・바탕 属「韩文补充字体」可选组件，
+#      装了才在，作后备；
+#   3. Noto Sans KR / Noto Sans CJK —— 用户自己装过 Noto 字体族的话；
+#   4. Arial Unicode MS（老版 Office 会装，含韩文音节）。
+# 一个都没有时返回 None，由调用方降级并留痕（`overlay.resolve_korean_font_path` 先试
+# 用户配置的字体，再回落到 CJK 字体 → 韩文出豆腐块 + 打一行告警，禁静默降级）。
+_KOREAN_FONT_CANDIDATES = (
+    "C:/Windows/Fonts/malgun.ttf",       # Malgun Gothic（韩文 UI 字体，Vista+ 自带）
+    "C:/Windows/Fonts/malgunsl.ttf",     # Malgun Gothic Semilight
+    "C:/Windows/Fonts/gulim.ttc",        # 굴림（韩文补充字体，可选组件）
+    "C:/Windows/Fonts/batang.ttc",       # 바탕
+    "C:/Windows/Fonts/NotoSansKR-Regular.otf",
+    "C:/Windows/Fonts/NotoSansKR-VF.ttf",
+    "C:/Windows/Fonts/NotoSansCJK-Regular.ttc",   # 装了 Noto CJK 的话（该族含韩文）
+    "C:/Windows/Fonts/ARIALUNI.TTF",     # Arial Unicode MS（老版 Office 会装）
+)
+
+
+def find_korean_font() -> str | None:
+    """找一个含韩文字形的字体文件路径；找不到返回 None（由调用方回落）。
+
+    与 `find_cjk_font()` / `find_thai_font()` 是**三条独立**的探测：CJK 字体不含韩文与泰文，
+    韩文字体（Malgun Gothic 等）不含中日文字形 —— 混排时必须按书写系统切 run、各用各的字体画。
+
+    候选逐份**打开校验**（`first_openable_font`）：路径存在但 Pillow 打不开的候选会被跳过，
+    免得把坏路径交给上层变成「静默回落 = 一排豆腐块」。
+    """
+    return first_openable_font(_KOREAN_FONT_CANDIDATES)
 
 
 # ---------------------------------------------------------------- 界面语言

@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,8 @@ IS_LINUX = sys.platform.startswith("linux")
 __all__ = [
     "IS_WINDOWS", "IS_LINUX",
     "backend", "device_backend",
-    "child_env", "open_path", "find_cjk_font", "find_thai_font", "detect_ui_language",
+    "child_env", "open_path", "find_cjk_font", "find_thai_font", "find_korean_font",
+    "first_openable_font", "detect_ui_language",
     # 桌面叠加窗（issue #11）：缺失实现的平台会拿到下面的安全默认值
     "desktop_window_backend", "find_game_window", "window_client_rect", "is_window",
     "set_click_through", "set_tool_window", "set_window_shape",
@@ -265,6 +267,31 @@ def find_cjk_font() -> str | None:
     return backend().find_cjk_font()
 
 
+def first_openable_font(candidates: Iterable[str]) -> str | None:
+    """按序返回第一份**真能打开**的字体文件（不存在 / Pillow 打不开的候选直接跳过）。
+
+    为什么这一步放在平台层：字体候选表要么来自 `fc-list`（Linux，它给的只是**扫描顺序**，
+    不是最佳匹配 —— 实测可能是位图字体，Pillow 打不开），要么是固定路径表（Windows，
+    可能被用户删过）。把一个打不开的路径交给上层，症状是「静默回落主字体 = 一排豆腐块」；
+    在候选表里多试一份更便宜，也顺便让上层的降级留痕说的是真原因。
+
+    ⚠️ 「这份字体是否**真含目标书写系统**的字形」不在这里判 —— 那需要渲染侧的样本字符，
+    见 `vlt/output/overlay.py::font_covers`（判据：渲染样本 vs 渲染缺字位，位图相同就是没有）。
+    本函数只保证「能交给 Pillow 开」，不保证「能画那门语言」。
+    """
+    from PIL import ImageFont
+    for cand in candidates or ():
+        path = (cand or "").strip()
+        if not path or not Path(path).exists():
+            continue
+        try:
+            ImageFont.truetype(path, 16)
+        except Exception:  # noqa: BLE001 — 打不开就试下一个候选
+            continue
+        return path
+    return None
+
+
 def find_thai_font() -> str | None:
     """找一个含泰文字形的字体文件路径；找不到返回 None（由调用方回落）。
 
@@ -273,9 +300,22 @@ def find_thai_font() -> str | None:
     混排时必须按书写系统切 run、各用各的字体画，否则会出豆腐块。
 
     Windows 侧在 `win.py` 的 `_THAI_FONT_CANDIDATES`（LeelawUI.ttf → tahoma.ttf → …），
-    Linux 侧在 `linux.py` 用 `fc-match "Noto Sans Thai:lang=th"` + 已知路径兜底。
+    Linux 侧在 `linux.py` 用 `fc-list :lang=th` + 已知路径兜底。
     """
     return backend().find_thai_font()
+
+
+def find_korean_font() -> str | None:
+    """找一个含韩文字形的字体文件路径；找不到返回 None（由调用方回落）。
+
+    与 `find_cjk_font()` / `find_thai_font()` 是**三条独立**的探测：CJK 字体不一定含韩文字形
+    （Windows 的默认 CJK 字体 msyh.ttc 实测**不含** → 韩文全是方框，用户报过的现象），
+    韩文字体（Malgun Gothic 等）不含中日文字形 —— 混排时必须按书写系统切 run、各用各的字体画。
+
+    Windows 侧在 `win.py` 的 `_KOREAN_FONT_CANDIDATES`（malgun.ttf → gulim.ttc → …），
+    Linux 侧在 `linux.py` 用 `fc-list :lang=ko` + 已知路径兜底。
+    """
+    return backend().find_korean_font()
 
 
 def detect_ui_language() -> str:

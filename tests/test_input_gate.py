@@ -9,8 +9,10 @@ VRChat 把人声混成**一路**输出，远处玩家声音小、本来就听不
 三条「不切坏句子」的保证，每条都有用例守着：
 
 ① **hold**：超阈值后回落 500ms 内仍继续送 —— 说话句中的停顿、句尾渐弱不被切碎；
-② **preroll**：开闸时补发越阈值之前的 300ms —— 句首辅音/起音不丢；
-③ **只作用于 loopback**：麦克风腿（自己说话）绝不走这个门限（接线用例守着）。
+② **preroll**：开闸时补发越阈值之前的 300ms —— 句首辅音/起音不丢（**本仓库保留我们的校准值**）；
+③ **tail**：关闸时补发 600ms **等长数字静音** —— 服务端要看见「停顿」才会给这一轮收尾
+   （不发=在时间轴上挖洞，实测有轮拖到 196.7s；静音只补这一次，不把静音灌成常态）；
+④ **只作用于 loopback**：麦克风腿（自己说话）绝不走这个门限（接线用例守着）。
 
 已知代价（写在用例里，不遮）：远处小声的人说完、近处的人紧接着开口时，
 小声尾巴的最近 300ms 会被当作句首 preroll 补发一次 —— 该长度不足以成句，
@@ -189,7 +191,7 @@ def test_gate_opens_and_replays_preroll_in_order() -> None:
 
 
 def test_hold_keeps_hold_of_mid_sentence_dip() -> None:
-    """hold：句中停顿/渐弱（< hold 时长）仍继续送；超过 hold 才拦。"""
+    """hold：句中停顿/渐弱（< hold 时长）仍继续送；超过 hold 才拦（拦时补一段静音）。"""
     from vlt.engine import _LevelGate
 
     g = _LevelGate(enabled=True, threshold_db=-45.0, hold_ms=500.0, preroll_ms=250)
@@ -199,9 +201,60 @@ def test_hold_keeps_hold_of_mid_sentence_dip() -> None:
     assert g.feed(dip, now=0.2, dur_s=CHUNK) == [dip], "hold 期内（0.2s）不该停送"
     assert g.is_open
     assert g.feed(dip, now=0.4, dur_s=CHUNK) == [dip], "hold 期内（0.4s）不该停送"
-    assert g.feed(dip, now=0.6, dur_s=CHUNK) == [], "超过 hold（0.6s）后必须停送"
+    tail = g.feed(dip, now=0.6, dur_s=CHUNK)      # 超过 hold → 收闸
     assert not g.is_open
-    print("  hold 保住句中停顿、超时后收闸 OK")
+    assert tail and all(len(c) == len(dip) and not any(c) for c in tail), \
+        "收闸那一下应补等长数字静音（见 test_close_emits_digital_silence_tail_once）"
+    print("  hold 保住句中停顿、超时后收闸（补静音）OK")
+
+
+def test_close_emits_digital_silence_tail_once() -> None:
+    """★ 关闸那一下必须补**等长数字静音**（而不是什么都不发）—— 服务端靠它收尾。
+
+    治什么：上送流是一条时间轴，只在轴上挖洞（什么也不发）会让服务端 turn_detection
+    永远等不到停顿 —— 实测有一轮拖到 196.7s 才吐译文，而且它会把不相邻的两段语音当
+    同一轮连着听，ASR 串出乱句。补一小段静音 = 明确给出停顿、保住时间轴。
+
+    这条用例同时是**故障注入**：把关闸分支改回 `return []`（旧行为）它就会红。
+    """
+    from vlt.engine import _LevelGate
+
+    g = _LevelGate(enabled=True, threshold_db=-45.0, hold_ms=500.0, preroll_ms=250)
+    loud, quiet = _tone(3277, 1), _tone(100, 2)
+    assert g.feed(loud, now=0.0, dur_s=CHUNK) == [loud]
+    assert g.feed(quiet, now=0.2, dur_s=CHUNK) == [quiet], "hold 期内应照常送"
+    tail = g.feed(quiet, now=0.6, dur_s=CHUNK)            # 超 hold → 收闸
+    assert len(tail) == 6, f"600ms / 100ms 该补 6 块静音，实际 {len(tail)}"
+    assert all(len(c) == len(quiet) for c in tail), "补的静音块必须与采集块等长"
+    assert all(not any(c) for c in tail), "补发的必须是数字静音（全零）"
+    assert g.tail_chunks == 6 and g.is_open is False
+    assert g.feed(quiet, now=0.7, dur_s=CHUNK) == [], "静音只补关闸那一下，之后照旧不发"
+    assert g.tail_chunks == 6, f"不能每块都补静音：{g.tail_chunks}"
+    print("  关闸补 6 块等长数字静音（只补一次）OK")
+
+
+def test_no_tail_when_gate_never_opened() -> None:
+    """从没开过闸（一直小声）→ 一块都不补：静音尾巴只属于「刚说完话」那一下。"""
+    from vlt.engine import _LevelGate
+
+    g = _LevelGate(enabled=True, threshold_db=-45.0, hold_ms=500.0, preroll_ms=250)
+    for i in range(30):                                   # 3s 全程小声
+        assert g.feed(_tone(100, i), now=i * CHUNK, dur_s=CHUNK) == []
+    assert g.tail_chunks == 0 and g.opened == 0
+    print("  未开闸不会补静音 OK")
+
+
+def test_tail_ms_zero_restores_old_behaviour() -> None:
+    """tail_ms=0 → 回到「只停送」的旧行为（可关、可做对照实验）。"""
+    from vlt.engine import _LevelGate
+
+    g = _LevelGate(enabled=True, threshold_db=-45.0, hold_ms=500.0, preroll_ms=250, tail_ms=0)
+    loud, quiet = _tone(3277, 1), _tone(100, 2)
+    assert g.feed(loud, now=0.0, dur_s=CHUNK) == [loud]
+    assert g.feed(quiet, now=0.2, dur_s=CHUNK) == [quiet]
+    assert g.feed(quiet, now=0.6, dur_s=CHUNK) == [], "tail_ms=0 时关闸不该补静音"
+    assert g.tail_chunks == 0
+    print("  tail_ms=0 → 旧行为（只停送）OK")
 
 
 def test_gate_disabled_passes_everything() -> None:
@@ -395,6 +448,9 @@ if __name__ == "__main__":
     test_quiet_chunks_are_never_sent()
     test_gate_opens_and_replays_preroll_in_order()
     test_hold_keeps_hold_of_mid_sentence_dip()
+    test_close_emits_digital_silence_tail_once()
+    test_no_tail_when_gate_never_opened()
+    test_tail_ms_zero_restores_old_behaviour()
     test_gate_disabled_passes_everything()
     test_preroll_budget_and_zero()
     test_near_and_far_players_scenario()
