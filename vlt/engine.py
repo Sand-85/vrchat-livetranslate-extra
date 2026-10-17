@@ -752,6 +752,9 @@ class Engine:
         self._pump_task: asyncio.Task | None = None
 
         self._connect_ts: list[float] = []
+        # 重连退避台阶：**跨会话累计**（原先每次重连都从 2s 重新数 → 限流时 2s 一撞、永不升级）
+        self._reconnect_attempt = 0
+        self._session_started_at = 0.0        # 当前会话建起来的时刻（活得够久才把台阶归零）
 
         # ---- 本地 repeat 抑制（③）：模型连续吐高度雷同的最终译文 →
         # 不往 chatbox / 手腕屏刷（对方不该看到「对对对对对」），并主动重建会话 ----
@@ -1451,6 +1454,7 @@ class Engine:
                   flush=True)
 
     async def _build_and_run(self) -> None:
+        self._reconnect_attempt = 0           # 用户手动重开 = 新的一页（别继承上次风暴的台阶）
         scfg = self._session_cfg()
 
         # 宿主 + 线路必须留痕：换线路排查时第一眼要看它（describe 内部对 host 解析失败会降级，
@@ -1617,6 +1621,7 @@ class Engine:
             await asyncio.sleep(wait)
 
         self._session = create_session(scfg)
+        self._session_started_at = time.monotonic()
         # 新会话 = 新的一页：repeat 抑制状态清零（上一段的重复历史不带过来）
         self._repeat_suppressed = False
         self._repeat_dropped = 0
@@ -2365,12 +2370,30 @@ class Engine:
         await self._create_session(scfg)
 
     async def _reconnect_loop(self, reason: str) -> None:
-        backoff = [float(x) for x in self._cfg.session_base.get("reconnect_backoff", [2, 5, 10, 30])]
-        attempt = 0
+        # 「限流」与「普通断开」走两套台阶：限流时 2s 一撞就是在续窗口（真机 1007 风暴的成因）。
+        detail = str(reason or "")
+        try:
+            detail += " " + str(getattr(self._session, "fail_reason", "") or "")
+        except Exception:                                        # noqa: BLE001
+            pass
+        limited = _is_rate_limited(detail)
+        base = self._cfg.session_base
+        ladder = (base.get("ratelimit_backoff", [30, 60, 120]) if limited
+                  else base.get("reconnect_backoff", [2, 5, 10, 30]))
+        backoff = [float(x) for x in ladder]
+        # 上一个会话活得够久（≥60s）说明连接本来是好的 → 台阶归零；否则继续累计（风暴里必须升级）
+        lived = (time.monotonic() - self._session_started_at) if self._session_started_at else 0.0
+        if lived >= 60.0:
+            self._reconnect_attempt = 0
         while not self._stopping:
-            wait = backoff[min(attempt, len(backoff) - 1)]
-            attempt += 1
-            msg = f"连接断开（{reason}）→ {wait:.0f}s 后重连（第 {attempt} 次）"
+            wait = backoff[min(self._reconnect_attempt, len(backoff) - 1)]
+            self._reconnect_attempt += 1
+            attempt = self._reconnect_attempt
+            if limited:
+                msg = (f"服务端限流：{wait:.0f}s 后再试（第 {attempt} 次）"
+                       f" —— 这段时间别反复切语言/重开，会继续续这个窗口")
+            else:
+                msg = f"连接断开（{reason}）→ {wait:.0f}s 后重连（第 {attempt} 次）"
             self._events.on_status("warn", msg)
             print(f"[session] ⚠️ {msg}", flush=True)
             await asyncio.sleep(wait)
@@ -2895,3 +2918,15 @@ def list_devices() -> None:
         if d["max_output_channels"] > 0:
             print(f"  {idx_of(d, i):3d} | out={d['max_output_channels']} | "
                   f"{int(d['default_samplerate'])}Hz | {d['name']}")
+
+
+# 服务端「请求太密」的几种说法（实测 2026-10-17：`1007 (invalid frame payload data) Requests rate
+# limit exceeded`）。命中就走**限流退避**，别拿 2s 的常规台阶去续这个窗口 —— 那会把用户看到的
+# 「某个语言方向彻底没声」变成常态。
+_RATE_LIMIT_HINTS = ("rate limit", "too many requests", "1007", "429")
+
+
+def _is_rate_limited(text: str) -> bool:
+    """这句断开原因是不是「限流」。纯函数，用例可以直接打表。"""
+    t = (text or "").lower()
+    return any(h in t for h in _RATE_LIMIT_HINTS)
