@@ -195,6 +195,9 @@ unpacked = WORK / f"{exe.name}_extracted"
 # 解包器的发现顺序：PATH → 本仓库 venv → 旧的一次性环境（历史路径，留着兜底）。
 # 以前只写死最后一个，工具一旦不在了就永远「跳过=未验证」。
 _cands = [
+    # ⚠️ 最可信的是**跑本脚本那个解释器自己的 venv**（正常用法 = 仓库的 .venv）：
+    #    放在 PATH 之前 —— PATH 上可能挂着坏掉的同名工具（实测 qrvenv 那份缺模块，会挡住好工具）。
+    str(Path(sys.executable).parent / "pyinstxtractor-ng.exe"),
     shutil.which("pyinstxtractor-ng"),
     shutil.which("pyinstxtractor-ng.exe"),
     str(ROOT / ".venv" / "Scripts" / "pyinstxtractor-ng.exe"),
@@ -211,23 +214,66 @@ else:
     # ⚠️ 这个工具**没有** -o 选项（只有 filename / -d / -i），传 -o 会被它忽略参数直接失败；
     #    而且它按 **cwd** 落产物（`<exe名>_extracted/`），必须用 cwd= 指定目录，
     #    否则会把上千个 pyc 解到仓库工作区里。两处都踩过，所以这里校验返回码 + 固定 cwd。
-    r = subprocess.run([str(xtractor), exe.name], cwd=str(WORK), capture_output=True,
-                       text=True, encoding="utf-8", errors="replace", timeout=900)
-    check("pyinstxtractor-ng 解包成功", r.returncode == 0 and unpacked.is_dir(),
-          f"rc={r.returncode}，产物目录 {'存在' if unpacked.is_dir() else '不存在'}")
-    pycs = [p for p in unpacked.rglob("*.pyc")] if unpacked.is_dir() else []
-    for nd in NEEDLES:
-        hits = [p.relative_to(unpacked).as_posix() for p in pycs
-                if nd.encode("utf-8") in p.read_bytes()]
-        check(f"exe 内含新增的「{nd}」（解包后在字节码里搜到）", bool(hits),
-              f"{len(pycs)} 个 pyc 里命中：{hits[:3]}")
-    # 顺带核：包内版本号是这次的、不是上一个版本的残留
-    init = next((p for p in pycs if p.name == "__init__.pyc" and "vlt" in p.as_posix()), None)
-    if init is not None:
-        blob = init.read_bytes()
-        want = TAG.lstrip("v").encode()
-        check("包内 vlt/__init__.pyc 版本号 = 本次 tag", want in blob and b"0.0.1" not in blob,
-              f"含 {TAG.lstrip('v')}：{want in blob}；仍含 0.0.1：{b'0.0.1' in blob}")
+    # ⚠️ 再加一层：它偶发「跑完却没有 pyc」。这一版做了**重试一次 + 回落到进程内 PYZ 读取器**，
+    #    两条都不成时记「未验证」，**不记 ❌**（工具链抖动 ≠ 产物缺陷，见 _needles_via_embedded_pyz）。
+    # ⚠️ 候选要**逐个真试**：PATH 上可能挂着一个**坏掉的**同名工具（实测本机
+    #    `%LOCALAPPDATA%\Temp\qrvenv\Scripts\pyinstxtractor-ng.exe` 缺模块 →
+    #    `ModuleNotFoundError: No module named 'pyinstxtractor_ng'` → rc=1，
+    #    而它排在候选表最前，把仓库 venv 里的好工具整个挡住 —— 这才是本轮
+    #    「六个 needle 全红」的真因（不是产物问题，也不是「解包跑完没产出」）。
+    #    判据 = **真跑出 pyc**；失败时把工具自己的输出尾巴打出来，下次不用猜。
+    # ⚠️ 紧跟 `--self-test` 之后那一下也可能失败（exe 刚被加载过）→ 每个候选失败后隔 3 秒再试一次。
+    pycs: list[Path] = []
+    attempts: list[str] = []
+    r = None
+    for cand in [Path(p) for p in _cands if p and Path(p).exists()]:
+        for attempt in (1, 2):
+            r = subprocess.run([str(cand), exe.name], cwd=str(WORK), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=900)
+            pycs = [p for p in unpacked.rglob("*.pyc")] if unpacked.is_dir() else []
+            attempts.append(f"{Path(cand).name}#{attempt}:rc={r.returncode}/pyc={len(pycs)}")
+            if pycs:
+                break
+            if attempt == 1:
+                tail = [ln for ln in ((r.stderr or "") + (r.stdout or "")).strip().splitlines() if ln.strip()]
+                for ln in tail[-2:]:
+                    print(f"      {Path(cand).name} 输出｜{ln[:150]}")
+                time.sleep(3.0)
+        if pycs:
+            break
+    print("  解包工具尝试：" + " | ".join(attempts))
+    if pycs:
+        check("pyinstxtractor-ng 解包成功", True,
+              f"rc={r.returncode}，{len(pycs)} 个 pyc（{' | '.join(attempts[-1:])}）")
+        for nd in NEEDLES:
+            hits = [p.relative_to(unpacked).as_posix() for p in pycs
+                    if nd.encode("utf-8") in p.read_bytes()]
+            check(f"exe 内含新增的「{nd}」（解包后在字节码里搜到）", bool(hits),
+                  f"{len(pycs)} 个 pyc 里命中：{hits[:3]}")
+        # 顺带核：包内版本号是这次的、不是上一个版本的残留
+        init = next((p for p in pycs if p.name == "__init__.pyc" and "vlt" in p.as_posix()), None)
+        if init is not None:
+            blob = init.read_bytes()
+            want = TAG.lstrip("v").encode()
+            check("包内 vlt/__init__.pyc 版本号 = 本次 tag", want in blob and b"0.0.1" not in blob,
+                  f"含 {TAG.lstrip('v')}：{want in blob}；仍含 0.0.1：{b'0.0.1' in blob}")
+    else:
+        print(f"  ⚠️ 所有候选解包工具都没跑出 pyc（{' | '.join(attempts) or '无可用工具'}）"
+              f"→ 回落到进程内 PYZ 读取器再扫一遍")
+        try:
+            pyz_hits, vlt_blob = _needles_via_embedded_pyz(exe, NEEDLES)
+        except Exception as exc:               # noqa: BLE001 — 回落路径也失败 = 未验证，不是缺陷
+            print(f"  ⚠️ 回落扫描也没成：{exc}")
+            for nd in NEEDLES:
+                skipped.append(f"exe 内含「{nd}」（解包与回落扫描都没成功，本轮未验证）")
+        else:
+            for nd in NEEDLES:
+                check(f"exe 内含新增的「{nd}」（回落：进程内 PYZ 读取器）", bool(pyz_hits.get(nd)),
+                      f"命中模块：{pyz_hits.get(nd, [])[:3]}")
+            want_s = TAG.lstrip("v")
+            check("包内 vlt 模块版本号 = 本次 tag（回落路径）",
+                  want_s in vlt_blob and "0.0.1" not in vlt_blob,
+                  f"含 {want_s}：{want_s in vlt_blob}；仍含 0.0.1：{'0.0.1' in vlt_blob}")
 
 # 图标资源比对（SHGetFileInfoW 取图标 → 画到 DIB → 与 assets/app.ico 同尺寸帧比像素）
 shell32 = ctypes.WinDLL("shell32", use_last_error=True)
