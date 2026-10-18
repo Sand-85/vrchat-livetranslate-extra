@@ -379,6 +379,17 @@ def _drain(gui, timeout: float = 5.0, quiet: float = 0.35, only=None) -> list[tu
     return out
 
 
+def _wait_played(n: int = 1, timeout: float = 3.0) -> None:
+    """等**后台播放线程**真的把 PLAYED 攒到 n 次（CI 比本机慢，`_drain` 只保证队列处理完）。
+
+    为什么要它：试听播放已挪到后台线程 —— 断言写在 `_drain()` 之后仍可能抢在播放线程之前执行
+    （2026-10-18 CI 实测：合成完成日志比断言晚 0.4s 才出现，于是「播放 0 次 ✗」）。
+    """
+    end = time.monotonic() + timeout
+    while time.monotonic() < end and len(PLAYED) < n:
+        time.sleep(0.02)
+
+
 def _status(gui) -> str:
     try:
         return gui._lab_status.cget("text")
@@ -510,6 +521,7 @@ def test_preview_uses_local_cache() -> bool:
             # ① 没缓存 → 合成一句（对应用户「预设的那几条音色」：它们没有创建时的预览音频）
             gui._on_lab_preview()
             _drain(gui)
+            _wait_played(1)                    # 播放是后台线程：等它真跑起来再断言
             voice = fake._voices[0].voice
             # 播放的是**裸 PCM 原样**（不是解码失败后的空字节）——这是「试听没声音」的回归锁
             cond = (len(fake.sampled) == 1 and fake.sampled[0][0] == voice
@@ -523,6 +535,7 @@ def test_preview_uses_local_cache() -> bool:
             PLAYED.clear()
             gui._on_lab_preview()
             _drain(gui)
+            _wait_played(1)
             cond = (len(fake.sampled) == 1
                     and PLAYED == [_tiny_raw()])
             print(f"  有缓存 → 合成仍 {len(fake.sampled)} 次、播放 {len(PLAYED)} 次  {'OK' if cond else '✗'}")
@@ -561,6 +574,7 @@ def test_recipe_audition_never_creates() -> bool:
             PLAYED.clear()
             gui._on_lab_recipe_preview()
             _drain(gui)
+            _wait_played(1)
             cond = (len(fake.sampled) == 1 and not fake.created
                     and fake.sampled[0][1] == "qwen3-tts-vd-2026-01-26" and bool(PLAYED))
             print(f"  账号里有 → 合成 {len(fake.sampled)} 次（模型 {fake.sampled[0][1] if fake.sampled else '—'}）"
