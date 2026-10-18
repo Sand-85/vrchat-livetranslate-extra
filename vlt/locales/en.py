@@ -676,4 +676,7 @@ STRINGS: dict[str, str] = {
     "麦克风 {mic} dBFS ｜ 译音 {tts} dBFS ｜ 增益 {gain} dB": "Mic {mic} dBFS | Translated {tts} dBFS | Gain {gain} dB",
     "译音音量已更新（逐句生效）": "Translated audio volume updated (applies per sentence)",
     "麦克风电平参考取不到 → 译音音量匹配回落固定增益 {db} dB": "Microphone level reference unavailable - translated volume matching falls back to fixed gain {db} dB",
+    "源语言与译入语言相同 → 本方向不翻译（已跳过连接）":
+        "Source and target language are the same — translation skipped "
+        "for this direction (no connection made)",
 }

@@ -32,6 +32,7 @@ from .output.level_match import MODE_OFF as LEVEL_MODE_OFF
 from .output.merger import Merger
 from .output.overlay import OverlayConfig
 from .output.virtualmic import VirtualMic, pick_output_device, resample_24k_mono_to_48k_stereo
+from .i18n import t as _i18n_t
 from .paths import APP_DIR, BUNDLE_DIR
 from .sfx import bound_to_current_voice as sfx_bound_to_voice, apply_gain as sfx_apply_gain, gain_of as sfx_gain_of
 from .sfx import load_pair as load_sfx_pair
@@ -1455,6 +1456,17 @@ class Engine:
 
     async def _build_and_run(self) -> None:
         self._reconnect_attempt = 0           # 用户手动重开 = 新的一页（别继承上次风暴的台阶）
+
+        # ★ 源语言 == 译入语言 → 这条腿**不该翻**。服务端只有「翻成某语言」、没有「不翻」的表达
+        #   （`_session_payload` 里那段注释：缺 translation 会被整体拒绝），同语言发下去 = 让模型
+        #   原样回吐：白花一次连接与 token，还把 repeat 那套病态（连续雷同译文 → 掐线重连）引出来。
+        #   打字腿另有同语种直通（`_async_send_text`），这里管的是语音腿：**直接不连**，并且明说。
+        _dir = self._cfg.directions.get(self._direction) or Direction()
+        if _dir.source_lang and _dir.target_lang and _dir.source_lang == _dir.target_lang:
+            msg = _i18n_t("源语言与译入语言相同 → 本方向不翻译（已跳过连接）")
+            self._events.on_status("info", msg)
+            print(f"[engine] {msg}", flush=True)
+            return
         scfg = self._session_cfg()
 
         # 宿主 + 线路必须留痕：换线路排查时第一眼要看它（describe 内部对 host 解析失败会降级，
