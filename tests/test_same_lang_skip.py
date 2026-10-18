@@ -38,6 +38,12 @@ class _Ev:
 class _Cfg:
     def __init__(self, d: Direction) -> None:
         self.directions = {"mine": d}
+        self.audio = {}
+        self.output = {}
+        self.session_base = {}
+        self.merger = {}
+        self.chatbox = {}
+        self.text_input = {}
 
 
 class _Sentinel(Exception):
@@ -51,7 +57,16 @@ def _engine(d: Direction) -> Engine:
     eng._cfg = _Cfg(d)
     eng._events = _Ev()
     eng._session = None
+    eng._sinks = set()                     # 同语种也要把输出面建起来（打字要用虚拟声卡 / chatbox）
+    eng._chatbox = None
+    eng._merger = None
+    eng._audio_sink = None
+    eng._virtualmic = None
+    eng._setup_virtualmic = lambda audio_cfg: None      # type: ignore[method-assign]
+    eng._audio_out_wanted = lambda: False               # type: ignore[method-assign]
+    eng._audio_out_override = None
     hits = {"session_cfg": 0, "create": 0}
+    eng._hits = hits
 
     def _session_cfg():                        # noqa: ANN202
         hits["session_cfg"] += 1
@@ -69,10 +84,12 @@ def _engine(d: Direction) -> Engine:
 def main() -> int:
     # A) 源 == 目标 → 直接返回，不建会话，状态栏明说
     eng = _engine(Direction(source_lang="ru", target_lang="ru"))
+    eng._stopping = True                       # 同语种会「保持活着等 stop()」→ 先置位让它立刻退出
     asyncio.run(eng._build_and_run())
     msgs = " | ".join(m for _, m in eng._events.msgs)
     check("同语言：没有建会话", eng._session is None)
     check("同语言：状态栏明说「不翻译」", "不翻译" in msgs)
+    check("同语言：没去碰会话配置（只跳过连接）", eng._hits["session_cfg"] == 0)
     check("同语言：提示级别是 info（不是 warn/error）",
           all(lv == "info" for lv, _ in eng._events.msgs))
 

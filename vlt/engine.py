@@ -1462,16 +1462,22 @@ class Engine:
         #   原样回吐：白花一次连接与 token，还把 repeat 那套病态（连续雷同译文 → 掐线重连）引出来。
         #   打字腿另有同语种直通（`_async_send_text`），这里管的是语音腿：**直接不连**，并且明说。
         _dir = self._cfg.directions.get(self._direction) or Direction()
-        if _dir.source_lang and _dir.target_lang and _dir.source_lang == _dir.target_lang:
+        # 源==目标 → 只跳过「连服务端」这一步，**腿要继续活着**：打字替代说话走的是
+        # 本地 MT 直通 + TTS → 虚拟声卡，不经过会话。早先这里直接 `return`，线程一结束
+        # `running` 就是 False → 打字被 `send_text()` 拒成「引擎还没就绪」（2026-10-18 真机）。
+        _same_lang = bool(_dir.source_lang and _dir.target_lang
+                          and _dir.source_lang == _dir.target_lang)
+        scfg = None
+        if _same_lang:
             msg = _i18n_t("源语言与译入语言相同 → 本方向不翻译（已跳过连接）")
             self._events.on_status("info", msg)
             print(f"[engine] {msg}", flush=True)
-            return
-        scfg = self._session_cfg()
+        else:
+            scfg = self._session_cfg()
 
-        # 宿主 + 线路必须留痕：换线路排查时第一眼要看它（describe 内部对 host 解析失败会降级，
-        # key 绝不出现）。
-        print(f"[net] {endpoints.describe(scfg.provider, scfg.base_url)}", flush=True)
+            # 宿主 + 线路必须留痕：换线路排查时第一眼要看它（describe 内部对 host 解析失败会降级，
+            # key 绝不出现）。
+            print(f"[net] {endpoints.describe(scfg.provider, scfg.base_url)}", flush=True)
 
         if "chatbox" in self._sinks and not self._chatbox_wanted:
             msg = ("chatbox 只发『我说的话』的译文"
@@ -1517,6 +1523,13 @@ class Engine:
             carry_over=bool(merger_cfg.get("carry_over", False)),
             max_chars=int(cb_cfg.get("max_chars", 144)),
         )
+
+        if scfg is None:
+            # 同语种：不连服务端，但本线程要一直活着（`Engine.running` = 线程还活着），
+            # 否则打字那条路会被 `send_text()` 判成「没在跑」。stop() 之后自然退出。
+            while not self._stopping:
+                await asyncio.sleep(0.2)
+            return
 
         await self._create_session(scfg)
 
