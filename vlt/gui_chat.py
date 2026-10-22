@@ -279,17 +279,20 @@ def send_typed(ctx: ChatCtx, engines: list, engine_dirs: list,
     text = ctx.text_var.get().strip()
     if not text:
         return
+    # `set_status_fn` 允许为 None（headless / 用例）：**不许因此抛** ——
+    # 上游 #113 的原始故障面就是这条路被 None 打崩（`'NoneType' object is not callable`）。
+    _status = set_status_fn or (lambda *_a, **_k: None)
     targets = [e for e, dirn in zip(engines, engine_dirs) if dirn == "mine"]
     if not targets:
-        set_status_fn("warn", t("打字替代的是麦克风 —— 先点「开始翻译」，"
-                                "且方向要含「我说」"))
+        _status("warn", t("打字替代的是麦克风 —— 先点「开始翻译」，"
+                          "且方向要含「我说」"))
         return
     sent = sum(1 for e in targets if e.send_text(text))
     if sent:
         ctx.text_var.set("")      # 清空：肉眼确认已发出
-        set_status_fn("info", t("打字已送出（{n} 字），翻译中…", n=len(text)))
+        _status("info", t("打字已送出（{n} 字），翻译中…", n=len(text)))
     else:
-        set_status_fn("warn", t("引擎还没就绪，稍后重试"))
+        _status("warn", t("引擎还没就绪，稍后重试"))
 
 
 # ================================================================ API 密钥

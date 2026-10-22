@@ -387,12 +387,7 @@ class MicProxy:
             th.join(timeout=2.0)
         self._thread = None
         if self._out_stream is not None:
-            try:
-                self._out_stream.stop()
-                self._out_stream.close()
-            except Exception:              # noqa: BLE001
-                pass
-            self._out_stream = None
+            self._close_out_stream()
 
     # ------------------------------------------------------------------ 输出设备
     def _pick_output_device(self):
@@ -460,6 +455,72 @@ class MicProxy:
         self._on_status("error", "[proxy] 打开虚拟声卡失败：{err}（其余功能不受影响）",
                         err=last_exc)
         return False
+
+    @property
+    def out_device_name(self) -> str:
+        """当前正在用的输出设备名（未打开时为空）。界面「译音输出=…」那行取的就是它。"""
+        return self._out_device[1] if self._out_device else ""
+
+    def _close_out_stream(self) -> None:
+        """关掉当前输出流（幂等、绝不抛）。"""
+        if self._out_stream is None:
+            return
+        try:
+            self._out_stream.stop()
+            self._out_stream.close()
+        except Exception:                  # noqa: BLE001
+            pass
+        self._out_stream = None
+        self._out_device = None
+
+    def reopen_output(self, device_name: str | None) -> bool:
+        """切换**译音输出**（虚拟声卡）设备 —— 设置页改设备后调这里（issue #111）。
+
+        为什么需要它：输出设备只在 `start()` 时解析一次，而设置页改「译音输出」只写
+        配置。不重开的话配置/界面都变了、声音还留在旧端点，用户只能重启程序，且界面
+        上没有任何提示。
+
+        只动输出流：麦克风采集线程与引擎手里的 `translated_sink` 都不受影响
+        （sink 是鸭子代理，`push` 转发到同一个代理实例）。失败时**换回旧端点**并返回
+        False，由调用方状态栏 + 日志各留一条（禁静默降级）。
+        """
+        new_name = device_name or ""
+        old = self._out_device
+        if not self._opened:
+            self._audio_cfg["device_name"] = new_name
+            return False                   # 没启动：配置即生效，下次 start() 用新设备
+        self._audio_cfg["device_name"] = new_name
+        picked = self._pick_output_device()
+        if picked is None:
+            self._on_status("warn", "[proxy] 切换译音输出失败：找不到设备 {dev}（保持旧端点）",
+                            dev=repr(new_name))
+            return False
+        idx, name, _rate, fallbacks = picked
+        if old is not None and old[0] == idx:
+            return True                    # 同一个设备：不重开（避免无谓静音）
+        self._close_out_stream()
+        if self._open_output(idx, name, fallbacks):
+            return True
+        if old is not None:                # 新设备打不开 → 换回旧端点
+            self._open_output(old[0], old[1], [])
+        return False
+
+    def _drain_translated(self, need: int) -> bytes:
+        """取一块「进游戏」的译音数据，并**同时**送给耳返 —— 唯一的耳返 tap 点。
+
+        为什么在这里而不是 `TranslatedSink.push()`：push 是 TTS 突发到达的入口，
+        一个 delta 常有几百 ms，一次性灌进只有 120ms 容量的监听缓冲会把**正在播的
+        句子截断**（真机症状：「上一句还没播完就开始播下一句」，而游戏那一路是对的）。
+        从播放侧 tap，耳返拿到的就是**实际发给虚拟声卡的那批字节、同一条时间轴**。
+
+        未起播 / 数据不足 → 补静音（既有语义），此时**不喂**耳返（别把静音堆进
+        监听缓冲，那只会让耳返凭空多出一段延迟）。
+        """
+        data = self._translated.drain_block(need) if self._translated is not None else None
+        if data is None:
+            return b"\x00" * need
+        self._monitor_push(data)
+        return data
 
     def _out_callback(self, outdata: bytearray, frames: int, time_info, status) -> None:
         global _OUT_PRIO_DONE
