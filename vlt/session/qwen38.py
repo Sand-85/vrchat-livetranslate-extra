@@ -108,6 +108,9 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         self._t_speech_start: float | None = None
         self._first_delta_ms: float | None = None
         self.first_delta_ms: float | None = None   # 对外暴露
+        # 断句延迟埋点（测试分支：给「说完→出字」留下可量化的日志）
+        self._t_stopped: float = 0.0
+        self._first_after_stop_ms: float | None = None
 
     # ------------------------------------------------------------ 生命周期
     async def start(self, on_text: TextHandler, on_audio: AudioHandler | None = None,
@@ -130,11 +133,35 @@ class QwenLiveTranslateSession(LiveTranslateSession):
                 raise RuntimeError(f"服务端拒绝会话：{json.dumps(first.get('error') or first, ensure_ascii=False)}")
         except asyncio.TimeoutError:
             pass
+        payload = self._session_payload()
         await self._ws.send(json.dumps({"event_id": "evt_update", "type": "session.update",
-                                        "session": self._session_payload()}))
+                                        "session": payload}))
+        td = (((payload.get("audio") or {}).get("input") or {}).get("turn_detection")
+              or payload.get("turn_detection") or {})
+        print(f"[session] 会话配置已下发：断句={td.get('type')}，"
+              f"静音断句={td.get('silence_duration_ms')}ms"
+              f" | 语言={self.cfg.source_lang or 'auto'}→{self.cfg.target_lang}"
+              f" | 音色={self.cfg.voice} | 模型={self.cfg.model}", flush=True)
         # 建「等 session.finished」的事件：必须在事件循环里建（close() 与接收循环共用）。
         self._finished_evt = asyncio.Event()
         self._recv_task = asyncio.create_task(self._recv_loop())
+
+    def turn_detection_payload(self) -> dict:
+        """服务端断句配置（实测数据见 `base.DEFAULT_VAD_SILENCE_MS` 上方注释）。
+
+        **固定 server_vad**：`speaker_detection`（老默认 / 旧诊断包的写法）实测
+        「说完→译文」2.5s，完全不填更是 4.0s，而 server_vad + 500ms 只要 0.5s。
+        本程序不消费模型的说话人标签（`speaker_detection` 的唯一附加能力），
+        因此丢掉它没有功能损失 —— 配置里写别的值一律按 server_vad 处理并留痕。
+        """
+        configured = (self.cfg.turn_detection or "").strip().lower()
+        if configured and configured != "server_vad":
+            print(f"[session] ⚠️ 配置 turn_detection={configured!r} 已废弃 → 按 server_vad "
+                  f"处理（实测 2.5~4.0s → 0.5s）", flush=True)
+        td: dict = {"type": "server_vad"}
+        if self.cfg.silence_duration_ms:
+            td["silence_duration_ms"] = int(self.cfg.silence_duration_ms)
+        return td
 
     def _session_payload(self) -> dict:
         """⚠️ 必须整体下发且必须含 translation（实测：缺任一必要字段会被整体拒绝）。"""
@@ -151,11 +178,11 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             session["input_audio_transcription"] = {"language": self.cfg.source_lang}
         if self.cfg.hotwords:
             session["translation"]["corpus"] = {"phrases": self.cfg.hotwords}
-        if self.cfg.turn_detection:
-            if self._gen == "38":
-                session["audio"] = {"input": {"turn_detection": {"type": self.cfg.turn_detection}}}
-            else:
-                session["turn_detection"] = {"type": self.cfg.turn_detection}
+        td = self.turn_detection_payload()
+        if self._gen == "38":
+            session["audio"] = {"input": {"turn_detection": td}}
+        else:
+            session["turn_detection"] = td
         return session
 
     async def send_audio(self, pcm16_16k: bytes) -> None:
@@ -359,6 +386,12 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             return
         if etype == "input_audio_buffer.speech_started":
             self._t_speech_start = time.perf_counter()
+            self._t_stopped = 0.0
+            self._first_after_stop_ms = None
+            return
+        if etype == "input_audio_buffer.speech_stopped":
+            self._t_stopped = time.perf_counter()
+            self._first_after_stop_ms = None
             return
         if etype == "response.created":
             self._buf.clear()
@@ -374,6 +407,8 @@ class QwenLiveTranslateSession(LiveTranslateSession):
                 self._emit(confirmed=final_text, pending="", is_final=True)
             else:
                 self._emit(confirmed="".join(self._buf), pending=pending, is_final=False)
+            if self._t_stopped and self._first_after_stop_ms is None:
+                self._first_after_stop_ms = (time.perf_counter() - self._t_stopped) * 1000
             return
 
         # --- 音频增量 ---
@@ -399,6 +434,13 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             usage = (ev.get("response") or {}).get("usage") or {}
             # 某些情况下没有 done 事件带全文，则用累加值兜底（重复终结由 _emit 去重）
             self._emit(confirmed="".join(self._buf), pending="", is_final=True)
+            if self._t_stopped:
+                done_ms = (time.perf_counter() - self._t_stopped) * 1000
+                first = self._first_after_stop_ms
+                print(f"[turn] 断句→首字 {'—' if first is None else f'{first:.0f}ms'}"
+                      f" | 断句→完成 {done_ms:.0f}ms | 终版 {len(''.join(self._buf))} 字",
+                      flush=True)
+                self._t_stopped = 0.0
             if self.on_usage is not None and usage:
                 self.on_usage(usage)
             self._src_buf = []
