@@ -155,18 +155,42 @@ def start(ctx: EngineCtx) -> bool:
 
     d = ctx.direction_var.get()
 
+    # 四个输出开关的实际布尔值：守卫拦人时一次性取齐。
+    # 守卫以前是**静默**的（上游 v0.12.2 用户日志里那次点击一行都没有），
+    # 出事只能靠猜他勾了什么 —— 现在任何一条拦截路径都必须留下这四个值和方向。
+    cb_on = bool(ctx.chatbox_var.get()) if ctx.chatbox_var else False
+    ov_on = bool(ctx.overlay_var.get()) if ctx.overlay_var else False
+    dt_on = bool(ctx.desktop_var.get()) if ctx.desktop_var else False
+    vm_on = bool(ctx.vmic_var.get()) if ctx.vmic_var else False
+    flags = f"chatbox={cb_on} overlay={ov_on} desktop={dt_on} vmic={vm_on} 方向={d}"
+
     sinks: set[str] = set()
-    if ctx.chatbox_var and ctx.chatbox_var.get():
+    if cb_on:
         sinks.add("chatbox")
-    if ctx.overlay_var and ctx.overlay_var.get():
+    if ov_on:
         sinks.add("overlay")
-    if ctx.desktop_var and ctx.desktop_var.get():
+    if dt_on:
         # "desktop" 只是界面层的标记（字幕窗由界面持有，引擎不认这个 sink），
         # 放在这里是为了让「只勾桌面字幕」也能通过下面的"至少选一个输出"检查。
         sinks.add("desktop")
+    # 译音输出（虚拟声卡）**也是一种输出**：只勾它、方向含「我说的话」时必须能开始。
+    # 旧写法不把它算进来 → 只想让对方听到译音、不要 chatbox / 字幕的用户被
+    # 「请至少选择一个输出」挡住，只能被迫再勾一个自己不要的输出（上游 v0.12.2 用户实测）。
+    # 方向只翻别人时译音本来就不会出声（下面 audio_warn 分支会把 want_audio 置 False），
+    # 所以只在方向含「我说的话」时才计为有效输出。
+    if vm_on and d in ("mine", "dual"):
+        sinks.add("voice")
     if not sinks:
+        if vm_on:
+            # 只勾了译音输出、但方向不含「我说的话」：说清「为什么不会出声、该怎么办」，
+            # 别丢一句含糊的「请至少选择一个输出」让人去猜（禁静默降级）。
+            msg = t("译音输出只对「我说的话」方向有效（当前方向只翻别人）→ 换个输出，"
+                    "或把方向改成「我说」／「双向同时」")
+        else:
+            msg = t("请至少选择一个输出")
+        print(f"[gui] ⚠️ 输出检查未通过，已拦下启动：{msg}（{flags}）", flush=True)
         if ctx.set_status_fn:
-            ctx.set_status_fn("warn", t("请至少选择一个输出"))
+            ctx.set_status_fn("warn", msg)
         return
 
     a = ctx.lang_pair.get("source", "")
