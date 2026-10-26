@@ -183,6 +183,15 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             session["audio"] = {"input": {"turn_detection": td}}
         else:
             session["turn_detection"] = td
+        # ⚠️ 3.8 的音色**必须**再写一份到 `audio.output.voice` —— 千问云 maas 线路
+        # （`maas.qianwenaiapi.com`，界面默认线路）只认这个字段：顶层 `voice` 会被原样回显在
+        # session.updated 里，但**完全不参与出音**，服务端永远用默认 `Tina`（上游 #117 实测：
+        # 顶层填不存在的音色 → 静默接受照常出音；audio.output.voice 填同一个 → 1007
+        # `Voice ... is not supported.`；换 Ethan → F0 中位 149Hz vs Tina 276Hz）。
+        # 老 dashscope 域名两处都认，所以「两处都写」是两条线路的公共安全交集。
+        # 必须放在上面 `session["audio"] = …` **之后**，否则会被覆盖。
+        if self._gen == "38" and self.cfg.voice:
+            session["audio"]["output"] = {"voice": self.cfg.voice}
         return session
 
     async def send_audio(self, pcm16_16k: bytes) -> None:
