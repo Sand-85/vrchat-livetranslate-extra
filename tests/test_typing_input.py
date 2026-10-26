@@ -82,6 +82,17 @@ def test_no_mine_leg_warns() -> bool:
     return eng.sent == [] and bool(st.box) and st.box[0][0] == "warn"
 
 
+def test_no_engine_message_differs_from_no_mine_leg() -> bool:
+    """没引擎 = 还没开始翻译；有引擎但方向不含「我说」= 方向选错了 —— 两句话不能说成一句（上游 #115）。"""
+    ctx1, st1 = _ctx(), _statuses()
+    send_typed(ctx1, [], [], st1.fn)                     # 一条腿都没有
+    ctx2, st2 = _ctx(), _statuses()
+    send_typed(ctx2, [_Eng()], ["theirs"], st2.fn)      # 有腿，但只有 theis 方向
+    m1 = st1.box[0][1] if st1.box else ""
+    m2 = st2.box[0][1] if st2.box else ""
+    return bool(m1) and bool(m2) and m1 != m2 and "我说" in m2 and "我说" not in m1
+
+
 def test_rejected_send_warns() -> bool:
     """引擎在跑但不收（例如同语种闸把腿停了那种）→ warn，不许静默。"""
     ctx, eng, st = _ctx(), _Eng(ok=False), _statuses()
@@ -157,6 +168,7 @@ def test_every_call_site_passes_four_args() -> bool:
 def main() -> int:
     check("有 mine 腿 → 送出 + 清空 + info", test_sends_to_mine_leg())
     check("没有 mine 腿 → warn 且不送", test_no_mine_leg_warns())
+    check("「没引擎」与「方向不含我说」文案不同", test_no_engine_message_differs_from_no_mine_leg())
     check("引擎不收 → warn（不静默）", test_rejected_send_warns())
     check("set_status_fn=None 也不崩", test_status_fn_none_is_safe())
     check("空白文本不送、不报状态", test_blank_text_ignored())

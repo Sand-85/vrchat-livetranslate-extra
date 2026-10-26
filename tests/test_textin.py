@@ -401,7 +401,8 @@ def test_gui_wiring() -> bool:
         gui._text_var.set("你好")
         gui._send_typed()
         msg = gui._status_label.cget("text")
-        cond = fake.got == [] and "麦克风" in msg
+        # 文案已按上游 #115 分因：有引擎但方向不含「我说」→ 明说「方向」；不再用「麦克风」那句
+        cond = fake.got == [] and "我说" in msg
         print(f"  无「我说」腿：引擎收到={fake.got} 状态={msg!r}  {'OK' if cond else '✗'}")
         ok &= cond
     finally:

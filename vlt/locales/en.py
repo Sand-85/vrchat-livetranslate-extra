@@ -108,6 +108,7 @@ STRINGS: dict[str, str] = {
         "No API key configured — click the \"API key ›\" button "
         "(top right) to add one before starting",
     "译音输出只对「我说的话」方向有效（当前方向只翻别人）→ 换个输出，或把方向改成「我说」／「双向同时」": "Voice output only works in the \"What I say\" direction (the current direction translates their speech only) → pick another output, or switch the direction to \"What I say\" / \"Both\"",
+    "打字只对「我说」方向有效 —— 当前方向不含「我说」": "Typing only works in the \"What I say\" direction — the current direction doesn't include it",
     "请至少选择一个输出": "Select at least one output",
     "chatbox 只发「我说的话」的译文（当前方向不含它）→ 本次 chatbox 不会输出；对方的译文看手腕屏／聊天区":
         "chatbox only carries translations of your own speech (not in the current "

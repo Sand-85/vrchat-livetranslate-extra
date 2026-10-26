@@ -275,23 +275,33 @@ def send_typed(ctx: ChatCtx, engines: list, engine_dirs: list,
                set_status_fn) -> None:
     """把输入框里的文字交给「我说」那条腿翻译并送出（下游与说话完全一致）。"""
     if ctx.text_entry is None or ctx.text_var is None:
+        # 真机上不该发生（输入行可见就一定有控件）；但绝不允许「按了没反应也没痕迹」。
+        print("[gui] 打字未发送：输入行控件不存在（text_entry / text_var 为空）", flush=True)
         return
     text = ctx.text_var.get().strip()
     if not text:
+        print("[gui] 打字未发送：输入框为空", flush=True)
         return
     # `set_status_fn` 允许为 None（headless / 用例）：**不许因此抛** ——
     # 上游 #113 的原始故障面就是这条路被 None 打崩（`'NoneType' object is not callable`）。
     _status = set_status_fn or (lambda *_a, **_k: None)
     targets = [e for e, dirn in zip(engines, engine_dirs) if dirn == "mine"]
     if not targets:
-        _status("warn", t("打字替代的是麦克风 —— 先点「开始翻译」，"
-                          "且方向要含「我说」"))
+        # 两种完全不同的原因必须分开说：没引擎 = 还没开始翻译；有引擎但方向不含
+        # 「我说」= 本次会话本来就不该有打字入口（旧文案一律叫人「先点开始翻译」，
+        # 方向选错时会把人指到错误的方向）。
+        print(f"[gui] 打字未发送：engines={len(engines)} dirs={list(engine_dirs)}（没有「我说」那条腿）",
+              flush=True)
+        _status("warn", t("打字只对「我说」方向有效 —— 当前方向不含「我说」") if engines
+                else t("引擎还没就绪，稍后重试"))
         return
     sent = sum(1 for e in targets if e.send_text(text))
     if sent:
         ctx.text_var.set("")      # 清空：肉眼确认已发出
         _status("info", t("打字已送出（{n} 字），翻译中…", n=len(text)))
     else:
+        print(f"[gui] 打字未发送：{len(targets)} 条「我说」腿都返回 False（引擎不在运行状态？）",
+              flush=True)
         _status("warn", t("引擎还没就绪，稍后重试"))
 
 
