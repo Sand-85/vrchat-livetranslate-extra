@@ -55,6 +55,8 @@ def voice_choices(current: str | None, catalog: tuple[str, ...]) -> list[str]:
 # ---------------------------------------------------------------------------
 CLONED_VOICES: dict[str, str] = {
     "qwen-tts-vc-MetroPolice-voice-20261003201838644-0a4b": "国民护卫队",
+    # 2026-11-12 用户自录音复刻（整段 26.73s 素材，Qwen-Audio-TTS 线）；显示名两边都用同一个英文名。
+    "qwen-audio-3.0-tts-flash-sandv13-fb265322a2764430bba8ed2eaa9fadd9": "clear_autoTT",
 }
 
 
