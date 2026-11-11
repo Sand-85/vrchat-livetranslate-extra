@@ -1,7 +1,7 @@
 {
   "版本": 1,
   "说明": "克隆预设的范本样本清单。应用每次启动会拉这份清单，比对本地（缓存或仓库副本）的 sha256，不一致就下载新的到本地缓存。改样本时请同步更新这里。",
-  "updated": "2026-10-11",
+  "updated": "2026-11-12",
   "samples": {
     "source_sample_v2.wav": {
       "sha256": "93c84fa33ccfd3c5f39cff648fb14bb387a78de1b2cb4568ca2861464f346756",
@@ -14,6 +14,12 @@
       "bytes": 757416,
       "seconds": 15.78,
       "note": "现役 MetroPolice 用的拼接样本（5 条朗读 · 24kHz 单声道 · 未加增益）"
+    },
+    "source_sample_clearautott_v1.wav": {
+      "sha256": "cb4484568ddd0ffdf837e2dfe957f97748d4bf3fb0951852ce263d823cf049d2",
+      "bytes": 1283150,
+      "seconds": 26.73,
+      "note": "clear_autoTT 用的整段自录素材（26.7s · 24kHz 单声道 · 未加工；中/日双语样本）"
     }
   }
 }
