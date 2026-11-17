@@ -20,6 +20,12 @@
       "bytes": 1283150,
       "seconds": 26.73,
       "note": "clear_autoTT 用的整段自录素材（26.7s · 24kHz 单声道 · 未加工；中/日双语样本）"
+    },
+    "source_sample_clearautott_v2.wav": {
+      "sha256": "95b2c7533dc48a02bbc5b63b638ef7364009e87c523e4a7bb7b7a1f0632aac30",
+      "bytes": 864044,
+      "seconds": 18.0,
+      "note": "clear_autoTT 现役素材：整段录音里挑的 8 个最平 2s 窗（段间 0.25s 静音 · 24kHz 单声道 · 未加工）"
     }
   }
 }

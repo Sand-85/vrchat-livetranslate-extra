@@ -780,16 +780,17 @@ BUILTIN_CLONE_PRESETS: tuple[ClonePreset, ...] = (
         key="clear_auto_tt",
         label="clear_autoTT",
         spec=(
-            "素材：用户本人自录 26.7 秒整段（未做任何增益／降噪／裁剪，只转成 24kHz 单声道 16bit）\n"
+            "素材：用户本人自录（整段 26.7s）里挑出**最平的 8 个 2 秒窗**，段间 0.25s 静音拼成 18.0s；\n"
+            "      未做任何增益／降噪／EQ（只转成 24kHz 单声道 16bit）\n"
             "内容：中文 + 日文日常口语各一段（同一人、同一设备、一次录完）\n"
-            "规格：24kHz · 单声道 · 16bit · 26.7 秒（复刻接口上限 60 秒）\n"
+            "规格：24kHz · 单声道 · 16bit · 18.0 秒（复刻接口上限 60 秒）\n"
             "复刻：model=voice-enrollment · action=create_voice · target_model=qwen-audio-3.0-tts-flash\n"
             "合成：同一 model；语速/音高按听感再调（本音色定稿是 rate 1.0 / pitch 1.0）\n"
             "注：素材由作者本人授权公开；照这份范本复刻得到的是**与你账号绑定**的独立音色，"
             "不会与作者共用同一条 voice id。"
         ),
-        sample_name="source_sample_clearautott_v1.wav",
-        sample_sha256="cb4484568ddd0ffdf837e2dfe957f97748d4bf3fb0951852ce263d823cf049d2",
+        sample_name="source_sample_clearautott_v2.wav",
+        sample_sha256="95b2c7533dc48a02bbc5b63b638ef7364009e87c523e4a7bb7b7a1f0632aac30",
         labels={},
         sfx=(),
     ),
